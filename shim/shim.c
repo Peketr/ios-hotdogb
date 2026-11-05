@@ -241,6 +241,7 @@ void shim_main(uintptr_t dtb)
 	}
 	reset();
 #endif
+	/* hotdogb: the scratch area is the end of rawdump, not userdata (ufs.c). */
 	ufs_ok = !ufs_init();
 	if (ufs_ok)
 		ramlog_rescue();
@@ -281,10 +282,28 @@ void shim_main(uintptr_t dtb)
 	sde_sample("before", 8, 20);
 	uintptr_t fb = sde.pipe ? rd32(sde.pipe + 0x14) : 0;
 	uint32_t stride = sde.pipe ? rd32(sde.pipe + 0x24) & 0xffff : 0;
+#ifdef SHIM_HOTDOGB
+	int con_ok = !con_init(fb, stride);
+	if (!con_ok)	/* fall back to the splash carve-out itself */
+		con_ok = !con_init(FB_SPLASH_BASE, FB_W * 4);
+	if (con_ok) {
+		con_clear(0xff203040);
+		con_str("HOTDOGB", "OnePlus 7T shim probe v1");
+		con_hex("sde fb", fb);
+		con_hex("sde stride", stride);
+		con_hex("sde ctl", (uint64_t)sde.ctl);
+		con_hex("sde pipe", (uint64_t)sde.pipe);
+		con_hex("spmi ok", spmi_ok);
+		con_hex("dtb", dtb);
+		con_hex("ufs ok", ufs_ok);
+		con_str("next", "reset to fastboot in 20 s");
+	}
+#else
 	if (!con_init(fb, stride)) {
 		con_clear(0xff203040);
 		con_str("FLAME", "shim probe v1");
 	}
+#endif
 	sde_autorefresh(1);
 	sde_sample("autorefresh", 16, 20);
 	save_log("display");
@@ -300,5 +319,9 @@ void shim_main(uintptr_t dtb)
 	log_ram();
 	log_printf("done, resetting\n");
 	save_log("done");
+#ifdef SHIM_HOTDOGB
+	sde_kick();
+	delay_ms(20000);
+#endif
 	reset();
 }

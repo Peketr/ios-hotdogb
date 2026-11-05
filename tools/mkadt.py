@@ -5,7 +5,15 @@ Only what the early boot path actually reads (see ios-sweet's NOTES.md); every
 MMIO address comes from the flame (Pixel 4, SM8150) live FDT. The kernel's
 built-in drivers still match the Redmi names (xiaomi,sweet, qcom,kryo470,
 sweet,display), so those stay next to the flame ones.
-Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--hotdogb]
+
+--hotdogb: OnePlus 7T (SM8150+, 8 GB). Live FDT memory is
+<0x80000000 0x3bb00000>, <0xc0000000 0xc0000000>, <0x1_80000000 0x1_00000000>
+and /proc/iomem shows 0xc0000000-0x27fffffff as one System RAM range with no
+carve-outs, so the --highmem layout (XNU 0x1_00000000-0x1_fcc00000, pram
+0x1_fd000000, console mirror 0x1_fe000000) is used unchanged. Only the
+splash framebuffer (cont_splash_region 0x9c000000, sofef03f 1080x2400) and
+the prime core clock differ.
 """
 import hashlib, os, struct, sys
 
@@ -31,6 +39,8 @@ GICR, GICR_SIZE = 0x17a60000, 0x100000
 FB, FB_SIZE = 0x9c400000, 0x2400000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2280, 1080 * 4
+# OnePlus 7T (hotdogb): cont_splash_region and the sofef03f panel height
+HOTDOGB_FB, HOTDOGB_FB_H = 0x9c000000, 2400
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
@@ -78,10 +88,15 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, hotdogb=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+    if hotdogb:
+        highmem = True
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    fb, fb_h = (HOTDOGB_FB, HOTDOGB_FB_H) if hotdogb else (FB, FB_H)
+    prime_hz = 2956800000 if hotdogb else 2841600000
+    board = 'hotdogb-shim' if hotdogb else 'flame-shim'
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -92,8 +107,8 @@ def build(seed=None, qemu=False, highmem=False):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('firmware-version', cstr('flame-shim')),
-        ('system-firmware-version', cstr('flame-shim')),
+        ('firmware-version', cstr(board)),
+        ('system-firmware-version', cstr(board)),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -161,7 +176,7 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2841600000 if core == 7 else 2419200000 if core >= 4 else 1785600000)),
+            ('clock-frequency', u32(prime_hz if core == 7 else 2419200000 if core >= 4 else 1785600000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -211,9 +226,9 @@ def build(seed=None, qemu=False, highmem=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
+        ('reg', u64(fb, FB_SIZE)),
         ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
+        ('height', u32(fb_h)),
         ('stride', u32(FB_STRIDE)),
     ])
 
@@ -251,7 +266,7 @@ def build(seed=None, qemu=False, highmem=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('google,flame') + cstr('qcom,sm8150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + (cstr('oneplus,hotdogb') if hotdogb else cstr('google,flame')) + cstr('qcom,sm8150') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -262,7 +277,8 @@ def build(seed=None, qemu=False, highmem=False):
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 hotdogb='--hotdogb' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

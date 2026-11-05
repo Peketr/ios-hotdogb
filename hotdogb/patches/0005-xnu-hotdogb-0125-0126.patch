@@ -1,0 +1,1230 @@
+From d259e445b9ec1a03caf113ae2220621b1b88c6d5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 22:34:23 +0100
+Subject: [PATCH] xnu: hotdogb board (0125) and Synaptics S3706 touch (0126)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015pdSSTYMY91bQKqmMDBK1G
+---
+ HOTDOGB.md                                 |  38 +-
+ xnu/patches/0125-hotdogb-board.patch       | 388 +++++++++++
+ xnu/patches/0126-hotdogb-s3706-touch.patch | 757 +++++++++++++++++++++
+ 3 files changed, 1177 insertions(+), 6 deletions(-)
+ create mode 100644 xnu/patches/0125-hotdogb-board.patch
+ create mode 100644 xnu/patches/0126-hotdogb-s3706-touch.patch
+
+diff --git a/HOTDOGB.md b/HOTDOGB.md
+index 549f841..4211f16 100644
+--- a/HOTDOGB.md
++++ b/HOTDOGB.md
+@@ -11,7 +11,8 @@ noted. Source: live FDT, /proc/iomem and the shim probe log of 2026-11-05.
+ - PMIC (SPMI) + PON reboot reason: works, every reset lands in fastboot.
+ - UFS reads/writes: works; logs go to `rawdump` (see below).
+ - RAM 0x1_00000000-0x1_fff00000 read/write checked from the shim.
+-- XNU: not built yet (needs macOS + Xcode); kernel patches for hotdogb not written yet.
++- XNU: patches 0125-0126 written and checked to apply (0001-0126 on xnu-8796.141.3);
++  not built yet (needs macOS + Xcode), so nothing below has run on the phone.
+ 
+ ## Build and test (no Mac needed for the shim)
+ 
+@@ -51,10 +52,35 @@ SOFT_RB_SPARE 0x88f, APSS WDT 0x17c10000, UFSHCI 3.0 at 0x1d84000, IMEM restart
+ boots Android and pulls the end of rawdump with root (Magisk): the shim log is the 64
+ blocks before the last 1025 (`shim/ufs.h`).
+ 
++## Kernel patches
++
++One tree builds either phone: `SWEET_HOTDOGB` in `pexpert/pexpert/arm64/SWEET.h` (default 1
++after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
++
++- **0125 hotdogb board**: early console / `SWEET_EARLY_FB_*` at 0x9c000000, 1080x2400;
++  `SWEET_PANEL_W/H` used by the GPU present (`sweet_gpu.c`), touch mapping (`SweetHID.cpp`)
++  and `A6_FB_PA` (`sweet_a6xx.h`; the userland GPU tool takes `-DSWEET_HOTDOGB=1`);
++  corner radius default 112 (117 x 1080/1125: the iPhone X frame fits by width,
++  1080x2338 at y 31); volume down on PM8150 GPIO7 (read-only, withheld unless the GPIO
++  reads as an enabled input, like GPIO6); console log ring to the end of `rawdump`
++  through its own bounded writer (works with a read-only root; flame unchanged).
++- **0126 S3706 touch** (`bsd/dev/sweet_s3706.c`): GENI I2C on QUPv3 2 SE0 (0xc80000, XBL
++  firmware, FIFO mode, polled, 400 kHz from XO), wrap2 clock votes (0x52014 bits 0-4,
++  RCG 0x1e148), TLMM south pins 55/56 (qup17), reset 80, 1.8 V switch 119, attention 122,
++  L17A 3.008 V; RMI4 PDT scan, F01 configured + F12 interrupt enables, F12 data1 located
++  from the register descriptors, objects reported to `sweet_hid_touch` in panel pixels.
++  Replaces the FTS driver on hotdogb (its SPI SE at 0x890000 is an I2C bus on the 7T).
++  Boot-args: `hdtouch=0`, `hdtouchdelay=N` (default 20 s), `hdtouchlog=1`.
++
++Unverified assumptions to check in the first kernel log: wrap2 core/core_2x vote bits
++(0 and 3, from downstream), GPIO7 reads as an enabled input, the SE reports protocol 3
++(I2C) firmware, F12 objects are 8 bytes (type, x, y, z, wx, wy).
++
++Host tools still default to flame: `tools/flame-shot --pa 0x9c000000 --h 2400`.
++
+ ## Next
+ 
+-1. Kernel: hotdogb variants of 0083 (fb 0x9c000000, height 2400, vol- on GPIO7),
+-   0095/0112 (panel height for the GPU present and corners), sweet_ufs log partition
+-   (rawdump until iOS owns userdata), a Synaptics S3706 I2C touch driver replacing 0085.
+-2. iPhone X canvas 1125x2436 fits 1080x2338 on the 2400-row panel (31 rows top/bottom).
+-3. Wi-Fi: check the 7T's WLAN chip and firmware against flame's wcn3990 path.
++1. Build 0126 on macOS (darwin-xnu-build once, then `tools/build-xnu.sh`), boot with
++   `mkadt.py --hotdogb` and a hotdogb payload; read the log from rawdump.
++2. Wi-Fi: check the 7T's WLAN chip and firmware against flame's wcn3990 path.
++3. Alert slider (hall sensors) as a ringer switch.
+diff --git a/xnu/patches/0125-hotdogb-board.patch b/xnu/patches/0125-hotdogb-board.patch
+new file mode 100644
+index 0000000..db2b5c3
+--- /dev/null
++++ b/xnu/patches/0125-hotdogb-board.patch
+@@ -0,0 +1,388 @@
++diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
++index d9d7860..58a3e3b 100644
++--- a/bsd/dev/sweet_a6xx.h
+++++ b/bsd/dev/sweet_a6xx.h
++@@ -48,8 +48,15 @@
++ #define A6_RING_SIZE		0x8000u
++ #define A6_RING_DW		(A6_RING_SIZE / 4)
++ 
++-#define A6_FB_PA		0x9c400000ull
++-#define A6_FB_SIZE		0xa00000ull	/* mapped for the GPU: 5 x 2 MB */
+++#ifdef KERNEL
+++#include <pexpert/arm64/board_config.h>
+++#define A6_FB_PA		((unsigned long long)SWEET_EARLY_FB_PA)
+++#elif defined(SWEET_HOTDOGB) && SWEET_HOTDOGB
+++#define A6_FB_PA		0x9c000000ull	/* OnePlus 7T cont_splash_region */
+++#else
+++#define A6_FB_PA		0x9c400000ull	/* Pixel 4 cont_splash_region */
+++#endif
+++#define A6_FB_SIZE		0xa00000ull	/* mapped for the GPU: 5 x 2 MB (1080x2400x4 = 0x9e3400 fits) */
++ 
++ #define A6_GPU_ID		640
++ #define A6_CHIP_ID		0x06040001ull
++diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
++index c87ed5d..6e3eac6 100644
++--- a/bsd/dev/sweet_gpu.c
+++++ b/bsd/dev/sweet_gpu.c
++@@ -25,6 +25,7 @@
++ #include <machine/machine_routines.h>
++ #include <arm/caches_internal.h>
++ #include <vm/pmap.h>
+++#include <pexpert/arm64/board_config.h>
++ #include <vm/vm_kern.h>
++ #include <pexpert/pexpert.h>
++ #include <pexpert/device_tree.h>
++@@ -545,8 +546,8 @@ present_wait_locked(uint32_t k, const char *why)
++ 	}
++ 	return 0;
++ }
++-#define PANEL_W         1080
++-#define PANEL_H         2280
+++#define PANEL_W         SWEET_PANEL_W   /* SWEET.h: 1080x2280 flame, 1080x2400 hotdogb */
+++#define PANEL_H         SWEET_PANEL_H
++ #define DISPLAY_MASK_OFF        0x500000ULL     /* 2x2 corner mattes, one per corner */
++ #define DISPLAY_MASK_SIDE       256u
++ #define DISPLAY_MASK_DIM        (DISPLAY_MASK_SIDE * 2)
++diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
++index ff39e04..7e26932 100644
++--- a/bsd/dev/sweet_keys.c
+++++ b/bsd/dev/sweet_keys.c
++@@ -2,6 +2,9 @@
++  * Minimal polled SWEET keys. Call once after the scheduler is running.
++  * flame: power (KPDPWR) and volume down (RESIN) on the PM8150 PON block,
++  * volume up on PM8150 GPIO6 (SID 0, 0xc500, active low).
+++ * hotdogb (OnePlus 7T): power on KPDPWR, volume up on GPIO6 as on flame,
+++ * volume down on PM8150 GPIO7 (0xc600, active low; gpio-keys in the 7T's FDT)
+++ * instead of RESIN.
++  * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
++  * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
++  */
++@@ -13,6 +16,7 @@
++ #include <kern/sched_prim.h>
++ #include <machine/machine_routines.h>
++ #include <pexpert/pexpert.h>
+++#include <pexpert/arm64/board_config.h>
++ 
++ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++ extern void sweet_hid_key(int key, int down);
++@@ -24,10 +28,15 @@ void sweet_keys_init(void);
++ #define KEYS_PON_RT      0x0810u
++ #define KEYS_GPIO_BASE   0xc500u
++ #define KEYS_GPIO_RT     (KEYS_GPIO_BASE + 0x10u)
+++#define KEYS_GPIO7_BASE  0xc600u
+++#define KEYS_GPIO7_RT    (KEYS_GPIO7_BASE + 0x10u)
++ #define KEYS_NO_APID     0xffffu
++ 
++ static vm_offset_t keys_core, keys_obs, keys_cnfg;
++ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
+++#if SWEET_HOTDOGB
+++static uint16_t keys_gpio7_apid = KEYS_NO_APID;	/* volume down */
+++#endif
++ static uint32_t keys_version, keys_last_status;
++ static bool keys_started;
++ static int keys_sleep_chan;
++@@ -103,7 +112,15 @@ keys_thread(void *arg, wait_result_t result)
++ 		uint8_t pon = 0, gpio = 0;
++ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
++ 		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+++#if SWEET_HOTDOGB
+++		uint8_t gpio7 = 0;
+++		bool g7ok = keys_read(keys_gpio7_apid, KEYS_GPIO7_RT, &gpio7);
+++		int now[3] = {!!(pon & 1u), !(gpio & 1u), !(gpio7 & 1u)};
+++		bool kok[3] = {pok, gok, g7ok};
+++#else
++ 		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+++		bool kok[3] = {pok, gok, pok};
+++#endif
++ 		if (!pok || !gok) {
++ 			if ((errors++ % 250u) == 0) {
++ 				printf("SWEET KEYS: read error pon-ok=%d gpio-ok=%d arb-status=%#x\n",
++@@ -113,7 +130,7 @@ keys_thread(void *arg, wait_result_t result)
++ 			errors = 0;
++ 		}
++ 		for (int k = 0; k < 3; ++k) {
++-			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+++			if (kok[k] && now[k] != state[k]) {
++ 				state[k] = now[k];
++ 				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio6:c510=%#x\n",
++ 				    k, state[k], pon, gpio);
++@@ -171,6 +188,23 @@ sweet_keys_init(void)
++ 		printf("SWEET KEYS: GPIO6 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++ 		keys_gpio_apid = KEYS_NO_APID;
++ 	}
+++#if SWEET_HOTDOGB
+++	{
+++		uint8_t g7 = 0, m7 = 0, e7 = 0;
+++		keys_gpio7_apid = keys_find_apid(KEYS_GPIO7_BASE >> 8, count);
+++		bool g7ok = keys_read(keys_gpio7_apid, KEYS_GPIO7_RT, &g7);
+++		bool m7ok = keys_read(keys_gpio7_apid, KEYS_GPIO7_BASE + 0x40u, &m7);
+++		bool e7ok = keys_read(keys_gpio7_apid, KEYS_GPIO7_BASE + 0x46u, &e7);
+++		printf("SWEET KEYS: hotdogb gpio7-apid=%u gpio=%#x/%d mode=%#x/%d en=%#x/%d\n",
+++		    keys_gpio7_apid, g7, g7ok, m7, m7ok, e7, e7ok);
+++		/* Same subtype as GPIO6 (one PM8150 GPIO block design). */
+++		unsigned dir7 = subtype >= 0x10u && subtype <= 0x13u ? m7 & 3u : (m7 >> 4) & 7u;
+++		if (!g7ok || !m7ok || !e7ok || !(e7 & 0x80u) || (dir7 != 0 && dir7 != 2)) {
+++			printf("SWEET KEYS: GPIO7 not confirmed enabled as input; volume-down withheld, PMIC unchanged\n");
+++			keys_gpio7_apid = KEYS_NO_APID;
+++		}
+++	}
+++#endif
++ 	if (!pok && !gok) {
++ 		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
++ 	}
++diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
++index 99a9c87..55905f6 100644
++--- a/bsd/dev/sweet_ufs.c
+++++ b/bsd/dev/sweet_ufs.c
++@@ -39,6 +39,7 @@
++ #include <pexpert/device_tree.h>
++ #include <libkern/libkern.h>
++ #include <machine/atomic.h>
+++#include <pexpert/arm64/board_config.h>
++ 
++ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
++@@ -110,6 +111,7 @@ static struct {
++ 	uint8_t lun;
++ 	uint8_t tag;
++ 	uint64_t first_block, nblocks;          /* partition, in 4 KiB device blocks */
+++	uint64_t log_first, log_nblocks;        /* console log partition (hotdogb: rawdump) */
++ 	uint32_t secsize;                       /* logical sector size for the BSD layer */
++ 	bool writable;                          /* boot-arg ufsrw=1 */
++ 	bool cache;                             /* boot-arg ufscache=1 */
++@@ -297,6 +299,34 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
++ 	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
++ }
++ 
+++/*
+++ * The console log's own writes: bounded to the log partition, which on
+++ * flame is the root partition (needs ufsrw=1) and on hotdogb is rawdump
+++ * (Android's /data fills userdata; rawdump is OnePlus's crash-dump area,
+++ * never mounted), so the log works with a read-only root there.
+++ */
+++static int
+++ufs_write_log_blocks(uint64_t lba, uint32_t count)
+++{
+++	if (!su.log_nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
+++	    lba < su.log_first || lba - su.log_first >= su.log_nblocks ||
+++	    count > su.log_nblocks - (lba - su.log_first) || lba + count - 1 > UINT32_MAX) {
+++		printf("SWEET UFS: refusing log write of %u blocks at 0x%llx\n", count, lba);
+++		return EPERM;
+++	}
+++#if !SWEET_HOTDOGB
+++	if (!su.writable) {
+++		return EPERM;
+++	}
+++#endif
+++	uint8_t cdb[10] = {
+++		0x2a, 0,
+++		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+++		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+++	};
+++	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
+++}
+++
++ static int
++ ufs_sync_cache(void)
++ {
++@@ -305,7 +335,7 @@ ufs_sync_cache(void)
++ }
++ 
++ static int
++-ufs_find_partition(const char *want)
+++ufs_find_partition_range(const char *want, uint64_t *out_first, uint64_t *out_n)
++ {
++ 	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
++ 	int error = ufs_read_blocks(1, 1);
++@@ -350,14 +380,20 @@ ufs_find_partition(const char *want)
++ 		if (last < first) {
++ 			return ENXIO;
++ 		}
++-		su.first_block = first;
++-		su.nblocks = last - first + 1;
+++		*out_first = first;
+++		*out_n = last - first + 1;
++ 		return 0;
++ 	}
++ 	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
++ 	return ENOENT;
++ }
++ 
+++static int
+++ufs_find_partition(const char *want)
+++{
+++	return ufs_find_partition_range(want, &su.first_block, &su.nblocks);
+++}
+++
++ static int
++ ufs_take_over_host(void)
++ {
++@@ -637,6 +673,16 @@ sweet_ufs_init(void)
++ 	if (!error) {
++ 		error = ufs_find_partition(want);
++ 	}
+++	if (!error) {
+++#if SWEET_HOTDOGB
+++		if (ufs_find_partition_range("rawdump", &su.log_first, &su.log_nblocks)) {
+++			su.log_first = su.log_nblocks = 0;     /* no log, root still usable */
+++		}
+++#else
+++		su.log_first = su.first_block;
+++		su.log_nblocks = su.nblocks;
+++#endif
+++	}
++ 	lck_mtx_unlock(&sweet_ufs_lock);
++ 	if (error) {
++ 		return error;
++@@ -837,11 +883,11 @@ struct sweet_log_header {
++ static void
++ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
++ {
++-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+++	uint64_t base = su.log_first + su.log_nblocks - SWEET_LOG_BLOCKS;
++ 	uint64_t flushed = 0, seq = 0;
++ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++ 
++-	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+++	printf("SWEET LOG: console log to the last %u KiB of the log partition (block 0x%llx)\n",
++ 	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
++ 	for (;;) {
++ 		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
++@@ -860,7 +906,7 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
++ 			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++ 			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++ 			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++-			error = ufs_write_blocks(base + 1 + blk, n);
+++			error = ufs_write_log_blocks(base + 1 + blk, n);
++ 			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++ 		}
++ 		if (!error) {
++@@ -870,7 +916,7 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
++ 			};
++ 			bzero(bounce, UFS_BLOCK);
++ 			memcpy(bounce, &h, sizeof(h));
++-			error = ufs_write_blocks(base, 1);
+++			error = ufs_write_log_blocks(base, 1);
++ 		}
++ 		if (!error) {
++ 			error = ufs_sync_cache();
++@@ -891,7 +937,11 @@ sweet_log_start(void)
++ 	thread_t thread;
++ 
++ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
++-	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
+++#if SWEET_HOTDOGB
+++	if (!on || su.log_nblocks < 2 * SWEET_LOG_BLOCKS) {
+++#else
+++	if (!on || !su.writable || su.log_nblocks < 2 * SWEET_LOG_BLOCKS) {
+++#endif
++ 		return;
++ 	}
++ 	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
++diff --git a/iokit/Kernel/arm/SweetDisplayMask.h b/iokit/Kernel/arm/SweetDisplayMask.h
++index 678471b..6fb22d3 100644
++--- a/iokit/Kernel/arm/SweetDisplayMask.h
+++++ b/iokit/Kernel/arm/SweetDisplayMask.h
++@@ -7,16 +7,25 @@
++  * the panel's top edge into the image's side edge without a step.
++  *
++  * Radius in panel pixels. The default is the iPhone X's display corner, 39 pt
++- * = 117 px, scaled to the fit (x 2280/2436): the corners iOS draws its UI
++- * for. Against Pixel 4's glass outline (Android's config_mainDisplayShape for
+++ * = 117 px, scaled to the fit (flame: x 2280/2436, fit by height; hotdogb:
+++ * x 1080/1125, fit by width): the corners iOS draws its UI for. Against Pixel 4's glass outline (Android's config_mainDisplayShape for
++  * flame) that curve lies inside the visible area below row 3.
++  */
++ #ifndef SWEET_DISPLAY_MASK_H
++ #define SWEET_DISPLAY_MASK_H
++ 
++ #include <stdint.h>
+++#ifdef KERNEL
+++#include <pexpert/arm64/board_config.h>
+++#endif
++ 
+++#if defined(SWEET_HOTDOGB) && SWEET_HOTDOGB
+++/* OnePlus 7T: the 2400-row panel is relatively taller than 2436/1125, so the
+++ * image fits by width (1080x2338, 31 rows above and below): 117 x 1080/1125. */
+++#define SWEET_DISPLAY_CORNER_DEFAULT 112u
+++#else
++ #define SWEET_DISPLAY_CORNER_DEFAULT 110u
+++#endif
++ #define SWEET_DISPLAY_CORNER_MAX     160u       /* extent 245: fits the GPU's 256-px tiles */
++ #define SWEET_CORNER_STEPS           32u        /* lines per cubic */
++ #define SWEET_CORNER_SUB             16u        /* coverage sub-rows per pixel row */
++diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
++index bc98b59..5d596b0 100644
++--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
+++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
++@@ -438,7 +438,7 @@ AppleCLCD::copyRow(uint32_t x, uint32_t y, const uint32_t *src, uint32_t n)
++ 
++ /*
++  * One full-frame BGRA layer (what backboardd swaps): the GPU scales the whole
++- * iOS frame (1125x2436) to fit the panel (1053x2280 at x 13), instead of the
+++ * iOS frame (1125x2436) to fit the panel (flame: 1053x2280 at x 13; hotdogb: 1080x2338 at y 31), instead of the
++  * CPU copying its centre (cropping the status bar and home indicator). The
++  * first time, the panel switches to the GPU's row stride and is cleared, so
++  * the bars stay black. False: use the CPU copy.
++diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
++index f876fb0..f5efaea 100644
++--- a/iokit/Kernel/arm/hid/SweetHID.cpp
+++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
++@@ -359,9 +359,8 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
++ #define SWEET_TOUCH_EDGE_PX 48
++ extern "C" int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
++ 
++-/* Touch reports panel pixels; flame's panel is 1080x2280 (SWEET.h). */
++-#define SWEET_PANEL_W 1080
++-#define SWEET_PANEL_H 2280
+++/* Touch reports panel pixels: SWEET_PANEL_W/H from SWEET.h (flame 1080x2280, hotdogb 1080x2400). */
+++#include <pexpert/arm64/board_config.h>
++ class SweetHIDTouch : public IOHIDEventService {
++ 	OSDeclareDefaultStructors(SweetHIDTouch);
++ public:
++diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
++index 963e02d..41a034f 100644
++--- a/pexpert/pexpert/arm64/SWEET.h
+++++ b/pexpert/pexpert/arm64/SWEET.h
++@@ -51,16 +51,39 @@
++ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
++ 
++ /*
++- * Pixel 4 (flame): splash framebuffer ABL scans out (cont_splash_region;
++- * ABL leaves the command-mode panel autorefreshing), 1080x2280 a8r8g8b8,
+++ * Board selection. One kernel tree, two SM8150 phones:
+++ *   flame   Pixel 4        (default)
+++ *   hotdogb OnePlus 7T     (SWEET_HOTDOGB 1; HOTDOGB.md)
+++ * Delete the define below (or build with -DSWEET_HOTDOGB=0) for flame.
+++ */
+++#ifndef SWEET_HOTDOGB
+++#define SWEET_HOTDOGB             1
+++#endif
+++
+++/*
+++ * Splash framebuffer ABL scans out (cont_splash_region; ABL leaves the
+++ * command-mode DSC panel autorefreshing on both phones), a8r8g8b8,
++  * 4320-byte rows. The bootstrap console uses it before the ADT is parsed.
++  * SWEET_EARLY_FB_BLOCK_PA is the 32MB L2 block holding it.
+++ * SWEET_PANEL_W/H: the panel in pixels (touch, GPU present, corners).
++  */
+++#if SWEET_HOTDOGB
+++/* OnePlus 7T: Samsung sofef03f, 1080x2400 */
+++#define SWEET_EARLY_FB_PA         0x9c000000
+++#define SWEET_EARLY_FB_BLOCK_PA   0x9c000000
+++#define SWEET_EARLY_FB_WIDTH      1080
+++#define SWEET_EARLY_FB_HEIGHT     2400
+++#define SWEET_EARLY_FB_STRIDE     4320
+++#else
+++/* Pixel 4: NT37280, 1080x2280 */
++ #define SWEET_EARLY_FB_PA         0x9c400000
++ #define SWEET_EARLY_FB_BLOCK_PA   0x9c000000
++ #define SWEET_EARLY_FB_WIDTH      1080
++ #define SWEET_EARLY_FB_HEIGHT     2280
++ #define SWEET_EARLY_FB_STRIDE     4320
+++#endif
+++#define SWEET_PANEL_W             SWEET_EARLY_FB_WIDTH
+++#define SWEET_PANEL_H             SWEET_EARLY_FB_HEIGHT
++ 
++ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
++ 
+diff --git a/xnu/patches/0126-hotdogb-s3706-touch.patch b/xnu/patches/0126-hotdogb-s3706-touch.patch
+new file mode 100644
+index 0000000..4c46879
+--- /dev/null
++++ b/xnu/patches/0126-hotdogb-s3706-touch.patch
+@@ -0,0 +1,757 @@
++diff --git a/bsd/conf/files b/bsd/conf/files
++index df7c863..6e00153 100644
++--- a/bsd/conf/files
+++++ b/bsd/conf/files
++@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
++ bsd/dev/sweet_keys.c			standard
++ bsd/dev/sweet_touch.c			standard
++ bsd/dev/sweet_fts.c			standard
+++bsd/dev/sweet_s3706.c			standard
++ bsd/dev/sweet_cpufreq.c			standard
++ bsd/dev/sweet_poke.c			standard
++ bsd/dev/sweet_files.c			standard
++diff --git a/bsd/dev/sweet_s3706.c b/bsd/dev/sweet_s3706.c
++new file mode 100644
++index 0000000..8680291
++--- /dev/null
+++++ b/bsd/dev/sweet_s3706.c
++@@ -0,0 +1,713 @@
+++/*
+++ * hotdogb (OnePlus 7T) touch: Synaptics S3706 (RMI4) on GENI I2C, QUPv3
+++ * wrapper 2 SE0 (i2c@c80000, "qupv3_se17" pins 55/56), address 0x20.
+++ * Call once after the scheduler is running; all work runs on one thread.
+++ *
+++ * Sources: the 7T's live FDT (i2c@0xc80000/synaptics_18865@20 and its
+++ * pinctrl), Linux gcc-sm8150.c (clock gates), pinctrl-sm8150.c (tiles,
+++ * qup17 = function 1), i2c-qcom-geni.c / qcom-geni-se.c (GENI I2C) and
+++ * drivers/input/rmi4 (PDT, F01, F12 register descriptors and objects).
+++ * The IC keeps its firmware in flash; nothing is written to it except
+++ * F01 device control (configured, normal operation) and the interrupt
+++ * enable mask. Needs XBL-loaded GENI I2C firmware on the SE and FIFO mode.
+++ *
+++ * Power (FDT): vdd 2.8-3.0 V on L17A, 1.8 V by a load switch on GPIO119,
+++ * reset GPIO80 (active low), attention GPIO122 (active low).
+++ *
+++ * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+++ * hdtouchlog=1 log every object.
+++ */
+++#if defined(ARM64_BOARD_CONFIG_SWEET)
+++#include <sys/param.h>
+++#include <sys/systm.h>
+++#include <sys/errno.h>
+++#include <kern/clock.h>
+++#include <kern/thread.h>
+++#include <kern/sched_prim.h>
+++#include <machine/machine_routines.h>
+++#include <pexpert/pexpert.h>
+++#include <pexpert/arm64/board_config.h>
+++
+++void sweet_s3706_init(void);
+++
+++#if SWEET_HOTDOGB
+++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+++extern kern_return_t thread_terminate(thread_t);
+++extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+++extern void sweet_hid_touch(int finger, int down, int x, int y);
+++
+++#define S3_SE_PA        0x00c80000u     /* i2c@c80000, QUPv3 2 SE0 */
+++#define S3_GCC_PA       0x00100000u
+++#define S3_SOUTH_PA     0x03d00000u     /* TLMM SOUTH tile: pins 55, 56, 80, 119, 122 */
+++#define S3_GCC_VOTE     0x52014u        /* APCS_CLOCK_BRANCH_ENA_VOTE (wrap2) */
+++/*
+++ * Bit 1 wrap_2_s_ahb, 2 wrap_2_m_ahb, 4 wrap2_s0 (Linux gcc-sm8150.c);
+++ * 0 and 3 wrap2 core and core_2x (downstream gcc-sm8150, not upstream).
+++ */
+++#define S3_GCC_BITS     0x1fu
+++#define S3_RCG          0x1e148u        /* gcc_qupv3_wrap2_s0_clk_src */
+++#define S3_GPIO_CFG(n)  ((uint32_t)(n) * 0x1000u)
+++#define S3_GPIO_IO(n)   (S3_GPIO_CFG(n) + 4u)
+++#define S3_PIN_SDA      55              /* 55-56 = qup17 (function 1) */
+++#define S3_PIN_SCL      56
+++#define S3_PIN_RESET    80
+++#define S3_PIN_1V8      119
+++#define S3_PIN_ATTN     122
+++#define S3_ADDR         0x20u
+++#define S3_MAX          10u
+++
+++/* GENI (include/linux/soc/qcom/geni-se.h) */
+++#define SE_STATUS       0x040u
+++#define SE_MCLK         0x048u
+++#define SE_FIFO_OFF     0x064u
+++#define SE_FW           0x068u
+++#define SE_CLK_SEL      0x07cu
+++#define SE_DMA          0x258u
+++#define SE_I2C_TX_LEN   0x26cu
+++#define SE_I2C_RX_LEN   0x270u
+++#define SE_I2C_SCL      0x278u
+++#define SE_CMD          0x600u
+++#define SE_CTRL         0x604u
+++#define SE_IRQ          0x610u
+++#define SE_IRQ_EN       0x614u
+++#define SE_IRQ_CLR      0x618u
+++#define SE_TX           0x700u
+++#define SE_RX           0x780u
+++#define SE_TX_COUNT     0x800u
+++#define SE_RX_COUNT     0x804u
+++#define SE_TX_WM        0x80cu
+++#define SE_HW_TX        0xe24u
+++#define SE_HW_RX        0xe28u
+++#define SE_DONE         (1u << 0)
+++#define SE_GP_IRQS      (0x3fu << 9)    /* I2C: NACK, bus protocol, arbitration lost ... */
+++#define SE_RX_WM_IRQ    (1u << 26)
+++#define SE_RX_LAST      (1u << 27)
+++#define SE_TX_WM_IRQ    (1u << 30)
+++#define SE_ERRORS       (0x3eu | (3u << 28) | SE_GP_IRQS)
+++#define SE_EVENTS       (SE_DONE | SE_ERRORS | SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ)
+++#define SE_PACK0        0x0007f8feu     /* 8-bit words, 4 per FIFO entry (as i2c-qcom-geni) */
+++#define SE_PACK1        0x000ffefeu
+++#define I2C_WRITE       1u
+++#define I2C_READ        2u
+++#define I2C_STOP_STRETCH (1u << 2)
+++/* 19.2 MHz XO: 400 kHz = div 2, t_high 5, t_low 11, t_cycle 22 (geni_i2c_clk_map_19p2mhz) */
+++#define I2C_MCLK        ((2u << 4) | 1u)
+++#define I2C_SCL         ((5u << 20) | (11u << 10) | 22u)
+++
+++/* RMI4 */
+++#define RMI_PAGE_SELECT 0xffu
+++#define RMI_PDT_START   0xe9u
+++#define RMI_PDT_END     0x05u
+++#define RMI_PDT_SIZE    6u
+++#define RMI_PAGES       4u
+++
+++static struct {
+++	vm_offset_t se, gcc, gpio;
+++	bool started, dead;
+++	int log;
+++	unsigned fifo_words;
+++	uint8_t page;
+++	/* F01 */
+++	uint16_t f01_ctrl, f01_data, f01_cmd;
+++	/* F12 */
+++	uint16_t f12_query, f12_data;
+++	unsigned irq_count, f12_irq_pos, f12_irq_n;
+++	unsigned data1_off, data1_size, fingers;
+++	uint32_t active;
+++	int x[S3_MAX], y[S3_MAX];
+++} s3;
+++static int s3_sleep_chan;
+++
+++static uint32_t
+++s3_rd(vm_offset_t base, uint32_t off)
+++{
+++	uint32_t v = *(volatile uint32_t *)(base + off);
+++	__asm__ volatile("dmb oshld" ::: "memory");
+++	return v;
+++}
+++
+++static void
+++s3_wr(vm_offset_t base, uint32_t off, uint32_t val)
+++{
+++	__asm__ volatile("dmb oshst" ::: "memory");
+++	*(volatile uint32_t *)(base + off) = val;
+++	__asm__ volatile("dsb osh" ::: "memory");
+++}
+++
+++static void
+++s3_wait(unsigned ms)
+++{
+++	uint64_t deadline;
+++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+++	(void)assert_wait_deadline(&s3_sleep_chan, THREAD_UNINT, deadline);
+++	thread_block(THREAD_CONTINUE_NULL);
+++}
+++
+++static bool
+++s3_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
+++{
+++	for (unsigned i = 0; i < 5000; ++i) {
+++		if (!(s3_rd(base, off) & mask)) {
+++			return true;
+++		}
+++		delay(1);
+++	}
+++	return false;
+++}
+++
+++/* TLMM: [1:0] pull (0 none, 1 down, 3 up), [5:2] function, [8:6] drive (mA/2 - 1), [9] output. */
+++static void
+++s3_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
+++{
+++	uint32_t off = S3_GPIO_CFG(pin);
+++	if (out) {
+++		s3_wr(s3.gpio, S3_GPIO_IO(pin),
+++		    (s3_rd(s3.gpio, S3_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
+++	}
+++	uint32_t cfg = s3_rd(s3.gpio, off) & ~0x3ffu;
+++	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
+++	s3_wr(s3.gpio, off, cfg);
+++}
+++
+++static bool
+++s3_clocks(void)
+++{
+++	s3_wr(s3.gcc, S3_GCC_VOTE, s3_rd(s3.gcc, S3_GCC_VOTE) | S3_GCC_BITS);
+++	uint32_t cmd = s3_rd(s3.gcc, S3_RCG), cfg = s3_rd(s3.gcc, S3_RCG + 4u);
+++	uint32_t dfs = s3_rd(s3.gcc, S3_RCG + 0x14u);
+++	printf("SWEET S3706: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n",
+++	    s3_rd(s3.gcc, S3_GCC_VOTE), cmd, cfg, dfs);
+++	if (dfs & 1u) {
+++		/* CLK_SEL 0 picks DFS level 0; it must be XO (19.2 MHz) undivided. */
+++		cfg = s3_rd(s3.gcc, S3_RCG + 0x1cu);
+++		printf("SWEET S3706: DFS level0 cfg=%#x\n", cfg);
+++		if ((cfg & 0x371fu) != 1u) {
+++			printf("SWEET S3706: DFS level 0 is not XO/1; stopping\n");
+++			return false;
+++		}
+++	} else {
+++		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
+++		s3_wr(s3.gcc, S3_RCG + 4u, cfg);
+++		s3_wr(s3.gcc, S3_RCG, s3_rd(s3.gcc, S3_RCG) | 1u);
+++		if (!s3_wait_clear(s3.gcc, S3_RCG, 1u)) {
+++			printf("SWEET S3706: RCG update timeout\n");
+++			return false;
+++		}
+++	}
+++	/* Branch halt bits: wrap2 m_ahb, s_ahb, s0 (hardware-gated ones skipped, as Linux). */
+++	const uint32_t branches[] = {0x1e004, 0x1e008, 0x1e144};
+++	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
+++		uint32_t cbcr = s3_rd(s3.gcc, branches[i]);
+++		printf("SWEET S3706: GCC branch %#x = %#x\n", branches[i], cbcr);
+++		if (cbcr & 2u) {
+++			continue;
+++		}
+++		if (!s3_wait_clear(s3.gcc, branches[i], 1u << 31)) {
+++			printf("SWEET S3706: GCC branch %#x halted (%#x)\n", branches[i],
+++			    s3_rd(s3.gcc, branches[i]));
+++			return false;
+++		}
+++	}
+++	return true;
+++}
+++
+++static bool
+++s3_se_init(void)
+++{
+++	uint32_t fw = s3_rd(s3.se, SE_FW);
+++	uint32_t tx = s3_rd(s3.se, SE_HW_TX), rx = s3_rd(s3.se, SE_HW_RX);
+++	printf("SWEET S3706: se fw=%#x proto=%u status=%#x fifo-off=%#x tx=%#x rx=%#x\n",
+++	    fw, (fw >> 8) & 0xffu, s3_rd(s3.se, SE_STATUS), s3_rd(s3.se, SE_FIFO_OFF), tx, rx);
+++	/* Protocol 3 = I2C; 32-bit FIFO words. */
+++	if (((fw >> 8) & 0xffu) != 3u || (s3_rd(s3.se, SE_FIFO_OFF) & 1u) ||
+++	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
+++	    ((tx >> 16) & 0x3fu) < 4u || ((rx >> 16) & 0x3fu) < 4u) {
+++		printf("SWEET S3706: need XBL-loaded I2C firmware and 32-bit FIFOs; stopping\n");
+++		return false;
+++	}
+++	if (s3_rd(s3.se, SE_STATUS) & 0x1001u) {
+++		printf("SWEET S3706: SE already busy; stopping\n");
+++		return false;
+++	}
+++	s3.fifo_words = (tx >> 16) & 0x3fu;
+++	/* geni_se_init + FIFO mode, polled (no GSI, no IRQ routing). */
+++	s3_wr(s3.se, 0xe18, 0);
+++	s3_wr(s3.se, 0xe1c, 0);
+++	s3_wr(s3.se, 0x644, 0);
+++	s3_wr(s3.se, SE_IRQ_CLR, 0xffffffffu);
+++	s3_wr(s3.se, 0x648, 0xffffffffu);
+++	s3_wr(s3.se, SE_DMA, 0);
+++	s3_wr(s3.se, 0x28, s3_rd(s3.se, 0x28) | 0x7fu);
+++	s3_wr(s3.se, 0xe30, s3_rd(s3.se, 0xe30) | 0x0fu);
+++	s3_wr(s3.se, 0x24, 0x7f);
+++	s3_wr(s3.se, 0x20, 1);
+++	/* qcom_geni_i2c_conf: XO level 0, 400 kHz. */
+++	s3_wr(s3.se, SE_CLK_SEL, 0);
+++	s3_wr(s3.se, SE_MCLK, I2C_MCLK);
+++	s3_wr(s3.se, SE_I2C_SCL, I2C_SCL);
+++	s3_wr(s3.se, 0x254, 0);
+++	s3_wr(s3.se, 0x260, SE_PACK0);
+++	s3_wr(s3.se, 0x264, SE_PACK1);
+++	s3_wr(s3.se, 0x284, SE_PACK0);
+++	s3_wr(s3.se, 0x288, SE_PACK1);
+++	s3_wr(s3.se, SE_TX_WM, 0);
+++	s3_wr(s3.se, 0x810, ((rx >> 16) & 0x3fu) - 1u);   /* RX watermark */
+++	s3_wr(s3.se, 0x814, (rx >> 16) & 0x3fu);          /* RX RFR watermark */
+++	s3_wr(s3.se, SE_IRQ_EN, SE_EVENTS);
+++	if ((s3_rd(s3.se, SE_TX_COUNT) & 0xfffffffu) ||
+++	    (s3_rd(s3.se, SE_RX_COUNT) & 0x1ffffffu)) {
+++		printf("SWEET S3706: inherited FIFO data; stopping\n");
+++		return false;
+++	}
+++	return true;
+++}
+++
+++static void
+++s3_abort(void)
+++{
+++	s3_wr(s3.se, SE_CTRL, 2);
+++	bool done = false;
+++	for (unsigned i = 0; i < 5000; ++i) {
+++		if (s3_rd(s3.se, SE_IRQ) & (1u << 5)) {
+++			done = true;
+++			break;
+++		}
+++		delay(1);
+++	}
+++	for (unsigned i = 0; i < 64 && (s3_rd(s3.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
+++		(void)s3_rd(s3.se, SE_RX);
+++	}
+++	s3_wr(s3.se, SE_IRQ_CLR, 0xffffffffu);
+++	if (!done || !s3_wait_clear(s3.se, SE_STATUS, 1u)) {
+++		s3.dead = true;
+++		printf("SWEET S3706: abort failed status=%#x irq=%#x; stopping\n",
+++		    s3_rd(s3.se, SE_STATUS), s3_rd(s3.se, SE_IRQ));
+++	}
+++}
+++
+++/*
+++ * One I2C message (geni_i2c_tx_one_msg / rx_one_msg in FIFO mode). TX is
+++ * refilled on the watermark, RX drained as it arrives, so a message may be
+++ * longer than one FIFO fill. stretch: no STOP (a read follows).
+++ */
+++static int
+++s3_msg(bool rd, uint8_t *buf, unsigned len, bool stretch)
+++{
+++	unsigned sent = 0, got = 0;
+++	if (s3.dead || len == 0 || len > 256) {
+++		return EIO;
+++	}
+++	if (!s3_wait_clear(s3.se, SE_STATUS, 1u)) {
+++		s3.dead = true;
+++		return EBUSY;
+++	}
+++	s3_wr(s3.se, SE_IRQ_CLR, 0xffffffffu);
+++	s3_wr(s3.se, rd ? SE_I2C_RX_LEN : SE_I2C_TX_LEN, len);
+++	if (!rd) {
+++		s3_wr(s3.se, SE_TX_WM, 1);
+++	}
+++	s3_wr(s3.se, SE_CMD, ((rd ? I2C_READ : I2C_WRITE) << 27) | (S3_ADDR << 9) |
+++	    (stretch ? I2C_STOP_STRETCH : 0u));
+++	for (unsigned i = 0; i < 20000; ++i) {
+++		uint32_t irq = s3_rd(s3.se, SE_IRQ);
+++		if (irq & SE_ERRORS) {
+++			if (s3.log || (irq & ~SE_GP_IRQS & SE_ERRORS)) {
+++				printf("SWEET S3706: %s error irq=%#x\n", rd ? "read" : "write", irq);
+++			}
+++			break;
+++		}
+++		if (!rd && sent < len && (irq & SE_TX_WM_IRQ)) {
+++			unsigned room = s3.fifo_words - (s3_rd(s3.se, SE_TX_COUNT) & 0xfffffffu);
+++			while (room-- && sent < len) {
+++				uint32_t word = 0;
+++				for (unsigned j = 0; j < 4 && sent < len; ++j) {
+++					word |= (uint32_t)buf[sent++] << (8u * j);
+++				}
+++				s3_wr(s3.se, SE_TX, word);
+++			}
+++			if (sent == len) {
+++				s3_wr(s3.se, SE_TX_WM, 0);
+++			}
+++		}
+++		if (rd) {
+++			uint32_t count = s3_rd(s3.se, SE_RX_COUNT) & 0x1ffffffu;
+++			while (count-- && got < len) {
+++				uint32_t word = s3_rd(s3.se, SE_RX);
+++				for (unsigned j = 0; j < 4 && got < len; ++j) {
+++					buf[got++] = (uint8_t)(word >> (8u * j));
+++				}
+++			}
+++		}
+++		if (irq & SE_DONE) {
+++			s3_wr(s3.se, SE_IRQ_CLR, irq);
+++			if (rd ? got == len : sent == len) {
+++				return 0;
+++			}
+++			if (rd) {
+++				continue; /* final RX words may land after DONE */
+++			}
+++			break;
+++		}
+++		s3_wr(s3.se, SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
+++		delay(1);
+++	}
+++	if (s3.log) {
+++		printf("SWEET S3706: %s len=%u sent=%u got=%u irq=%#x status=%#x\n",
+++		    rd ? "read" : "write", len, sent, got, s3_rd(s3.se, SE_IRQ),
+++		    s3_rd(s3.se, SE_STATUS));
+++	}
+++	s3_abort();
+++	return EIO;
+++}
+++
+++/* RMI4 over I2C: 0xff selects the page, then 8-bit addresses within it. */
+++static int
+++s3_page(uint16_t addr)
+++{
+++	uint8_t page = (uint8_t)(addr >> 8);
+++	if (page == s3.page) {
+++		return 0;
+++	}
+++	uint8_t buf[2] = {RMI_PAGE_SELECT, page};
+++	int err = s3_msg(false, buf, 2, false);
+++	if (!err) {
+++		s3.page = page;
+++	} else {
+++		s3.page = 0xff;
+++	}
+++	return err;
+++}
+++
+++static int
+++s3_read(uint16_t addr, uint8_t *out, unsigned n)
+++{
+++	int err = s3_page(addr);
+++	if (err) {
+++		return err;
+++	}
+++	uint8_t a = (uint8_t)addr;
+++	err = s3_msg(false, &a, 1, true);
+++	if (!err) {
+++		err = s3_msg(true, out, n, false);
+++	}
+++	return err;
+++}
+++
+++static int
+++s3_write(uint16_t addr, const uint8_t *data, unsigned n)
+++{
+++	uint8_t buf[16];
+++	if (n > sizeof(buf) - 1u) {
+++		return EINVAL;
+++	}
+++	int err = s3_page(addr);
+++	if (err) {
+++		return err;
+++	}
+++	buf[0] = (uint8_t)addr;
+++	memcpy(buf + 1, data, n);
+++	return s3_msg(false, buf, n + 1u, false);
+++}
+++
+++/*
+++ * Page Description Table: entries of 6 bytes from 0xe9 down on each page
+++ * (query, command, control, data base, interrupt count | version, function).
+++ * Interrupt bits are assigned in scan order.
+++ */
+++static int
+++s3_scan_pdt(void)
+++{
+++	unsigned irq = 0;
+++	bool f01 = false, f12 = false;
+++	for (unsigned page = 0; page < RMI_PAGES; ++page) {
+++		unsigned found = 0;
+++		for (unsigned a = RMI_PDT_START; a >= RMI_PDT_END + RMI_PDT_SIZE; a -= RMI_PDT_SIZE) {
+++			uint8_t e[RMI_PDT_SIZE];
+++			uint16_t addr = (uint16_t)((page << 8) | a);
+++			int err = s3_read(addr, e, sizeof(e));
+++			if (err) {
+++				return err;
+++			}
+++			if (e[5] == 0 || e[5] == 0xff) {
+++				break;
+++			}
+++			found++;
+++			unsigned nirq = e[4] & 7u;
+++			uint16_t base = (uint16_t)(page << 8);
+++			printf("SWEET S3706: PDT page %u F%02x q=%#x c=%#x ctl=%#x d=%#x irqs=%u@%u v%u\n",
+++			    page, e[5], base | e[0], base | e[1], base | e[2], base | e[3],
+++			    nirq, irq, (e[4] >> 5) & 3u);
+++			if (e[5] == 0x01) {
+++				s3.f01_cmd = base | e[1];
+++				s3.f01_ctrl = base | e[2];
+++				s3.f01_data = base | e[3];
+++				f01 = true;
+++			} else if (e[5] == 0x12) {
+++				s3.f12_query = base | e[0];
+++				s3.f12_data = base | e[3];
+++				s3.f12_irq_pos = irq;
+++				s3.f12_irq_n = nirq;
+++				f12 = true;
+++			}
+++			irq += nirq;
+++		}
+++		if (!found) {
+++			break;
+++		}
+++	}
+++	s3.irq_count = irq;
+++	return f01 && f12 && irq <= 32 ? 0 : ENXIO;
+++}
+++
+++/*
+++ * F12 register descriptors (rmi_read_register_desc): query 0 says they
+++ * exist; then query, control and data descriptors, 3 addresses each: size
+++ * of the presence register, the presence register (bitmap of present
+++ * packet registers), the structure (per present register: size, subpacket
+++ * map). Data1 is the finger objects, 8 bytes each; its offset in the data
+++ * packet is the size of the present data registers before it.
+++ */
+++static int
+++s3_f12_layout(void)
+++{
+++	uint8_t q0;
+++	int err = s3_read(s3.f12_query, &q0, 1);
+++	if (err) {
+++		return err;
+++	}
+++	if (!(q0 & 1u)) {
+++		printf("SWEET S3706: F12 without register descriptors\n");
+++		return ENXIO;
+++	}
+++	uint16_t data_desc = (uint16_t)(s3.f12_query + 1u + 2u * 3u);
+++	uint8_t psize, pres[8] = {0}, st[64] = {0};
+++	if ((err = s3_read(data_desc, &psize, 1))) {
+++		return err;
+++	}
+++	if (psize < 1 || psize > sizeof(pres)) {
+++		return EIO;
+++	}
+++	if ((err = s3_read(data_desc + 1u, pres, psize))) {
+++		return err;
+++	}
+++	unsigned poff = 1, ssize = pres[0];
+++	if (pres[0] == 0) {
+++		if (psize < 3) {
+++			return EIO;
+++		}
+++		poff = 3;
+++		ssize = pres[1] | (unsigned)pres[2] << 8;
+++	}
+++	if (ssize == 0 || ssize > sizeof(st)) {
+++		printf("SWEET S3706: F12 data descriptor of %u bytes\n", ssize);
+++		return EIO;
+++	}
+++	if ((err = s3_read(data_desc + 2u, st, ssize))) {
+++		return err;
+++	}
+++	unsigned off = 0, at = 0;
+++	for (unsigned bit = 0; bit < 8u * (psize - poff) && at < ssize; ++bit) {
+++		if (!(pres[poff + bit / 8u] & (1u << (bit % 8u)))) {
+++			continue;
+++		}
+++		unsigned size = st[at++], subs = 0;
+++		if (size == 0 && at + 2 <= ssize) {
+++			size = st[at] | (unsigned)st[at + 1] << 8;
+++			at += 2;
+++		}
+++		do {
+++			if (at >= ssize) {
+++				return EIO;
+++			}
+++			for (unsigned b = 0; b < 7; ++b) {
+++				subs += (st[at] >> b) & 1u;
+++			}
+++		} while (st[at++] & 0x80u);
+++		if (bit == 1) {
+++			s3.data1_off = off;
+++			s3.data1_size = size;
+++			s3.fingers = MIN(subs, S3_MAX);
+++			printf("SWEET S3706: F12 data1 at +%u, %u bytes, %u objects\n", off, size, subs);
+++			return size >= 8u * s3.fingers && s3.fingers ? 0 : EIO;
+++		}
+++		off += size;
+++	}
+++	printf("SWEET S3706: F12 has no data1\n");
+++	return ENXIO;
+++}
+++
+++static void
+++s3_report(const uint8_t *obj, unsigned id)
+++{
+++	/* rmi_f12_process_objects: type, x lo/hi, y lo/hi, z, wx, wy. */
+++	unsigned type = obj[0];
+++	int x = obj[1] | obj[2] << 8, y = obj[3] | obj[4] << 8;
+++	bool down = type == 1 || type == 6;     /* finger, glove */
+++	if (s3.log && (down || (s3.active & (1u << id)))) {
+++		printf("SWEET S3706: obj %u type %u x %d y %d z %u\n", id, type, x, y, obj[5]);
+++	}
+++	if (down) {
+++		/* Polled packets repeat a resting finger: report changes only. */
+++		if ((s3.active & (1u << id)) && s3.x[id] == x && s3.y[id] == y) {
+++			return;
+++		}
+++		s3.active |= 1u << id;
+++		s3.x[id] = x;
+++		s3.y[id] = y;
+++		sweet_hid_touch((int)id, 1, x, y);
+++	} else if (s3.active & (1u << id)) {
+++		s3.active &= ~(1u << id);
+++		sweet_hid_touch((int)id, 0, s3.x[id], s3.y[id]);
+++	}
+++}
+++
+++static void
+++s3_release_all(void)
+++{
+++	for (unsigned id = 0; id < S3_MAX; ++id) {
+++		if (s3.active & (1u << id)) {
+++			sweet_hid_touch((int)id, 0, s3.x[id], s3.y[id]);
+++		}
+++	}
+++	s3.active = 0;
+++}
+++
+++static void
+++s3_thread(void *arg, wait_result_t result)
+++{
+++	unsigned delay_s = 20;
+++	int err;
+++	(void)arg;
+++	(void)result;
+++	(void)PE_parse_boot_argn("hdtouchdelay", &delay_s, sizeof(delay_s));
+++	printf("SWEET S3706: starting in %u s\n", delay_s);
+++	s3_wait(delay_s * 1000u);
+++	s3.gcc = ml_io_map(S3_GCC_PA, 0x60000);
+++	s3.gpio = ml_io_map(S3_SOUTH_PA, 0x81000);
+++	s3.se = ml_io_map(S3_SE_PA, 0x4000);
+++	if (!s3.gcc || !s3.gpio || !s3.se) {
+++		printf("SWEET S3706: MMIO mapping failed\n");
+++		goto out;
+++	}
+++	s3.page = 0xff;
+++	printf("SWEET S3706: TLMM cfg/io sda=%#x/%#x attn=%#x/%#x reset=%#x/%#x 1v8=%#x/%#x\n",
+++	    s3_rd(s3.gpio, S3_GPIO_CFG(S3_PIN_SDA)), s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_SDA)),
+++	    s3_rd(s3.gpio, S3_GPIO_CFG(S3_PIN_ATTN)), s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_ATTN)),
+++	    s3_rd(s3.gpio, S3_GPIO_CFG(S3_PIN_RESET)), s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_RESET)),
+++	    s3_rd(s3.gpio, S3_GPIO_CFG(S3_PIN_1V8)), s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_1V8)));
+++	/* Reset held low while the rails come up: 2.8-3.0 V vdd, then the 1.8 V switch. */
+++	s3_gpio(S3_PIN_RESET, 0, 3, 3, true, false);
+++	s3_gpio(S3_PIN_ATTN, 0, 0, 3, false, false);
+++	err = sweet_rpmh_vreg_enable("ldoa17", 3008);
+++	if (err) {
+++		printf("SWEET S3706: L17A enable failed %d; stopping\n", err);
+++		goto out;
+++	}
+++	s3_wait(2);
+++	s3_gpio(S3_PIN_1V8, 0, 3, 3, true, true);
+++	s3_wait(10);
+++	if (!s3_clocks()) {
+++		goto out;
+++	}
+++	s3_gpio(S3_PIN_SDA, 1, 0, 0, false, false); /* qup17, 2 mA, no pull (FDT) */
+++	s3_gpio(S3_PIN_SCL, 1, 0, 0, false, false);
+++	if (!s3_se_init()) {
+++		goto out;
+++	}
+++	s3_gpio(S3_PIN_RESET, 0, 3, 3, true, true);
+++	s3_wait(150);   /* firmware boot after reset */
+++	err = s3_scan_pdt();
+++	if (err || s3.dead) {
+++		printf("SWEET S3706: PDT scan failed %d (no F01/F12)\n", err);
+++		goto out;
+++	}
+++	uint8_t status = 0;
+++	if (!s3_read(s3.f01_data, &status, 1)) {
+++		printf("SWEET S3706: F01 device status %#x\n", status);
+++	}
+++	err = s3_f12_layout();
+++	if (err) {
+++		printf("SWEET S3706: F12 layout failed %d\n", err);
+++		goto out;
+++	}
+++	/* F01 control 0: configured (bit 7), normal sleep mode, no-sleep (bit 2). */
+++	uint8_t ctl0 = 0;
+++	if (!s3_read(s3.f01_ctrl, &ctl0, 1)) {
+++		uint8_t v = (uint8_t)((ctl0 & ~3u) | 0x84u);
+++		err = s3_write(s3.f01_ctrl, &v, 1);
+++		printf("SWEET S3706: F01 ctrl0 %#x -> %#x err=%d\n", ctl0, v, err);
+++	}
+++	/* F01 control 1: interrupt enables; make sure the F12 sources are on. */
+++	unsigned ibytes = (s3.irq_count + 7u) / 8u;
+++	uint8_t ien[4] = {0};
+++	if (ibytes && !s3_read(s3.f01_ctrl + 1u, ien, ibytes)) {
+++		for (unsigned b = 0; b < s3.f12_irq_n; ++b) {
+++			unsigned bit = s3.f12_irq_pos + b;
+++			ien[bit / 8u] |= (uint8_t)(1u << (bit % 8u));
+++		}
+++		err = s3_write(s3.f01_ctrl + 1u, ien, ibytes);
+++		printf("SWEET S3706: irq enable %02x %02x %02x %02x err=%d\n",
+++		    ien[0], ien[1], ien[2], ien[3], err);
+++	}
+++	printf("SWEET S3706: %u objects, polling every 8 ms\n", s3.fingers);
+++	uint8_t pkt[8u + 8u * S3_MAX + 64u];
+++	unsigned need = s3.data1_off + 8u * s3.fingers, errors = 0, ticks = 0;
+++	if (need > sizeof(pkt)) {
+++		printf("SWEET S3706: data packet of %u bytes too big\n", need);
+++		goto out;
+++	}
+++	while (!s3.dead) {
+++		/* Attention is active low; also read every ~100 ms in case it is not wired as assumed. */
+++		bool attn = !(s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_ATTN)) & 1u);
+++		if (attn || (++ticks % 12u) == 0) {
+++			uint8_t ist[4] = {0};
+++			if (s3_read(s3.f01_data + 1u, ist, ibytes ? ibytes : 1u) ||
+++			    s3_read(s3.f12_data, pkt, need)) {
+++				if ((errors++ % 100u) == 0) {
+++					printf("SWEET S3706: read error (%u)\n", errors);
+++				}
+++				s3.page = 0xff;
+++			} else {
+++				for (unsigned id = 0; id < s3.fingers; ++id) {
+++					s3_report(pkt + s3.data1_off + 8u * id, id);
+++				}
+++			}
+++		}
+++		s3_wait(8);
+++	}
+++	s3_release_all();
+++out:
+++	printf("SWEET S3706: thread exits\n");
+++	(void)thread_terminate(current_thread());
+++	thread_block(THREAD_CONTINUE_NULL);
+++}
+++
+++void
+++sweet_s3706_init(void)
+++{
+++	int enabled = 1;
+++	thread_t thread;
+++	if (s3.started) {
+++		return;
+++	}
+++	s3.started = true;
+++	(void)PE_parse_boot_argn("hdtouch", &enabled, sizeof(enabled));
+++	(void)PE_parse_boot_argn("hdtouchlog", &s3.log, sizeof(s3.log));
+++	if (!enabled) {
+++		printf("SWEET S3706: disabled (hdtouch=0)\n");
+++		return;
+++	}
+++	kern_return_t kr = kernel_thread_start(s3_thread, NULL, &thread);
+++	if (kr == KERN_SUCCESS) {
+++		thread_deallocate(thread);
+++	} else {
+++		printf("SWEET S3706: kernel_thread_start failed %d\n", kr);
+++	}
+++}
+++#else /* !SWEET_HOTDOGB */
+++void
+++sweet_s3706_init(void)
+++{
+++}
+++#endif /* SWEET_HOTDOGB */
+++#endif /* ARM64_BOARD_CONFIG_SWEET */
++diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
++index 55905f6..e997978 100644
++--- a/bsd/dev/sweet_ufs.c
+++++ b/bsd/dev/sweet_ufs.c
++@@ -54,6 +54,7 @@ extern void sweet_sample_start(void);
++ extern void sweet_keys_init(void);
++ extern void sweet_touch_init(void);
++ extern void sweet_fts_init(void);
+++extern void sweet_s3706_init(void);
++ extern void sweet_cpufreq_init(void);
++ extern void sweet_pmem_init(void);
++ extern void flame_wlan_init(void);
++@@ -714,7 +715,13 @@ sweet_ufs_init(void)
++ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
++ 	sweet_keys_init();
++ 	sweet_touch_init();
+++#if SWEET_HOTDOGB
+++	/* 7T: Synaptics S3706 on I2C. Never the Pixel 4's FTS: its SPI SE
+++	 * (0x890000) is an I2C bus here and its GPIOs/rails are wired differently. */
+++	sweet_s3706_init();
+++#else
++ 	sweet_fts_init();
+++#endif
++ 	sweet_usb_probe();
++ 	return 0;
++ }
+-- 
+2.43.0
+

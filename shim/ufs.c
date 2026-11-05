@@ -157,11 +157,18 @@ static int find_userdata(void)
 		return -3;
 	if (read_blocks(entry_lba, (nent * esz + BLOCK - 1) / BLOCK, data))
 		return -4;
+#ifdef SHIM_HOTDOGB
+	/* OnePlus 7T: Android's /data is ext4 over dm-default-key filling all of
+	 * userdata, so its tail is not free. rawdump (LUN0, 128 MiB, OnePlus
+	 * crash dumps) is never mounted by Android: logs go there instead. */
+	static const char want[] = "rawdump";
+#else
 	static const char want[] = "userdata";
+#endif
 	for (uint32_t i = 0; i < nent; i++) {
 		const uint8_t *e = data + i * esz;
 		int match = 1;
-		for (int c = 0; c < 9; c++)
+		for (int c = 0; c < (int)sizeof(want); c++)
 			if (e[56 + 2 * c] != (uint8_t)want[c] || e[57 + 2 * c])
 				match = 0;
 		if (!match)
@@ -208,7 +215,7 @@ int ufs_init(void)
 	log_printf("ufs: test unit ready rc=%x\n", rc);
 	int prc = find_userdata();
 	if (prc) {
-		log_printf("ufs: userdata not found (%d)\n", prc);
+		log_printf("ufs: log partition not found (%d)\n", prc);
 		return -1;
 	}
 	if (part_blocks < UFS_SCRATCH_TAIL + UFS_RESCUE_BLOCKS + 16) {
@@ -217,7 +224,7 @@ int ufs_init(void)
 	}
 	scratch_first = part_first + part_blocks - UFS_SCRATCH_TAIL;
 	ready = 1;
-	log_printf("ufs: userdata first=%lx blocks=%lx scratch=%lx+%x\n",
+	log_printf("ufs: logpart first=%lx blocks=%lx scratch=%lx+%x\n",
 		   part_first, part_blocks, scratch_first, UFS_SCRATCH_BLOCKS);
 	return 0;
 }

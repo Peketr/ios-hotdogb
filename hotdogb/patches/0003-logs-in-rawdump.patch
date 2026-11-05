@@ -1,0 +1,87 @@
+From 101c9342a3ec554a3090eb41c001390253274957 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 22:19:33 +0100
+Subject: [PATCH 3/4] hotdogb: persistent shim logs in rawdump (userdata is
+ fully used by ext4)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015pdSSTYMY91bQKqmMDBK1G
+---
+ shim/shim.c |  8 ++------
+ shim/ufs.c  | 13 ++++++++++---
+ 2 files changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/shim/shim.c b/shim/shim.c
+index 7b779fc..443465e 100644
+--- a/shim/shim.c
++++ b/shim/shim.c
+@@ -241,15 +241,10 @@ void shim_main(uintptr_t dtb)
+ 	}
+ 	reset();
+ #endif
+-#ifdef SHIM_HOTDOGB
+-	/* First 7T bring-up: no UFS writes at all (the scratch area at the end
+-	 * of userdata may still hold Android's filesystem). Screen only. */
+-	ufs_ok = 0;
+-#else
++	/* hotdogb: the scratch area is the end of rawdump, not userdata (ufs.c). */
+ 	ufs_ok = !ufs_init();
+ 	if (ufs_ok)
+ 		ramlog_rescue();
+-#endif
+ #ifdef SHIM_SHOWLOG
+ 	/* Read-only: the shim log on UFS is the previous run's, keep it. */
+ 	sde_probe();
+@@ -300,6 +295,7 @@ void shim_main(uintptr_t dtb)
+ 		con_hex("sde pipe", (uint64_t)sde.pipe);
+ 		con_hex("spmi ok", spmi_ok);
+ 		con_hex("dtb", dtb);
++		con_hex("ufs ok", ufs_ok);
+ 		con_str("next", "reset to fastboot in 20 s");
+ 	}
+ #else
+diff --git a/shim/ufs.c b/shim/ufs.c
+index 3ec005b..b76a7e5 100644
+--- a/shim/ufs.c
++++ b/shim/ufs.c
+@@ -157,11 +157,18 @@ static int find_userdata(void)
+ 		return -3;
+ 	if (read_blocks(entry_lba, (nent * esz + BLOCK - 1) / BLOCK, data))
+ 		return -4;
++#ifdef SHIM_HOTDOGB
++	/* OnePlus 7T: Android's /data is ext4 over dm-default-key filling all of
++	 * userdata, so its tail is not free. rawdump (LUN0, 128 MiB, OnePlus
++	 * crash dumps) is never mounted by Android: logs go there instead. */
++	static const char want[] = "rawdump";
++#else
+ 	static const char want[] = "userdata";
++#endif
+ 	for (uint32_t i = 0; i < nent; i++) {
+ 		const uint8_t *e = data + i * esz;
+ 		int match = 1;
+-		for (int c = 0; c < 9; c++)
++		for (int c = 0; c < (int)sizeof(want); c++)
+ 			if (e[56 + 2 * c] != (uint8_t)want[c] || e[57 + 2 * c])
+ 				match = 0;
+ 		if (!match)
+@@ -208,7 +215,7 @@ int ufs_init(void)
+ 	log_printf("ufs: test unit ready rc=%x\n", rc);
+ 	int prc = find_userdata();
+ 	if (prc) {
+-		log_printf("ufs: userdata not found (%d)\n", prc);
++		log_printf("ufs: log partition not found (%d)\n", prc);
+ 		return -1;
+ 	}
+ 	if (part_blocks < UFS_SCRATCH_TAIL + UFS_RESCUE_BLOCKS + 16) {
+@@ -217,7 +224,7 @@ int ufs_init(void)
+ 	}
+ 	scratch_first = part_first + part_blocks - UFS_SCRATCH_TAIL;
+ 	ready = 1;
+-	log_printf("ufs: userdata first=%lx blocks=%lx scratch=%lx+%x\n",
++	log_printf("ufs: logpart first=%lx blocks=%lx scratch=%lx+%x\n",
+ 		   part_first, part_blocks, scratch_first, UFS_SCRATCH_BLOCKS);
+ 	return 0;
+ }
+-- 
+2.43.0
+

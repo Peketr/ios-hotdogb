@@ -5,10 +5,18 @@
  * Text console on the splash framebuffer ABL scans out. Geometry comes from
  * the display pipe at runtime (con_init); 32 bpp, little-endian a8r8g8b8.
  */
+#ifdef SHIM_HOTDOGB
+/* OnePlus 7T (hotdogb): sofef03f cmd-mode DSC panel, 1080x2400 */
+#define FB_SPLASH_BASE	0x9c000000UL	/* reserved-memory cont_splash_region */
+#define FB_SPLASH_SIZE	0x02400000UL
+#define FB_W		1080
+#define FB_H		2400
+#else
 #define FB_SPLASH_BASE	0x9c400000UL	/* reserved-memory cont_splash_region */
 #define FB_SPLASH_SIZE	0x02400000UL
 #define FB_W		1080
 #define FB_H		2280
+#endif
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U

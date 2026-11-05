@@ -1,0 +1,185 @@
+From 96204d7846c42e6bc966c7feb01bcd355569c09b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 22:07:58 +0100
+Subject: [PATCH 1/4] hotdogb: OnePlus 7T shim probe build (screen only, no UFS
+ writes)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015pdSSTYMY91bQKqmMDBK1G
+---
+ shim/build-hotdogb.sh   | 26 +++++++++++++++++++++++
+ shim/console.h          |  8 +++++++
+ shim/shim.c             | 27 ++++++++++++++++++++++++
+ tools/mkboot_hotdogb.py | 46 +++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 107 insertions(+)
+ create mode 100755 shim/build-hotdogb.sh
+ create mode 100755 tools/mkboot_hotdogb.py
+
+diff --git a/shim/build-hotdogb.sh b/shim/build-hotdogb.sh
+new file mode 100755
+index 0000000..35c2b83
+--- /dev/null
++++ b/shim/build-hotdogb.sh
+@@ -0,0 +1,26 @@
++#!/bin/bash
++# OnePlus 7T (hotdogb) probe build: system clang/lld (Linux or WSL),
++# no Homebrew/Xcode/AOSP tools needed.
++#   shim/build-hotdogb.sh STOCK_DTB [OUT]
++# STOCK_DTB: the dtb section of the 7T's own boot.img (20 SM8150 DTBs).
++set -euo pipefail
++cd "$(dirname "$0")"
++ROOT=$(cd .. && pwd)
++DTB=$(realpath "$1")
++CC="clang --target=aarch64-none-elf"
++CFLAGS="-O2 -ffreestanding -nostdlib -fno-builtin -fno-pic -fno-pie -mgeneral-regs-only -mstrict-align
++	-fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -DSHIM_HOTDOGB ${SHIM_CFLAGS:-}"
++SRCS="start.S shim.c console.c log.c util.c mmu.c fdt.c loader.c ufs.c spmi.c sde.c showlog.c diag.c disptest.c gpuprobe.c gpufw.S smmuprobe.c ramlog.c"
++mkdir -p out-hotdogb
++objs=
++for f in $SRCS; do
++	$CC $CFLAGS -c "$f" -o "out-hotdogb/${f%.*}.o"
++	objs="$objs out-hotdogb/${f%.*}.o"
++done
++abs=$(llvm-readelf -r $(echo "$objs" | sed 's| out-hotdogb/start.o||') | grep -c R_AARCH64_ABS64 || true)
++[ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
++ld.lld -static -nostdlib -T shim.ld --build-id=none -N $objs -o out-hotdogb/shim.elf
++llvm-objcopy -O binary out-hotdogb/shim.elf out-hotdogb/Image
++size=$(llvm-nm out-hotdogb/shim.elf | awk '$3=="_end"{print $1}')
++truncate -s $((16#$size)) out-hotdogb/Image
++python3 "$ROOT/tools/mkboot_hotdogb.py" out-hotdogb/Image "$DTB" "${2:-out-hotdogb/shim-hotdogb.img}"
+diff --git a/shim/console.h b/shim/console.h
+index 498990c..3e1088e 100644
+--- a/shim/console.h
++++ b/shim/console.h
+@@ -5,10 +5,18 @@
+  * Text console on the splash framebuffer ABL scans out. Geometry comes from
+  * the display pipe at runtime (con_init); 32 bpp, little-endian a8r8g8b8.
+  */
++#ifdef SHIM_HOTDOGB
++/* OnePlus 7T (hotdogb): sofef03f cmd-mode DSC panel, 1080x2400 */
++#define FB_SPLASH_BASE	0x9c000000UL	/* reserved-memory cont_splash_region */
++#define FB_SPLASH_SIZE	0x02400000UL
++#define FB_W		1080
++#define FB_H		2400
++#else
+ #define FB_SPLASH_BASE	0x9c400000UL	/* reserved-memory cont_splash_region */
+ #define FB_SPLASH_SIZE	0x02400000UL
+ #define FB_W		1080
+ #define FB_H		2280
++#endif
+ 
+ #define RED	0xffff0000U
+ #define BLUE	0xff0000a0U
+diff --git a/shim/shim.c b/shim/shim.c
+index ff4ed4e..7b779fc 100644
+--- a/shim/shim.c
++++ b/shim/shim.c
+@@ -241,9 +241,15 @@ void shim_main(uintptr_t dtb)
+ 	}
+ 	reset();
+ #endif
++#ifdef SHIM_HOTDOGB
++	/* First 7T bring-up: no UFS writes at all (the scratch area at the end
++	 * of userdata may still hold Android's filesystem). Screen only. */
++	ufs_ok = 0;
++#else
+ 	ufs_ok = !ufs_init();
+ 	if (ufs_ok)
+ 		ramlog_rescue();
++#endif
+ #ifdef SHIM_SHOWLOG
+ 	/* Read-only: the shim log on UFS is the previous run's, keep it. */
+ 	sde_probe();
+@@ -281,10 +287,27 @@ void shim_main(uintptr_t dtb)
+ 	sde_sample("before", 8, 20);
+ 	uintptr_t fb = sde.pipe ? rd32(sde.pipe + 0x14) : 0;
+ 	uint32_t stride = sde.pipe ? rd32(sde.pipe + 0x24) & 0xffff : 0;
++#ifdef SHIM_HOTDOGB
++	int con_ok = !con_init(fb, stride);
++	if (!con_ok)	/* fall back to the splash carve-out itself */
++		con_ok = !con_init(FB_SPLASH_BASE, FB_W * 4);
++	if (con_ok) {
++		con_clear(0xff203040);
++		con_str("HOTDOGB", "OnePlus 7T shim probe v1");
++		con_hex("sde fb", fb);
++		con_hex("sde stride", stride);
++		con_hex("sde ctl", (uint64_t)sde.ctl);
++		con_hex("sde pipe", (uint64_t)sde.pipe);
++		con_hex("spmi ok", spmi_ok);
++		con_hex("dtb", dtb);
++		con_str("next", "reset to fastboot in 20 s");
++	}
++#else
+ 	if (!con_init(fb, stride)) {
+ 		con_clear(0xff203040);
+ 		con_str("FLAME", "shim probe v1");
+ 	}
++#endif
+ 	sde_autorefresh(1);
+ 	sde_sample("autorefresh", 16, 20);
+ 	save_log("display");
+@@ -300,5 +323,9 @@ void shim_main(uintptr_t dtb)
+ 	log_ram();
+ 	log_printf("done, resetting\n");
+ 	save_log("done");
++#ifdef SHIM_HOTDOGB
++	sde_kick();
++	delay_ms(20000);
++#endif
+ 	reset();
+ }
+diff --git a/tools/mkboot_hotdogb.py b/tools/mkboot_hotdogb.py
+new file mode 100755
+index 0000000..a9f0092
+--- /dev/null
++++ b/tools/mkboot_hotdogb.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python3
++"""Pack a boot image v2 the way the OnePlus 7T (hotdogb) stock boot.img is laid out.
++
++  mkboot_hotdogb.py IMAGE DTB OUT [RAMDISK]
++
++The kernel gets Qualcomm's "UNCOMPRESSED_IMG" + le32 size prefix (what the
++stock 7T kernel uses), so ABL takes it without decompression. Layout: base 0,
++kernel 0x8000, ramdisk 0x1000000, tags 0x100, dtb 0x1f00000, page 4096.
++No ramdisk -> an empty newc cpio (gzip), like shim/build.sh.
++"""
++import gzip, hashlib, struct, sys
++
++PAGE = 4096
++def pad(b): return b + b'\0' * (-len(b) % PAGE)
++
++def empty_cpio():
++    name = b'TRAILER!!!\0'
++    hdr = b'070701' + b''.join(b'%08X' % v for v in
++          (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, len(name), 0))
++    d = hdr + name
++    d += b'\0' * (-len(d) % 4)
++    d += b'\0' * (-len(d) % 512)
++    return gzip.compress(d, 9, mtime=0)
++
++img, dtbf, out = sys.argv[1:4]
++image = open(img, 'rb').read()
++kernel = b'UNCOMPRESSED_IMG' + struct.pack('<I', len(image)) + image
++ramdisk = open(sys.argv[4], 'rb').read() if len(sys.argv) > 4 else empty_cpio()
++dtb = open(dtbf, 'rb').read()
++os_version = 0x1e00018c          # copied from the stock 7T boot_a header
++cmdline = b'console=null'
++
++sha = hashlib.sha1()
++for blob in (kernel, ramdisk, b'', b'', dtb):
++    sha.update(blob); sha.update(struct.pack('<I', len(blob)))
++h = struct.pack('<8s10I', b'ANDROID!', len(kernel), 0x8000, len(ramdisk), 0x1000000,
++                0, 0, 0x100, PAGE, 2, os_version)
++h += b'\0' * 16                                   # name
++h += cmdline.ljust(512, b'\0')
++h += sha.digest().ljust(32, b'\0')
++h += b'\0' * 1024                                 # extra cmdline
++h += struct.pack('<IQI', 0, 0, 1660)              # recovery dtbo size/offset, header size
++h += struct.pack('<IQ', len(dtb), 0x1f00000)
++assert len(h) == 1660, len(h)
++open(out, 'wb').write(pad(h) + pad(kernel) + pad(ramdisk) + pad(dtb))
++print(out, 'kernel', len(kernel), 'ramdisk', len(ramdisk), 'dtb', len(dtb))
+-- 
+2.43.0
+
