@@ -1,0 +1,62 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -609,6 +609,27 @@
+ 	return 0;
+ }
+ 
++/*
++ * GPII state for the START step (0138): channel/event CNTXT_0 (state in
++ * bits 23:20), global and GPII IRQ status, error log. Kicks the log out.
++ */
++static void
++s3_gpi_dump(const char *tag)
++{
++	if (!s3.log) {
++		return;
++	}
++	printf("SWEET S3706: GPIDBG %s: ch0 %#x ch1 %#x ev %#x glob %#x gpii %#x err %#x\n", tag,
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_TX) + GC_CONFIG),
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_RX) + GC_CONFIG),
++	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_CONFIG),
++	    s3_rd(s3.gpi_regs, 0x23100u + 0x4000u * GPII),
++	    s3_rd(s3.gpi_regs, 0x23118u + 0x4000u * GPII),
++	    s3_rd(s3.gpi_regs, 0x23200u + 0x4000u * GPII));
++	sweet_log_kick();
++	s3_wait(2500);
++}
++
+ /* Issue a channel/event command and wait for the expected CNTXT_0 state. */
+ static bool
+ s3_gpi_cmd(uint32_t cmdreg, uint32_t cntxt0, unsigned op, unsigned chid, unsigned want)
+@@ -733,10 +754,29 @@
+ 	s3.tx_wp = s3.rx_wp = 0;
+ 	GPIDBG("ch ring");
+ 
+-	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_START, GPI_CH_TX, GPI_ST_STARTED) ||
+-	    !s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_START, GPI_CH_RX, GPI_ST_STARTED)) {
++	/* 0138: kernels 0135 (no SMMU) and 0137 (SMMU shared) both reset after "ch ring". */
++	s3_gpi_dump("before start");
++	int dbg = 1;
++	(void)PE_parse_boot_argn("hdgpistart", &dbg, sizeof(dbg));
++	if (dbg == 0) {
++		printf("SWEET S3706: hdgpistart=0: stopping before channel START\n");
++		return false;
++	}
++	dbg = 0;
++	(void)PE_parse_boot_argn("hdgpipanic", &dbg, sizeof(dbg));
++	if (dbg) {
++		panic("SWEET S3706: hdgpipanic=1 test panic before GPI channel START");
++	}
++	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_START, GPI_CH_TX, GPI_ST_STARTED)) {
++		s3_gpi_dump("tx start failed");
++		return false;
++	}
++	s3_gpi_dump("tx started");
++	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_START, GPI_CH_RX, GPI_ST_STARTED)) {
++		s3_gpi_dump("rx start failed");
+ 		return false;
+ 	}
++	s3_gpi_dump("rx started");
+ 	s3.gpi = true;
+ 	printf("SWEET S3706: GPI DMA up (GPII %u, dma_pa %#llx)\n", GPII, s3.dma_pa);
+ 	return true;

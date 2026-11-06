@@ -121,3 +121,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   and with hdgpismmu=0 the whole GPI setup ran (reset only at the first DMA, stream unmatched).
 - 0137 hotdogb: panic-time console-log flush - sweet_log_panic_flush() (polled UFS, no mutex) called from
   SavePanicInfo and paniclog_flush (osfmk/arm/model_dep.c), so panics land in rawdump (7T RAM is lost).
+- 0138 hotdogb: GPI channel START debug - register dumps around TX/RX START, `hdgpistart=0` (stop before),
+  `hdgpipanic=1` (test panic before START). Kernel 0137 reset right after "ch ring".

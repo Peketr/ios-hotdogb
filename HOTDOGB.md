@@ -99,6 +99,8 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   (`hdgpismmu=3` default); the touch driver no longer maps 0x15000000 itself.
 - **0137 panic log to disk**: at panic, the console ring (panic string + backtraces, via 0098) is written
   to rawdump synchronously; hooks in osfmk/arm/model_dep.c SavePanicInfo / paniclog_flush.
+- **0138 GPI START debug**: dumps around channel START; `hdgpistart=0` stop before it, `hdgpipanic=1`
+  deliberate panic there (tests 0137).
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
@@ -117,18 +119,18 @@ Reference sources for the touch path (read-only, not vendored):
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0136 + 0137 on the Mac
+### Kernel 0138 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0136 0137; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+    for p in 0138; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0137.log
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0138.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c -e "smmu share via usb" -e "panic flush"  (want >=2)
+    # verify before sending: strings .../kernel.development.sweet | grep -c hdgpipanic  (want >=1)
 
-(Apply only the patches the tree does not yet have. The 0135 build tree needs 0136 0137; a 0133 tree
-needs 0134..0137; a fresh `build.sh` tree needs 0127..0137. A clean `build.sh` run copies every patch
+(Apply only the patches the tree does not yet have. The 0137 build tree needs just 0138; a 0135 tree
+needs 0136 0137 0138; a fresh `build.sh` tree needs 0127..0138. A clean `build.sh` run copies every patch
 from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)

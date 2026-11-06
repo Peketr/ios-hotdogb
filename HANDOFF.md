@@ -5,6 +5,18 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0137 - SMMU share works, reset now at GPI channel START; 0138 (2026-11-06, 22:45)
+Kernel 0137 (0136+0137, `work/boot/kernel-0137`, SHA-256 f35e0a3a...43ba, logs/runs/k0137-first):
+`SWEET USB: SMMU share smr4 800007b6 s2cr 4 -> cb4 (translation off)`, then every GPI setup marker through
+"ch ring" (53.9 s), then reset (back in fastboot at 63 s). No "SWEET LOG: panic flush" line: either a
+hardware reset (likely) or a panic path the 0137 hooks miss. Same point as k0135-nosmmu, so the SMMU is
+not the cause any more. Next step in the code is channel START (TX then RX). Our ALLOC/ring/scratch/QoS/
+doorbell-MSB sequence matches Linux gpi.c (gpi_alloc_ev_chan / gpi_alloc_chan / gpi_start_chan).
+- **0138** (written, syntax-checked, NOT built/run): GPII register dump (ch0/ch1/ev CNTXT_0, GLOB/GPII IRQ
+  status, ERROR_LOG) "before start", "tx started"/"rx started" (or "... start failed"), each flushed.
+  `hdgpistart=0` stops cleanly before START (should run the full 300 s); `hdgpipanic=1` panics there on
+  purpose, to prove 0137 gets a panic onto disk.
+
 ### HOTDOGB: panics were on screen but never on disk; 0137 flushes the log at panic time (2026-11-06)
 The user saw a kernel panic on screen at the end of the recent runs; none of it is in logs/runs/*/xnu.txt or
 xnu.raw. 0098 already puts the panic string and backtraces into the persistent ring (consdebug_putc), but
