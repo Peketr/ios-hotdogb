@@ -123,3 +123,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   SavePanicInfo and paniclog_flush (osfmk/arm/model_dep.c), so panics land in rawdump (7T RAM is lost).
 - 0138 hotdogb: GPI channel START debug - register dumps around TX/RX START, `hdgpistart=0` (stop before),
   `hdgpipanic=1` (test panic before START). Kernel 0137 reset right after "ch ring".
+- 0139 hotdogb: GPI I2C TREs as Linux (one message per transfer, read GO with link_rx|IEOB, IEOT on the
+  write DMA); trace of the first 3 transfers and the touch reset release. Kernel 0138: START ok, hardware
+  reset after it; hdgpipanic=1 proved the 0137 panic capture.

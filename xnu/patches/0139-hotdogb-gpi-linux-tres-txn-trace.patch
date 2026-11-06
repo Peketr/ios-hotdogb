@@ -1,0 +1,116 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -194,6 +194,8 @@
+ #define TRE_CHAIN       (1u << 0)
+ #define TRE_IEOT        (1u << 9)
+ #define TRE_BEI         (1u << 10)
++#define TRE_IEOB        (1u << 8)
++#define TRE_LINK_RX     (1u << 11)
+ #define TRE_TYPE_DMA    (0x10u << 16)
+ #define TRE_TYPE_GO     (0x20u << 16)
+ #define TRE_TYPE_CFG0   (0x22u << 16)
+@@ -845,32 +847,60 @@
+ 	uint32_t txlo = (uint32_t)txpa, txhi = (uint32_t)(txpa >> 32);
+ 	uint32_t rxlo = (uint32_t)rxpa, rxhi = (uint32_t)(rxpa >> 32);
+ 
++	/* 0139: first transactions are traced (TREs, then GPII state after the doorbell). */
++	static unsigned txn_n;
++	bool dbg = s3.log && txn_n < 3;
++	unsigned n = txn_n++;
++	if (dbg) {
++		printf("SWEET S3706: GPIDBG txn %u: write %u (%02x %02x) read %u, tx wp %#x rx wp %#x\n",
++		    n, wlen, wbuf[0], wlen > 1 ? wbuf[1] : 0, rlen, s3.tx_wp, s3.rx_wp);
++	}
++
++	/*
++	 * As Linux geni_i2c_gsi_xfer, one I2C message at a time. Write message:
++	 * [CONFIG0, chain] GO(write, stop-stretch if a read follows, chain), DMA(IEOT).
++	 */
+ 	if (!s3.cfg_done) {
+-		/* CONFIG0 as Linux geni_i2c_gsi_xfer: pack | t_cycle 24 | t_high 5 | t_low 12, clk_div 2. */
++		/* CONFIG0: pack | t_cycle 24 | t_high 5 | t_low 12, clk_div 2. */
+ 		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0318050cu, 0, 2, TRE_TYPE_CFG0 | TRE_CHAIN);
+ 		s3.cfg_done = true;
+ 	}
+-	if (rlen == 0) {
+-		s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8), 0, 0,
+-		    TRE_TYPE_GO | TRE_CHAIN);
+-		s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_IEOT);
+-		flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
+-		flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
+-		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+-		return s3_gpi_wait(GPI_CH_TX);
+-	}
+-	/* write register (clock stretched), then read */
+-	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8) | I2C_GO_STRETCH, 0, 0,
+-	    TRE_TYPE_GO | TRE_CHAIN);
+-	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_CHAIN);
+-	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_READ | (S3_ADDR << 8), 0, rlen, TRE_TYPE_GO);
+-	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, rxhi, rlen, TRE_TYPE_DMA | TRE_IEOT);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp,
++	    I2C_GO_WRITE | (S3_ADDR << 8) | (rlen ? I2C_GO_STRETCH : 0u), 0, 0, TRE_TYPE_GO | TRE_CHAIN);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_IEOT);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
++	if (dbg) {
++		GPIDBG("txn write TREs queued, ringing TX doorbell");
++	}
++	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++	if (dbg) {
++		s3_gpi_dump("txn write rung");
++	}
++	int err = s3_gpi_wait(GPI_CH_TX);
++	if (dbg) {
++		printf("SWEET S3706: GPIDBG txn %u write done err %d\n", n, err);
++	}
++	if (err || rlen == 0) {
++		return err;
++	}
++
++	/* Read message: GO(read, len, link_rx, IEOB) on TX; DMA(IEOT) on RX. */
++	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, rxhi, rlen, TRE_TYPE_DMA | TRE_IEOT);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_READ | (S3_ADDR << 8), 0, rlen,
++	    TRE_TYPE_GO | TRE_LINK_RX | TRE_IEOB);
++	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_RX_RING), GD_RING_LEN, TRUE);
++	flush_dcache64((addr64_t)(s3.dma_pa + GD_RXBUF), rlen, TRUE);
+ 	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_RX), (uint32_t)(s3.dma_pa + GD_RX_RING + s3.rx_wp));
+ 	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+-	int err = s3_gpi_wait(GPI_CH_RX);
++	if (dbg) {
++		s3_gpi_dump("txn read rung");
++	}
++	err = s3_gpi_wait(GPI_CH_RX);
++	if (dbg) {
++		printf("SWEET S3706: GPIDBG txn %u read done err %d\n", n, err);
++	}
+ 	if (!err) {
+ 		flush_dcache64((addr64_t)(s3.dma_pa + GD_RXBUF), rlen, TRUE);
+ 		memcpy(rbuf, (const void *)(s3.dma + GD_RXBUF), rlen);
+@@ -1136,8 +1166,10 @@
+ 	if (!s3_se_init()) {
+ 		goto out;
+ 	}
++	GPIDBG("se init done, releasing touch reset");
+ 	s3_gpio(S3_PIN_RESET, 0, 3, 3, true, true);
+ 	s3_wait(150);   /* firmware boot after reset */
++	GPIDBG("touch reset released, first I2C transfer next");
+ 	err = s3_scan_pdt();
+ 	if (err || s3.dead) {
+ 		printf("SWEET S3706: PDT scan failed %d (no F01/F12)\n", err);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -997,8 +997,11 @@
+ 		ufs_wr(REG_UTRLCLR, ~1u);
+ 		delay(1000);
+ 	}
+-	static const char msg[] = "SWEET LOG: panic flush\n";
+-	sweet_log_append(msg, (int)sizeof(msg) - 1);
++	if (entries == 1) {
++		/* Own line: the panic text may be mid-line here. */
++		static const char msg[] = "\nSWEET LOG: panic flush\n";
++		sweet_log_append(msg, (int)sizeof(msg) - 1);
++	}
+ 	(void)sweet_log_flush_locked();
+ }
+ 

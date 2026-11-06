@@ -5,6 +5,22 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0138 - GPI channels START fine; reset is a hardware reset in the first transfer; 0139 (2026-11-06, 23:00)
+Kernel 0138 (`work/boot/kernel-0138`, SHA-256 40d7824c...fb18):
+- k0138-first: `before start: ch0 0x1010001a ch1 0x10100112 ev 0x10110012 glob 0 gpii 0`, `tx started: ch0
+  0x1020001a`, `rx started: ch1 0x10200112` (CHSTATE 2 = started, no GPII errors), then reset (71 s). Next
+  in the code: "GPI DMA up", touch reset release, 150 ms, first I2C transfer (page select) over GPI.
+- k0138-panictest (`hdgpipanic=1`): **0137 panic capture works** - the full panic (string, boot-args,
+  paniclog, backtrace, stackshot) is in xnu.txt after "SWEET LOG: panic flush". So the real resets in
+  0137/0138 (no panic on disk) are hardware resets (NoC/XPU-type), not kernel panics.
+- Linux geni_i2c_gsi_xfer sends one I2C message per transfer: write = [CONFIG0 chain] GO(write, stretch if
+  a read follows, chain) DMA(IEOT); read = GO(read, len, link_rx|IEOB) on TX + DMA(IEOT) on RX. Ours chained
+  the read GO onto the write with no link_rx/IEOB and no IEOT on the TX DMA.
+- **0139** (written, syntax-checked, NOT built/run): Linux TRE layout; markers "se init done, releasing
+  touch reset" / "touch reset released, first I2C transfer next"; first 3 transfers traced ("txn N: write
+  .. read ..", "txn write TREs queued, ringing TX doorbell", GPII dump "txn write rung" / "txn read rung",
+  "txn N write/read done err"). Panic-flush marker now once, on its own line.
+
 ### HOTDOGB: kernel 0137 - SMMU share works, reset now at GPI channel START; 0138 (2026-11-06, 22:45)
 Kernel 0137 (0136+0137, `work/boot/kernel-0137`, SHA-256 f35e0a3a...43ba, logs/runs/k0137-first):
 `SWEET USB: SMMU share smr4 800007b6 s2cr 4 -> cb4 (translation off)`, then every GPI setup marker through
