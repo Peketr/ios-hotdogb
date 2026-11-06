@@ -1,0 +1,13 @@
+# tools/mac-build.sh: "NNNN <string>" - once patch NNNN is applied, the built
+# kernel must contain <string> (checked with strings -a). One line per patch
+# that adds a distinctive string; add a line with every new patch.
+0133 hdgpismmu
+0134 smr scan done
+0135 device status %#x
+0136 smmu share via usb
+0137 panic flush
+0138 hdgpipanic
+0139 txn write rung
+0140 hdgpibcm
+0141 events consumed
+0142 hdgpilow

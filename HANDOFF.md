@@ -5,6 +5,18 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0141 - reset within ms of the first TX doorbell (0140 just flushed one line more); 0142 (2026-11-06, 23:30)
+Kernel 0141 (`work/boot/kernel-0141`, SHA-256 2145ce08...01f9, logs/runs/k0141-first): last line again
+`txn write TREs queued, ringing TX doorbell` (back at 80 s), no "txn write rung". So 0140's extra line was
+flush timing: the reset comes within milliseconds of the doorbell, while the GPI fetches/executes the first
+TREs - the event-ring handling (0141) is never reached.
+- Suspect: address width. The DMA block (rings + buffers) is at 0x1_049xxxxx; Linux only gives the GPI IOVAs
+  in 0x100000..0x200000 (qcom,iova-range); the DWC3 that works >4 GiB is a 64-bit master. A 32-bit GPI
+  would fetch from 0x049xxxxx - someone else's memory -> XPU reset.
+- **0142** (written, syntax-checked, NOT built/run): kmem_alloc_contig with max_pnum = 4 GiB (`hdgpilow=1`
+  default, 0 = anywhere); refuses to continue if the block still lands above 4 GiB. Check the
+  `GPIDBG dma_pa` line is < 0x100000000.
+
 ### HOTDOGB: kernel 0140 - bus votes fix the doorbell reset; reset now while waiting for the event; 0141 (2026-11-06, 23:20)
 Kernel 0140 (`work/boot/kernel-0140`, SHA-256 3d6e71cb...870c, logs/runs/k0140-first): BCM QUP0 + SN11 votes
 -> 0, and the first TX doorbell no longer resets: `txn write rung: ch0 0x1020001a ... glob 0 gpii 0`. Reset

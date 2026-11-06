@@ -106,6 +106,7 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0140 QUP2 bus votes**: BCM QUP0 + SN11 ACTIVE votes (`hdgpibcm=N`, 0 = off) for the GPI's path to DDR.
   Kernel 0140: fixed the reset on the first TX doorbell.
 - **0141 GPI event ring WP**: event doorbell carries the recycled WP (as Linux), not the RP; wait traced.
+- **0142 GPI DMA below 4 GiB** (`hdgpilow=1` default): Linux only gives the GPI 32-bit IOVAs.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
@@ -124,19 +125,18 @@ Reference sources for the touch path (read-only, not vendored):
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0141 on the Mac
+### Building on the Mac (tools/mac-build.sh)
 
-    git pull                                    # in ~/gitrepos/ios-hotdogb
-    cd work/dxb/xnu
-    for p in 0141; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
-        patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0141.log
-    # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c "events consumed"  (want >=1)
+    cd ~/gitrepos/ios-hotdogb && git pull && tools/mac-build.sh
+    # first time only, with a tree that already has everything through 0141:
+    #   tools/mac-build.sh --applied-through 0141
 
-(Apply only the patches the tree does not yet have. The 0140 build tree needs just 0141; a 0139 tree
-needs 0140 0141; a fresh `build.sh` tree needs 0127..0141. A clean `build.sh` run copies every patch
-from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
+It applies every xnu/patches/NNNN-*.patch the work/dxb/xnu tree does not have yet (recorded in
+work/dxb/applied-patches; a patch already in the tree is detected and recorded, one that does not apply
+stops the run), builds with tools/build-xnu.sh (log work/build-NNNN.log), checks the kernel for each
+applied patch's string from tools/mac-build-check.txt, and copies it to work/out/kernel-NNNN.sweet -
+the file to upload. `--dry-run` shows what it would apply. Add a check line for every new patch.
+
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)
 

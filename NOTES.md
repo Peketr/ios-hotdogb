@@ -130,3 +130,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   (`hdgpibcm`). Kernel 0139 reset on the first GPI TX doorbell (first GPI memory access).
 - 0141 hotdogb: GPI event ring as Linux (WP primed base+len-16, advanced per consumed event, doorbell + IEOB
   clear only after events), wait traced. Kernel 0140: votes fixed the doorbell reset; reset in the wait.
+- 0142 hotdogb: GPI DMA block below 4 GiB (`hdgpilow`). Kernel 0141 reset within ms of the first TX
+  doorbell (0140's extra line was flush timing), i.e. on the GPI's first TRE fetch from 0x1_049xxxxx.

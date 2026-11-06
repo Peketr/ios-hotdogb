@@ -1,0 +1,42 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -690,9 +690,20 @@
+ 		printf("SWEET S3706: GPI MMIO map failed\n");
+ 		return false;
+ 	}
+-	if (kmem_alloc_contig(kernel_map, &s3.dma, GD_SIZE, PAGE_MASK, 0, 0,
+-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET S3706: GPI DMA alloc failed\n");
++	/*
++	 * 0142: below 4 GiB by default (hdgpilow=0: anywhere). Linux only ever hands
++	 * the GPI IOVAs in 0x100000..0x200000 (qcom,iova-range); kernels 0139-0141,
++	 * with the block at 0x1_049xxxxx, reset within milliseconds of the first TX
++	 * doorbell, i.e. on the GPI's first TRE fetch - consistent with a 32-bit
++	 * master whose truncated address hits someone else's (secure) memory.
++	 */
++	int low = 1;
++	(void)PE_parse_boot_argn("hdgpilow", &low, sizeof(low));
++	ppnum_t maxpn = low ? (ppnum_t)(atop_64(0x100000000ULL) - 1) : 0;
++	kern_return_t kr = kmem_alloc_contig(kernel_map, &s3.dma, GD_SIZE, PAGE_MASK, maxpn, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS) {
++		printf("SWEET S3706: GPI DMA alloc failed (%d, below 4 GiB %d)\n", kr, low);
+ 		return false;
+ 	}
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)s3.dma);
+@@ -700,9 +711,12 @@
+ 		return false;
+ 	}
+ 	s3.dma_pa = ptoa_64(pn);
+-	/* RAM above 4 GiB is fine: the GPI engine is 64-bit, the ring CNTXT and the
+-	 * DMA TREs carry the high word, and an 8 KiB block never straddles a 4 GiB
+-	 * boundary (so the low-32 doorbell/event-RP math stays within one window). */
++	if (low && (s3.dma_pa >> 32)) {
++		printf("SWEET S3706: GPI DMA at %#llx despite the 4 GiB limit; stopping\n", s3.dma_pa);
++		return false;
++	}
++	/* The ring CNTXT and the DMA TREs carry the high word anyway, and an 8 KiB
++	 * block never straddles a 4 GiB boundary (low-32 doorbell math stays valid). */
+ 	if (s3.log) {
+ 		printf("SWEET S3706: GPIDBG dma_pa %#llx regs %#lx\n", s3.dma_pa, (unsigned long)s3.gpi_regs);
+ 		sweet_log_kick();
