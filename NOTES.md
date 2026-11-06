@@ -106,3 +106,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0130 hotdogb: S3706 touch over GPI DMA (GSI mode) through qcom,gpi-dma@0xc00000 GPII 1: polled
   channel/event rings, I2C config0/go/dma TREs, apps-SMMU bypass for stream 0x7b6. `hdtouchgpi=0` reverts
   to the 0129 stop. Register/command model from Linux gpi.c + i2c-qcom-geni.c; logic host-tested.
+- 0131 hotdogb: GPI DMA buffers above 4 GiB (the DMA block can land there) - carry the high word in the
+  TRE dword1 and drop the <4 GiB bail; ring CNTXT/doorbell already 64-bit. (Kernel 0130 bailed on this.)

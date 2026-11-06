@@ -5,6 +5,20 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0130 GPI touch reached DMA setup; 0131 fixes >4 GiB addressing (2026-11-06, 16:18)
+Kernel 0130 (`work/boot/kernel-0130`, SHA-256 da65d473...b00c5) ran the full 300 s, no reset - the GPI path
+touches nothing TrustZone-protected. Log (logs/runs/k0130-first/xnu.txt): the touch driver read the SE
+(`se fw=0x303 proto=3`), then stopped at my own guard: `GPI DMA above 4 GB (0x104914000)`. The contiguous
+DMA block landed at PA 0x1_04914000; I was only programming the low 32 bits of the TRE buffer addresses.
+- **0131** (written, host-tested, NOT built/run): drop the >4 GiB bail (the GPI engine is 64-bit, like the
+  UFS driver's DMA) and put the high word in the DMA TREs' dword1. The ring CNTXT already carried BASE_MSB
+  and DOORBELL_1; an 8 KiB block never straddles a 4 GiB boundary, so the low-32 doorbell/event-RP math is
+  safe. Host test now covers a PA above 4 GiB (TRE high word = 1); aarch64 syntax-checked.
+- Next: build 0131 on the Mac (needs only 0131 on the 0130 tree; HOTDOGB.md "Kernel 0131 on the Mac"), run,
+  touch the screen. Expect past the 4 GiB point: `GPI DMA up (GPII 1, dma_pa 0x1...)`, then ALLOCATE/START
+  (watch for `GPI cmd ...` timeouts = clock/SMMU), a PDT scan, `F12 data1 at ...`, `N objects, polling
+  every 8 ms`, and with hdtouchlog `obj N type 1 x .. y ..` as the screen is touched.
+
 ### HOTDOGB: S3706 touch over GPI DMA - patch 0130 (2026-11-06, written + host-tested, NOT built/run)
 The FIFO switch is out (TrustZone), so touch I2C now goes the way Android does: the QUPv3 GPI DMA
 engine. Patch 0130 adds a polled GPI/GSI client to `bsd/dev/sweet_s3706.c` (no new file):

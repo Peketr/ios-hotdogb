@@ -1,0 +1,48 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -607,10 +607,9 @@
+ 		return false;
+ 	}
+ 	s3.dma_pa = ptoa_64(pn);
+-	if (s3.dma_pa >> 32) {
+-		printf("SWEET S3706: GPI DMA above 4 GB (%#llx)\n", s3.dma_pa);
+-		return false;
+-	}
++	/* RAM above 4 GiB is fine: the GPI engine is 64-bit, the ring CNTXT and the
++	 * DMA TREs carry the high word, and an 8 KiB block never straddles a 4 GiB
++	 * boundary (so the low-32 doorbell/event-RP math stays within one window). */
+ 	if (s3_gpi_smmu() != 0) {
+ 		return false;
+ 	}
+@@ -720,7 +719,9 @@
+ 		return EIO;
+ 	}
+ 	memcpy((void *)(s3.dma + GD_TXBUF), wbuf, wlen);
+-	uint32_t txlo = (uint32_t)(s3.dma_pa + GD_TXBUF), rxlo = (uint32_t)(s3.dma_pa + GD_RXBUF);
++	uint64_t txpa = s3.dma_pa + GD_TXBUF, rxpa = s3.dma_pa + GD_RXBUF;
++	uint32_t txlo = (uint32_t)txpa, txhi = (uint32_t)(txpa >> 32);
++	uint32_t rxlo = (uint32_t)rxpa, rxhi = (uint32_t)(rxpa >> 32);
+ 
+ 	if (!s3.cfg_done) {
+ 		/* CONFIG0: 400 kHz @ 19.2 MHz (tlow 11, thigh 5, tcyl 22), clk_div 2, packed. */
+@@ -730,7 +731,7 @@
+ 	if (rlen == 0) {
+ 		s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8), 0, 0,
+ 		    TRE_TYPE_GO | TRE_CHAIN);
+-		s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, 0, wlen, TRE_TYPE_DMA | TRE_IEOT);
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_IEOT);
+ 		flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
+ 		flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
+ 		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+@@ -739,9 +740,9 @@
+ 	/* write register (clock stretched), then read */
+ 	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8) | I2C_GO_STRETCH, 0, 0,
+ 	    TRE_TYPE_GO | TRE_CHAIN);
+-	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, 0, wlen, TRE_TYPE_DMA | TRE_CHAIN);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_CHAIN);
+ 	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_READ | (S3_ADDR << 8), 0, rlen, TRE_TYPE_GO);
+-	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, 0, rlen, TRE_TYPE_DMA | TRE_IEOT);
++	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, rxhi, rlen, TRE_TYPE_DMA | TRE_IEOT);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
+ 	flush_dcache64((addr64_t)(s3.dma_pa + GD_RX_RING), GD_RING_LEN, TRUE);
