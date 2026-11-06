@@ -5,6 +5,30 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: S3706 touch over GPI DMA - patch 0130 (2026-11-06, written + host-tested, NOT built/run)
+The FIFO switch is out (TrustZone), so touch I2C now goes the way Android does: the QUPv3 GPI DMA
+engine. Patch 0130 adds a polled GPI/GSI client to `bsd/dev/sweet_s3706.c` (no new file):
+- From the phone's live FDT: GPI DMA at `qcom,gpi-dma@0xc00000`, this SE's channel is
+  `gpi_dmac00000_gpii1` (so GPII 1), `dmas` seid 3, IOMMU stream `<&apps_smmu 0x7b6 0>`.
+- Setup (`s3_gpi_setup`): map the GPII window, one 8 KiB contiguous DMA block (event ring 4 KiB +
+  TX/RX channel rings 1 KiB each + I2C buffers), an apps-SMMU stage-1 bypass bank for stream 0x7b6
+  (same translation-off bank sweet_usb.c uses), SE into GSI mode (DMA_MODE_EN, GSI_EVENT_EN - all
+  below SE+0x2000, never the forbidden region), then ALLOCATE/START the event ring + TX(0)/RX(1)
+  channels, polling CNTXT_0 state (no GPII interrupt).
+- Transfers (`s3_gpi_txn`): I2C config0 (400 kHz) once, then GO(write)+DMA for a write, or
+  GO(write,stretch)+DMA+GO(read) on TX with an RX DMA for a read; doorbell, then poll the event ring
+  for XFER_COMPLETE (EOT/SUCCESS) on the channel. `s3_read`/`s3_write`/`s3_page` dispatch to it when
+  `s3.gpi`. Register + command model from Linux `drivers/dma/qcom/gpi.c` and `i2c-qcom-geni.c`.
+- Reconstructed the post-0129 source tree from patches 0001-0129 (the Mac has the only real tree);
+  0130 applies on it and reproduces the edit. Host-tested the TRE bit layout, ring WP wrap, and the
+  event parser (EOT/SUCCESS/error/other-channel/wrap) under ASan; syntax-checked the register-poke
+  functions against stubs for aarch64. Not built or run on the phone.
+- Boot-args: `hdtouchgpi=0` forces the 0129 stop (to isolate a GPI problem); `hdtouchlog=1` logs per
+  object. In the log expect `GPI DMA up (GPII 1, ...)`, a PDT scan (`PDT page 0 F01 ...`, `F12 ...`),
+  `F12 data1 at ...`, then `N objects, polling every 8 ms`; touch the screen and, with hdtouchlog,
+  `obj N type 1 x .. y ..`. Risks to watch: GPI/QUP clock may need enabling (ALLOCATE/START timeout);
+  SMMU bypass may fault (no event, timeout); event-ring RP semantics (CNTXT_4) assumed per gpi.c.
+
 ### HOTDOGB: kernel 0128 - USB NCM works on Windows; touch FIFO switch resets the phone (2026-11-06, 15:30)
 `work/boot/kernel-0128` (0001-0128, SHA-256 6a145776...37bd7d0). Boot-args as 0126 (`rd=ufsroot0
 ufsroot=rawdump sweetusb=2 sweetmtl=2`). Runs k0128-first, k0128-nofifo (`hdtouchfifo=0`), k0128-notouch (`hdtouch=0`).
@@ -17,8 +41,10 @@ ufsroot=rawdump sweetusb=2 sweetmtl=2`). Runs k0128-first, k0128-nofifo (`hdtouc
   log ends at the L17A vote (~31.4 s, lines after the last 2 s flush are lost). k0128-notouch ran the full
   120 s. 0127 reads SE + 0x2000/0x2004/0x2008 before checking hdtouchfifo, so any access to that region
   resets the SoC: TrustZone-protected. FIFO mode cannot be selected from the kernel.
-- **0129** (written, not built): no access to SE + 0x2000.., a GSI-only SE is a logged stop again (as 0126).
-  Until a 0129 kernel exists, boot kernel-0128 with `hdtouch=0`.
+- **0129**: no access to SE + 0x2000.., a GSI-only SE is a logged stop again (as 0126). Kernel 0129
+  (`work/boot/kernel-0129`, SHA-256 f1f4129d...316a3d), run k0129-first, same boot-args, no workaround:
+  full 300 s (flamereboot at 311.951), "SE is GSI-only (FIFO interface off); touch needs GPI DMA; stopping"
+  at 31.976, NCM configured and 48 frames/ARPs from Windows parsed. Current stable hotdogb kernel.
 - Open: touch needs GSI/GPI DMA (QUPv3 2 GPI: channel/event rings, TREs for I2C config/go/DMA, the QUP's
   SMMU stream); a driver of its own.
 

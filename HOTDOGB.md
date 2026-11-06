@@ -81,6 +81,11 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   phone at once (TrustZone-protected), reads included.** Undone by 0129.
 - **0129 S3706 no FIFO switch**: a GSI-only SE is a logged stop ("touch needs GPI DMA"), never
   an access to SE + 0x2000... Touch on the 7T needs a GSI/GPI DMA path.
+- **0130 S3706 over GPI DMA**: polled GPI/GSI I2C client (qcom,gpi-dma@0xc00000 GPII 1, from the
+  live FDT): event + TX/RX channel rings in one contiguous DMA block, apps-SMMU bypass for stream
+  0x7b6, SE put in GSI mode (regs below SE+0x2000 only), I2C config0/go/dma TREs. Replaces the FIFO
+  s3_msg path when the SE is GSI-only. Model from Linux gpi.c + i2c-qcom-geni.c. `hdtouchgpi=0`
+  reverts to the 0129 stop. Logic host-tested (TRE layout, ring wrap, event parse); not yet on-device.
 - **0128 USB NCM**: the Windows host had no driver for the CDC-ECM gadget. On hotdogb the gadget
   is now CDC-NCM: device class EF/02/01 + IAD (Windows' composite driver enumerates the
   function), MS OS 1.0 string 0xEE + extended compatible ID "WINNCM" (inbox UsbNcm),
@@ -89,14 +94,17 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0129 on the Mac
+### Kernel 0130 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0129; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+    for p in 0129 0130; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0129.log
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0130.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+
+(Apply only the patches the tree does not yet have: a tree built for 0128 needs 0129 0130; a fresh
+`build.sh` tree needs 0127..0130. A clean `build.sh` run copies every patch from xnu/patches.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)
 

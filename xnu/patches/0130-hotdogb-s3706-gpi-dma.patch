@@ -1,0 +1,468 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -15,7 +15,7 @@
+  * reset GPIO80 (active low), attention GPIO122 (active low).
+  *
+  * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+- * hdtouchlog=1 log every object.
++ * hdtouchlog=1 log every object, hdtouchgpi=0 refuse GPI (stop as before).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -25,6 +25,9 @@
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -35,6 +38,10 @@
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++
++static bool s3_gpi_setup(void);
++static int s3_gpi_txn(const uint8_t *wbuf, unsigned wlen, uint8_t *rbuf, unsigned rlen);
+ 
+ #define S3_SE_PA        0x00c80000u     /* i2c@c80000, QUPv3 2 SE0 */
+ #define S3_GCC_PA       0x00100000u
+@@ -109,6 +116,90 @@
+ #define RMI_PDT_SIZE    6u
+ #define RMI_PAGES       4u
+ 
++/*
++ * GPI DMA (GSI mode). The 7T leaves this SE's FIFO interface off (XBL set it
++ * up for GPI), and the register that would switch it back (SE + 0x2000..) is
++ * TrustZone-protected: any access resets the SoC. So I2C goes the way Android
++ * does, through the QUPv3 GPI DMA engine (qcom,gpi-dma@0xc00000, the live FDT
++ * names gpi_dmac00000_gpii1 as this SE's channel). Registers and the command
++ * model follow Linux drivers/dma/qcom/gpi.c; the I2C TRE layout follows
++ * drivers/i2c/busses/i2c-qcom-geni.c. Polled: no GPII interrupt is enabled;
++ * channel state is read from CNTXT_0, transfers complete via the event ring.
++ *
++ * The engine masters through the apps SMMU (iommus = <&apps_smmu 0x7b6 0>);
++ * a stage-1 bypass context bank (translation off, as ABL leaves its own
++ * streams) lets it use the physical addresses we program. sweet_usb.c does
++ * the same for the DWC3's stream.
++ */
++#define GPI_PA          0x00c00000u     /* ee_offset 0 on sm8150: ee_base = reg base */
++#define GPI_SIZE        0x00028000u
++#define GPII            1u              /* gpi_dmac00000_gpii1 (live FDT) */
++#define GPI_CH_TX       0u
++#define GPI_CH_RX       1u
++#define GPI_SEID        3u              /* i2c@c80000 dmas seid (FDT) */
++#define GPI_PROTO_I2C   3u              /* dt-bindings/dma/qcom-gpi.h QCOM_GPI_I2C */
++#define GPI_SMMU_SID    0x7b6u
++
++#define G_CH_CNTXT(k)   (0x20000u + 0x4000u * GPII + 0x80u * (k))
++#define G_CH_QOS(k)     (0x2005cu + 0x4000u * GPII + 0x80u * (k))
++#define G_CH_SCR0(k)    (0x20060u + 0x4000u * GPII + 0x80u * (k))
++#define G_CH_SCR1(k)    (0x20064u + 0x4000u * GPII + 0x80u * (k))
++#define G_EV_CNTXT      (0x21000u + 0x4000u * GPII)             /* event chan 0 */
++#define G_CH_DB(k)      (0x22000u + 0x4000u * GPII + 0x8u * (k))
++#define G_EV_DB         (0x22100u + 0x4000u * GPII)
++#define G_CH_CMD        (0x23008u + 0x4000u * GPII)
++#define G_EV_CMD        (0x23010u + 0x4000u * GPII)
++#define G_TYPE_IRQ_MSK  (0x23088u + 0x4000u * GPII)
++#define G_CH_IRQ_MSK    (0x23098u + 0x4000u * GPII)
++#define G_EV_IRQ_MSK    (0x2309cu + 0x4000u * GPII)
++#define G_IEOB_IRQ_MSK  (0x230b8u + 0x4000u * GPII)
++#define G_IEOB_IRQ_CLR  (0x230c0u + 0x4000u * GPII)
++#define G_GLOB_IRQ_EN   (0x23108u + 0x4000u * GPII)
++#define G_GPII_IRQ_EN   (0x23120u + 0x4000u * GPII)
++#define G_INTSET        (0x23180u + 0x4000u * GPII)
++/* CNTXT_n sub-offsets (channel and event rings share them) */
++#define GC_CONFIG       0x0u
++#define GC_LENGTH       0x4u
++#define GC_BASE_LSB     0x8u
++#define GC_BASE_MSB     0xcu
++#define GC_RP_LSB       0x10u
++#define GC_WP_LSB       0x18u
++#define GC_INT_MOD      0x20u
++#define GC_MSI_LSB      0x28u
++#define GC_RP_UPD_LSB   0x30u
++/* CH_CMD / EV_CMD opcodes */
++#define GPI_OP_ALLOC    0u
++#define GPI_OP_START    1u
++#define GPI_OP_STOP     2u
++/* channel CNTXT_0 CHSTATE (bits 23:20) */
++#define GPI_ST_ALLOCATED 1u
++#define GPI_ST_STARTED   2u
++/* DMA layout (one 8 KiB contiguous block) */
++#define GD_EV_RING      0x0000u         /* 256 events * 16 = 4096, 4 KiB aligned */
++#define GD_EV_LEN       0x1000u
++#define GD_TX_RING      0x1000u         /* 64 TREs * 16 = 1024 */
++#define GD_RX_RING      0x1400u
++#define GD_RING_LEN     0x400u
++#define GD_TXBUF        0x1800u
++#define GD_RXBUF        0x1900u
++#define GD_BUF_MAX      0x100u
++#define GD_SIZE         0x2000u
++/* TRE dword3 */
++#define TRE_CHAIN       (1u << 0)
++#define TRE_IEOT        (1u << 9)
++#define TRE_BEI         (1u << 10)
++#define TRE_TYPE_DMA    (0x10u << 16)
++#define TRE_TYPE_GO     (0x20u << 16)
++#define TRE_TYPE_CFG0   (0x22u << 16)
++/* event element type (dword3 bits 23:16) and completion code (dword2 bits 31:24) */
++#define EV_TYPE_XFER    0x22u
++#define EV_CODE_SUCCESS 1u
++#define EV_CODE_EOT     2u
++/* I2C GO command field (dword0 bits 4:0) */
++#define I2C_GO_WRITE    1u
++#define I2C_GO_READ     2u
++#define I2C_GO_STRETCH  (1u << 26)
++
+ static struct {
+ 	vm_offset_t se, gcc, gpio;
+ 	bool started, dead;
+@@ -123,6 +214,13 @@
+ 	unsigned data1_off, data1_size, fingers;
+ 	uint32_t active;
+ 	int x[S3_MAX], y[S3_MAX];
++	/* GPI DMA (GSI mode) */
++	bool gpi;                       /* I2C goes over GPI, not the FIFO */
++	vm_offset_t gpi_regs;           /* qcom,gpi-dma@0xc00000 (GPII window) */
++	vm_offset_t dma;                /* contiguous rings + I2C buffers */
++	uint64_t dma_pa;
++	unsigned tx_wp, rx_wp, ev_rp;   /* byte offsets into their rings */
++	bool cfg_done;                  /* CONFIG0 TRE already issued once */
+ } s3;
+ static int s3_sleep_chan;
+ 
+@@ -227,8 +325,19 @@
+ 	printf("SWEET S3706: se fw=%#x proto=%u status=%#x fifo-off=%#x tx=%#x rx=%#x\n",
+ 	    fw, (fw >> 8) & 0xffu, s3_rd(s3.se, SE_STATUS), s3_rd(s3.se, SE_FIFO_OFF), tx, rx);
+ 	if (s3_rd(s3.se, SE_FIFO_OFF) & 1u) {
+-		printf("SWEET S3706: SE is GSI-only (FIFO interface off); touch needs GPI DMA; stopping\n");
+-		return false;
++		/* XBL left the SE GSI-only; the FIFO switch resets the SoC. Use GPI DMA.
++		 * hdtouchgpi=0 forces the old stop (for isolating a GPI problem). */
++		int gpi = 1;
++		(void)PE_parse_boot_argn("hdtouchgpi", &gpi, sizeof(gpi));
++		if (((fw >> 8) & 0xffu) != 3u) {
++			printf("SWEET S3706: SE firmware is not I2C (proto %u); stopping\n", (fw >> 8) & 0xffu);
++			return false;
++		}
++		if (!gpi) {
++			printf("SWEET S3706: SE is GSI-only and hdtouchgpi=0; stopping\n");
++			return false;
++		}
++		return s3_gpi_setup();
+ 	}
+ 	/* Protocol 3 = I2C; 32-bit FIFO words. */
+ 	if (((fw >> 8) & 0xffu) != 3u || (s3_rd(s3.se, SE_FIFO_OFF) & 1u) ||
+@@ -372,6 +481,280 @@
+ 	return EIO;
+ }
+ 
++/* ---- GPI DMA (GSI mode) ---- */
++
++/*
++ * apps SMMU (0x15000000) stage-1 bypass bank for the GPI's stream 0x7b6, so
++ * the engine reaches the physical ring/buffer addresses we program. Same
++ * "translation off, as ABL" bank sweet_usb.c uses for the DWC3 stream.
++ */
++static int
++s3_gpi_smmu(void)
++{
++	vm_offset_t as = ml_io_map(0x15000000ull, 0x100000);
++	if (!as) {
++		return -1;
++	}
++	uint32_t idr0 = s3_rd(as, 0x20), idr1 = s3_rd(as, 0x24);
++	unsigned nsmr = idr0 & 0xffu, ncb = idr1 & 0xffu;
++	uint32_t pagesz = (idr1 >> 31) ? 0x10000u : 0x1000u;
++	uint32_t cbbase = (1u << (((idr1 >> 28) & 7u) + 1u)) * pagesz;
++	uint64_t used[2] = {0, 0};
++	int smr = -1, cb = -1;
++	for (unsigned i = 0; i < nsmr; i++) {
++		uint32_t m = s3_rd(as, 0x800 + 4 * i), c = s3_rd(as, 0xc00 + 4 * i);
++		if (!(m >> 31)) {
++			if (smr < 0) {
++				smr = (int)i;
++			}
++			continue;
++		}
++		if (((c >> 16) & 3u) == 0) {
++			used[(c & 0xffu) / 64] |= 1ull << ((c & 0xffu) % 64);
++		}
++		if (((GPI_SMMU_SID ^ (m & 0x7fffu)) & ~((m >> 16) & 0x7fffu) & 0x7fffu) == 0) {
++			printf("SWEET S3706: SMMU smr%u already matches %#x (s2cr %#x)\n", i, GPI_SMMU_SID, c);
++			return -1;
++		}
++	}
++	for (int c = 0; c < (int)ncb; c++) {
++		if (!(used[c / 64] & (1ull << (c % 64))) && !(s3_rd(as, cbbase + c * pagesz) & 1u) &&
++		    s3_rd(as, pagesz + 4 * c) == 0) {
++			cb = c;
++			break;
++		}
++	}
++	if (smr < 0 || cb < 0) {
++		printf("SWEET S3706: SMMU: no free smr/cb (%d/%d)\n", smr, cb);
++		return -1;
++	}
++	vm_offset_t cbv = as + cbbase + cb * pagesz;
++	*(volatile uint32_t *)(cbv + 0x00) = 0xe0u;                     /* SCTLR: M=0 (translation off) */
++	*(volatile uint32_t *)(as + pagesz + 0x800 + 4 * cb) = 1u;      /* CBA2R: AArch64 */
++	*(volatile uint32_t *)(as + pagesz + 4 * cb) = 0x1f000u;        /* CBAR as ABL's banks */
++	__asm__ volatile("dsb sy" ::: "memory");
++	*(volatile uint32_t *)(as + 0xc00 + 4 * smr) = (uint32_t)cb;
++	*(volatile uint32_t *)(as + 0x800 + 4 * smr) = (1u << 31) | GPI_SMMU_SID;
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET S3706: SMMU smr%d %#x -> cb%d (translation off)\n", smr,
++	    s3_rd(as, 0x800 + 4 * smr), cb);
++	return 0;
++}
++
++/* Issue a channel/event command and wait for the expected CNTXT_0 state. */
++static bool
++s3_gpi_cmd(uint32_t cmdreg, uint32_t cntxt0, unsigned op, unsigned chid, unsigned want)
++{
++	s3_wr(s3.gpi_regs, cmdreg, (op << 24) | chid);
++	for (unsigned i = 0; i < 2000; i++) {
++		if (((s3_rd(s3.gpi_regs, cntxt0 + GC_CONFIG) >> 20) & 0xfu) == want) {
++			return true;
++		}
++		delay(10);
++	}
++	printf("SWEET S3706: GPI cmd op %u ch %u -> state %#x (want %u)\n", op, chid,
++	    (s3_rd(s3.gpi_regs, cntxt0 + GC_CONFIG) >> 20) & 0xfu, want);
++	return false;
++}
++
++/* Program a channel's CNTXT registers to point at a ring in our DMA block. */
++static void
++s3_gpi_ring(uint32_t cntxt, uint32_t db, uint32_t cfg0, unsigned off, unsigned len)
++{
++	uint64_t pa = s3.dma_pa + off;
++	s3_wr(s3.gpi_regs, cntxt + GC_CONFIG, cfg0);
++	s3_wr(s3.gpi_regs, cntxt + GC_LENGTH, len);
++	s3_wr(s3.gpi_regs, cntxt + GC_BASE_LSB, (uint32_t)pa);
++	s3_wr(s3.gpi_regs, cntxt + GC_BASE_MSB, (uint32_t)(pa >> 32));
++	s3_wr(s3.gpi_regs, db + 4, (uint32_t)(pa >> 32));
++}
++
++static void
++s3_gpi_se_mode(void)
++{
++	/* geni_se_select_gpi_mode, all below SE + 0x2000 (the forbidden region). */
++	s3_wr(s3.se, 0xe18, 0);                  /* SE_GSI_EVENT_EN */
++	s3_wr(s3.se, 0x618, 0xffffffffu);        /* M_IRQ_CLEAR */
++	s3_wr(s3.se, 0x648, 0xffffffffu);        /* S_IRQ_CLEAR */
++	s3_wr(s3.se, 0xc44, 0xffffffffu);        /* DMA_TX_IRQ_CLR */
++	s3_wr(s3.se, 0xd44, 0xffffffffu);        /* DMA_RX_IRQ_CLR */
++	s3_wr(s3.se, 0xe1c, 0xffffffffu);        /* SE_IRQ_EN */
++	s3_wr(s3.se, 0xe1c, 0);
++	s3_wr(s3.se, 0x614, s3_rd(s3.se, 0x614) & ~0x4c000001u); /* clear CMD_DONE, TX/RX WM, RX_LAST */
++	s3_wr(s3.se, 0x258, 1);                  /* SE_GENI_DMA_MODE_EN */
++	s3_wr(s3.se, 0xe18, s3_rd(s3.se, 0xe18) | 0xfu); /* DMA_TX/RX + M/S event en */
++	/* qcom_geni_i2c_conf: XO level 0, 400 kHz (same regs the FIFO path used). */
++	s3_wr(s3.se, SE_CLK_SEL, 0);
++	s3_wr(s3.se, SE_MCLK, I2C_MCLK);
++	s3_wr(s3.se, SE_I2C_SCL, I2C_SCL);
++}
++
++static bool
++s3_gpi_setup(void)
++{
++	s3.gpi_regs = ml_io_map(GPI_PA, GPI_SIZE);
++	if (!s3.gpi_regs) {
++		printf("SWEET S3706: GPI MMIO map failed\n");
++		return false;
++	}
++	if (kmem_alloc_contig(kernel_map, &s3.dma, GD_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET S3706: GPI DMA alloc failed\n");
++		return false;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)s3.dma);
++	if (!pn) {
++		return false;
++	}
++	s3.dma_pa = ptoa_64(pn);
++	if (s3.dma_pa >> 32) {
++		printf("SWEET S3706: GPI DMA above 4 GB (%#llx)\n", s3.dma_pa);
++		return false;
++	}
++	if (s3_gpi_smmu() != 0) {
++		return false;
++	}
++	s3_gpi_se_mode();
++
++	/* No GPII interrupt: mask every source, we poll. */
++	s3_wr(s3.gpi_regs, G_TYPE_IRQ_MSK, 0);
++	s3_wr(s3.gpi_regs, G_CH_IRQ_MSK, 0);
++	s3_wr(s3.gpi_regs, G_EV_IRQ_MSK, 0);
++	s3_wr(s3.gpi_regs, G_IEOB_IRQ_MSK, 0);
++	s3_wr(s3.gpi_regs, G_GLOB_IRQ_EN, 0);
++	s3_wr(s3.gpi_regs, G_GPII_IRQ_EN, 0);
++	s3_wr(s3.gpi_regs, G_INTSET, 1);
++
++	/* Event ring: allocate, then program CNTXT (EL_SIZE 16, INTYPE 1, CHTYPE 2). */
++	if (!s3_gpi_cmd(G_EV_CMD, G_EV_CNTXT, GPI_OP_ALLOC, 0, GPI_ST_ALLOCATED)) {
++		return false;
++	}
++	s3_gpi_ring(G_EV_CNTXT, G_EV_DB, 0x10010002u, GD_EV_RING, GD_EV_LEN);
++	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_INT_MOD, 0);
++	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_MSI_LSB, 0);
++	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_RP_UPD_LSB, 0);
++	/* Prime: wp = base + len - 16, ring the event doorbell. */
++	s3.ev_rp = 0;
++	__asm__ volatile("dsb sy" ::: "memory");
++	s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + GD_EV_LEN - 16));
++
++	/* TX channel 0 (DIR_OUT) and RX channel 1 (DIR_IN). */
++	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_ALLOC, GPI_CH_TX, GPI_ST_ALLOCATED) ||
++	    !s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_ALLOC, GPI_CH_RX, GPI_ST_ALLOCATED)) {
++		return false;
++	}
++	s3_gpi_ring(G_CH_CNTXT(GPI_CH_TX), G_CH_DB(GPI_CH_TX), 0x1000000au, GD_TX_RING, GD_RING_LEN);
++	s3_gpi_ring(G_CH_CNTXT(GPI_CH_RX), G_CH_DB(GPI_CH_RX), 0x10000002u, GD_RX_RING, GD_RING_LEN);
++	/* SCRATCH_0 = (pair<<16)|(proto<<4)|seid; pair = !chid. */
++	s3_wr(s3.gpi_regs, G_CH_SCR0(GPI_CH_TX), (1u << 16) | (GPI_PROTO_I2C << 4) | GPI_SEID);
++	s3_wr(s3.gpi_regs, G_CH_SCR0(GPI_CH_RX), (GPI_PROTO_I2C << 4) | GPI_SEID);
++	s3_wr(s3.gpi_regs, G_CH_QOS(GPI_CH_TX), 1);
++	s3_wr(s3.gpi_regs, G_CH_QOS(GPI_CH_RX), 1);
++	s3.tx_wp = s3.rx_wp = 0;
++
++	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_START, GPI_CH_TX, GPI_ST_STARTED) ||
++	    !s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_START, GPI_CH_RX, GPI_ST_STARTED)) {
++		return false;
++	}
++	s3.gpi = true;
++	printf("SWEET S3706: GPI DMA up (GPII %u, dma_pa %#llx)\n", GPII, s3.dma_pa);
++	return true;
++}
++
++/* Append one TRE to a ring, advancing its write pointer. */
++static void
++s3_gpi_push(unsigned ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
++{
++	volatile uint32_t *t = (volatile uint32_t *)(s3.dma + ring + *wp);
++	t[0] = d0; t[1] = d1; t[2] = d2; t[3] = d3;
++	*wp = (*wp + 16u) % GD_RING_LEN;
++}
++
++/* Poll the event ring for an XFER_COMPLETE (EOT/SUCCESS) on channel chid. */
++static int
++s3_gpi_wait(unsigned chid)
++{
++	uint32_t ev_lo = (uint32_t)(s3.dma_pa + GD_EV_RING);
++	for (unsigned i = 0; i < 5000; i++) {
++		flush_dcache64((addr64_t)(s3.dma_pa + GD_EV_RING), GD_EV_LEN, TRUE);
++		uint32_t hw = s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB);
++		unsigned hw_off = (hw - ev_lo) & (GD_EV_LEN - 1u);
++		int found = -1;
++		while (s3.ev_rp != hw_off) {
++			const volatile uint32_t *e = (const volatile uint32_t *)(s3.dma + GD_EV_RING + s3.ev_rp);
++			unsigned type = (e[3] >> 16) & 0xffu, code = (e[2] >> 24) & 0xffu;
++			unsigned ec = (e[3] >> 24) & 0xffu;
++			if (type == EV_TYPE_XFER && (code == EV_CODE_EOT || code == EV_CODE_SUCCESS) && ec == chid) {
++				found = 0;
++			} else if (type == EV_TYPE_XFER && ec == chid) {
++				if (s3.log) {
++					printf("SWEET S3706: GPI xfer ch %u code %#x\n", chid, code);
++				}
++				found = EIO;
++			}
++			s3.ev_rp = (s3.ev_rp + 16u) % GD_EV_LEN;
++		}
++		if (s3.ev_rp != 0 || hw_off != 0) {
++			s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + s3.ev_rp));
++			s3_wr(s3.gpi_regs, G_IEOB_IRQ_CLR, 1);
++		}
++		if (found >= 0) {
++			return found;
++		}
++		delay(20);
++	}
++	printf("SWEET S3706: GPI timeout waiting on ch %u\n", chid);
++	return EIO;
++}
++
++/*
++ * One I2C transaction over GPI: write wlen bytes (register + payload), then,
++ * if rlen, a repeated-start read of rlen bytes. The slave address goes in the
++ * GO TRE; the bytes live in the DMA buffers. config0 (clock timing) is issued
++ * once, on the first transaction.
++ */
++static int
++s3_gpi_txn(const uint8_t *wbuf, unsigned wlen, uint8_t *rbuf, unsigned rlen)
++{
++	if (s3.dead || wlen == 0 || wlen > GD_BUF_MAX || rlen > GD_BUF_MAX) {
++		return EIO;
++	}
++	memcpy((void *)(s3.dma + GD_TXBUF), wbuf, wlen);
++	uint32_t txlo = (uint32_t)(s3.dma_pa + GD_TXBUF), rxlo = (uint32_t)(s3.dma_pa + GD_RXBUF);
++
++	if (!s3.cfg_done) {
++		/* CONFIG0: 400 kHz @ 19.2 MHz (tlow 11, thigh 5, tcyl 22), clk_div 2, packed. */
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0316050bu, 0, 2, TRE_TYPE_CFG0 | TRE_CHAIN);
++		s3.cfg_done = true;
++	}
++	if (rlen == 0) {
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8), 0, 0,
++		    TRE_TYPE_GO | TRE_CHAIN);
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, 0, wlen, TRE_TYPE_DMA | TRE_IEOT);
++		flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
++		flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
++		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++		return s3_gpi_wait(GPI_CH_TX);
++	}
++	/* write register (clock stretched), then read */
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8) | I2C_GO_STRETCH, 0, 0,
++	    TRE_TYPE_GO | TRE_CHAIN);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, 0, wlen, TRE_TYPE_DMA | TRE_CHAIN);
++	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_READ | (S3_ADDR << 8), 0, rlen, TRE_TYPE_GO);
++	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, 0, rlen, TRE_TYPE_DMA | TRE_IEOT);
++	flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
++	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
++	flush_dcache64((addr64_t)(s3.dma_pa + GD_RX_RING), GD_RING_LEN, TRUE);
++	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_RX), (uint32_t)(s3.dma_pa + GD_RX_RING + s3.rx_wp));
++	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++	int err = s3_gpi_wait(GPI_CH_RX);
++	if (!err) {
++		flush_dcache64((addr64_t)(s3.dma_pa + GD_RXBUF), rlen, TRUE);
++		memcpy(rbuf, (const void *)(s3.dma + GD_RXBUF), rlen);
++	}
++	return err;
++}
++
+ /* RMI4 over I2C: 0xff selects the page, then 8-bit addresses within it. */
+ static int
+ s3_page(uint16_t addr)
+@@ -381,7 +764,7 @@
+ 		return 0;
+ 	}
+ 	uint8_t buf[2] = {RMI_PAGE_SELECT, page};
+-	int err = s3_msg(false, buf, 2, false);
++	int err = s3.gpi ? s3_gpi_txn(buf, 2, NULL, 0) : s3_msg(false, buf, 2, false);
+ 	if (!err) {
+ 		s3.page = page;
+ 	} else {
+@@ -398,6 +781,9 @@
+ 		return err;
+ 	}
+ 	uint8_t a = (uint8_t)addr;
++	if (s3.gpi) {
++		return s3_gpi_txn(&a, 1, out, n);
++	}
+ 	err = s3_msg(false, &a, 1, true);
+ 	if (!err) {
+ 		err = s3_msg(true, out, n, false);
+@@ -418,7 +804,7 @@
+ 	}
+ 	buf[0] = (uint8_t)addr;
+ 	memcpy(buf + 1, data, n);
+-	return s3_msg(false, buf, n + 1u, false);
++	return s3.gpi ? s3_gpi_txn(buf, n + 1u, NULL, 0) : s3_msg(false, buf, n + 1u, false);
+ }
+ 
+ /*

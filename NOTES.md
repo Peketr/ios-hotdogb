@@ -103,3 +103,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0128 hotdogb: USB gadget as CDC-NCM (IAD, MS OS "WINNCM", NTB16) so Windows' inbox UsbNcm binds;
   `sweetusbncm=0|1` picks ECM/NCM (hotdogb default NCM, flame ECM). Works: Windows binds UsbNcm.sys.
 - 0129 hotdogb: 0127 undone (any access to SE + 0x2000.. resets the phone: TrustZone); GSI-only SE = stop.
+- 0130 hotdogb: S3706 touch over GPI DMA (GSI mode) through qcom,gpi-dma@0xc00000 GPII 1: polled
+  channel/event rings, I2C config0/go/dma TREs, apps-SMMU bypass for stream 0x7b6. `hdtouchgpi=0` reverts
+  to the 0129 stop. Register/command model from Linux gpi.c + i2c-qcom-geni.c; logic host-tested.
