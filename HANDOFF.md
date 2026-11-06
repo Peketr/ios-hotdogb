@@ -5,6 +5,23 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0128 - USB NCM works on Windows; touch FIFO switch resets the phone (2026-11-06, 15:30)
+`work/boot/kernel-0128` (0001-0128, SHA-256 6a145776...37bd7d0). Boot-args as 0126 (`rd=ufsroot0
+ufsroot=rawdump sweetusb=2 sweetmtl=2`). Runs k0128-first, k0128-nofifo (`hdtouchfifo=0`), k0128-notouch (`hdtouch=0`).
+- **USB (0128) works**: Windows loads usbccgp + **UsbNcm.sys** ("UsbNcm Host Device") for the NCM function
+  (USB\VID_1209&PID_0001&MI_00), adapter "Ethernet 2" Up at 480 Mbps, MAC 02-00-5E-77-EE-01. Answered:
+  MS OS compat ID (`c0 01 0000 0004`, 16 then 40 bytes), GET_NTB_PARAMETERS (`a1 80`). The phone parses
+  Windows' NTBs (DHCP, IPv6, mDNS, ARP probes); Windows counts the phone's ARP broadcasts. Windows has only
+  169.254.24.133: give "Ethernet 2" 192.168.7.1/24 for ue0 (needs the user's OK; not done).
+- **Touch (0127) resets the phone**: k0128-first and k0128-nofifo were back in fastboot after 38-39 s; the
+  log ends at the L17A vote (~31.4 s, lines after the last 2 s flush are lost). k0128-notouch ran the full
+  120 s. 0127 reads SE + 0x2000/0x2004/0x2008 before checking hdtouchfifo, so any access to that region
+  resets the SoC: TrustZone-protected. FIFO mode cannot be selected from the kernel.
+- **0129** (written, not built): no access to SE + 0x2000.., a GSI-only SE is a logged stop again (as 0126).
+  Until a 0129 kernel exists, boot kernel-0128 with `hdtouch=0`.
+- Open: touch needs GSI/GPI DMA (QUPv3 2 GPI: channel/event rings, TREs for I2C config/go/DMA, the QUP's
+  SMMU stream); a driver of its own.
+
 ### HOTDOGB: kernel 0126 boots on the OnePlus 7T (2026-11-06, 14:20) - kernel 0126
 First XNU on hotdogb. `work/boot/kernel-0126` (SHA-256 d72b4823...61ea6ee, plain arm64), run from WSL with
 `tools/hotdogb-run.sh` (new; shim/build-hotdogb.sh + mkboot_hotdogb.py, logs from rawdump, `fastboot boot`
@@ -30,7 +47,7 @@ Fixed: `tools/mkpayload.py` used GNU nm on Linux/WSL (no Mach-O support) -> ring
 the RAM log; now llvm-nm. Without `rd=ufsroot0` the UFS driver never starts, so nothing reaches rawdump.
 Open: writing the iOS root to sda22 for a real root mount.
 Next kernel (not built or run yet): 0127 S3706 SE to FIFO mode, 0128 USB CDC-NCM for Windows hosts
-(HOTDOGB.md "Kernel 0128"). Check in its log: "fifo-if-disable now 0, fifo-off 0" then a PDT scan;
+(HOTDOGB.md "Kernel 0129 on the Mac"). Check in its log: "fifo-if-disable now 0, fifo-off 0" then a PDT scan;
 "function CDC-NCM", "configured (1)", "NCM endpoints configured" and a Windows network adapter.
 
 ### WiFi IN SETTINGS: wifid, en0, iOS's own DHCP (2026-10-22, 11:15) - kernels 0123/0124

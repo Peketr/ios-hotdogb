@@ -77,8 +77,10 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0127 S3706 FIFO mode**: kernel 0126 found the SE with I2C firmware (0x303) and 32-bit FIFOs
   but GENI_IF_DISABLE_RO bit 0 set (GSI-only, Android uses GPI DMA). The driver now clears
   SE_FIFO_IF_DISABLE (SE + 0x2008, the register Linux's GENI firmware loader programs) and checks
-  the read-only mirror again. Logs clk-ctrl/dma-if-en/fifo-if-disable first. `hdtouchfifo=0`
-  leaves the SE alone. Unverified: that 0x2008 is writable from the kernel (not xPU-protected).
+  the read-only mirror again. **Result (kernel 0128): any access to SE + 0x2000.. resets the
+  phone at once (TrustZone-protected), reads included.** Undone by 0129.
+- **0129 S3706 no FIFO switch**: a GSI-only SE is a logged stop ("touch needs GPI DMA"), never
+  an access to SE + 0x2000... Touch on the 7T needs a GSI/GPI DMA path.
 - **0128 USB NCM**: the Windows host had no driver for the CDC-ECM gadget. On hotdogb the gadget
   is now CDC-NCM: device class EF/02/01 + IAD (Windows' composite driver enumerates the
   function), MS OS 1.0 string 0xEE + extended compatible ID "WINNCM" (inbox UsbNcm),
@@ -87,16 +89,16 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0128 on the Mac
+### Kernel 0129 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0127 0128; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+    for p in 0129; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh work/build-0128.log
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0129.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
 
-(A clean `build.sh` run copies every patch, 0127-0128 included, from xnu/patches.)
+(0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)
 
 ### Running a kernel from the Windows PC (WSL)
 
