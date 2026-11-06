@@ -1,0 +1,103 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -229,6 +229,7 @@
+ 	vm_offset_t dma;                /* contiguous rings + I2C buffers */
+ 	uint64_t dma_pa;
+ 	unsigned tx_wp, rx_wp, ev_rp;   /* byte offsets into their rings */
++	unsigned ev_wp;                 /* event ring write pointer we give back (Linux ev_ring->wp) */
+ 	bool cfg_done;                  /* CONFIG0 TRE already issued once */
+ } s3;
+ static int s3_sleep_chan;
+@@ -737,6 +738,7 @@
+ 	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_RP_UPD_LSB, 0);
+ 	/* Prime: wp = base + len - 16, ring the event doorbell. */
+ 	s3.ev_rp = 0;
++	s3.ev_wp = GD_EV_LEN - 16u;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + GD_EV_LEN - 16));
+ 	GPIDBG("ev ring");
+@@ -796,18 +798,35 @@
+ 
+ /* Poll the event ring for an XFER_COMPLETE (EOT/SUCCESS) on channel chid. */
+ static int
+-s3_gpi_wait(unsigned chid)
++s3_gpi_wait(unsigned chid, bool dbg)
+ {
++	/*
++	 * As Linux gpi_process_events: read the hardware RP, consume events up to
++	 * it, then give the elements back by advancing the WP (primed at base +
++	 * len - 16) and writing it to the event doorbell, then clear IEOB. Kernels
++	 * up to 0140 wrote the RP to the doorbell (WP == RP) on every poll.
++	 */
+ 	uint32_t ev_lo = (uint32_t)(s3.dma_pa + GD_EV_RING);
+ 	for (unsigned i = 0; i < 5000; i++) {
+ 		flush_dcache64((addr64_t)(s3.dma_pa + GD_EV_RING), GD_EV_LEN, TRUE);
+ 		uint32_t hw = s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB);
+ 		unsigned hw_off = (hw - ev_lo) & (GD_EV_LEN - 1u);
++		if (dbg && i == 0) {
++			printf("SWEET S3706: GPIDBG wait ch %u: hw rp %#x (off %#x) ev_rp %#x ev_wp %#x\n",
++			    chid, hw, hw_off, s3.ev_rp, s3.ev_wp);
++			sweet_log_kick();
++			s3_wait(2500);
++		}
+ 		int found = -1;
++		unsigned consumed = 0;
+ 		while (s3.ev_rp != hw_off) {
+ 			const volatile uint32_t *e = (const volatile uint32_t *)(s3.dma + GD_EV_RING + s3.ev_rp);
+ 			unsigned type = (e[3] >> 16) & 0xffu, code = (e[2] >> 24) & 0xffu;
+ 			unsigned ec = (e[3] >> 24) & 0xffu;
++			if (dbg) {
++				printf("SWEET S3706: GPIDBG event @%#x: %08x %08x %08x %08x (type %#x code %#x ch %u)\n",
++				    s3.ev_rp, e[0], e[1], e[2], e[3], type, code, ec);
++			}
+ 			if (type == EV_TYPE_XFER && (code == EV_CODE_EOT || code == EV_CODE_SUCCESS) && ec == chid) {
+ 				found = 0;
+ 			} else if (type == EV_TYPE_XFER && ec == chid) {
+@@ -817,17 +836,26 @@
+ 				found = EIO;
+ 			}
+ 			s3.ev_rp = (s3.ev_rp + 16u) % GD_EV_LEN;
++			s3.ev_wp = (s3.ev_wp + 16u) % GD_EV_LEN;
++			consumed++;
+ 		}
+-		if (s3.ev_rp != 0 || hw_off != 0) {
+-			s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + s3.ev_rp));
++		if (consumed) {
++			if (dbg) {
++				GPIDBG("events consumed, writing event doorbell (wp)");
++			}
++			s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + s3.ev_wp));
+ 			s3_wr(s3.gpi_regs, G_IEOB_IRQ_CLR, 1);
++			if (dbg) {
++				GPIDBG("event doorbell + IEOB clear done");
++			}
+ 		}
+ 		if (found >= 0) {
+ 			return found;
+ 		}
+ 		delay(20);
+ 	}
+-	printf("SWEET S3706: GPI timeout waiting on ch %u\n", chid);
++	printf("SWEET S3706: GPI timeout waiting on ch %u (hw rp %#x)\n", chid,
++	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB));
+ 	return EIO;
+ }
+ 
+@@ -878,7 +906,7 @@
+ 	if (dbg) {
+ 		s3_gpi_dump("txn write rung");
+ 	}
+-	int err = s3_gpi_wait(GPI_CH_TX);
++	int err = s3_gpi_wait(GPI_CH_TX, dbg);
+ 	if (dbg) {
+ 		printf("SWEET S3706: GPIDBG txn %u write done err %d\n", n, err);
+ 	}
+@@ -898,7 +926,7 @@
+ 	if (dbg) {
+ 		s3_gpi_dump("txn read rung");
+ 	}
+-	err = s3_gpi_wait(GPI_CH_RX);
++	err = s3_gpi_wait(GPI_CH_RX, dbg);
+ 	if (dbg) {
+ 		printf("SWEET S3706: GPIDBG txn %u read done err %d\n", n, err);
+ 	}

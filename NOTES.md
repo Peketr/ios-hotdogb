@@ -128,3 +128,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   reset after it; hdgpipanic=1 proved the 0137 panic capture.
 - 0140 hotdogb: RPMh BCM votes QUP0 + SN11 (QUP2 master path to DDR) before the touch SE/GPI is used
   (`hdgpibcm`). Kernel 0139 reset on the first GPI TX doorbell (first GPI memory access).
+- 0141 hotdogb: GPI event ring as Linux (WP primed base+len-16, advanced per consumed event, doorbell + IEOB
+  clear only after events), wait traced. Kernel 0140: votes fixed the doorbell reset; reset in the wait.

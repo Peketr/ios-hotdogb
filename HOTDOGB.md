@@ -104,6 +104,8 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0139 GPI I2C TREs as Linux + transfer trace**: one message per transfer (read GO link_rx|IEOB, write
   DMA IEOT), first 3 transfers traced with GPII dumps after the doorbell.
 - **0140 QUP2 bus votes**: BCM QUP0 + SN11 ACTIVE votes (`hdgpibcm=N`, 0 = off) for the GPI's path to DDR.
+  Kernel 0140: fixed the reset on the first TX doorbell.
+- **0141 GPI event ring WP**: event doorbell carries the recycled WP (as Linux), not the RP; wait traced.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
@@ -122,18 +124,18 @@ Reference sources for the touch path (read-only, not vendored):
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0140 on the Mac
+### Kernel 0141 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0140; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+    for p in 0141; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0140.log
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0141.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c hdgpibcm  (want >=1)
+    # verify before sending: strings .../kernel.development.sweet | grep -c "events consumed"  (want >=1)
 
-(Apply only the patches the tree does not yet have. The 0139 build tree needs just 0140; a 0138 tree
-needs 0139 0140; a fresh `build.sh` tree needs 0127..0140. A clean `build.sh` run copies every patch
+(Apply only the patches the tree does not yet have. The 0140 build tree needs just 0141; a 0139 tree
+needs 0140 0141; a fresh `build.sh` tree needs 0127..0141. A clean `build.sh` run copies every patch
 from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)

@@ -5,6 +5,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0140 - bus votes fix the doorbell reset; reset now while waiting for the event; 0141 (2026-11-06, 23:20)
+Kernel 0140 (`work/boot/kernel-0140`, SHA-256 3d6e71cb...870c, logs/runs/k0140-first): BCM QUP0 + SN11 votes
+-> 0, and the first TX doorbell no longer resets: `txn write rung: ch0 0x1020001a ... glob 0 gpii 0`. Reset
+after that (back at 81 s): inside the 2.5 s marker wait or in s3_gpi_wait (event poll / doorbell / IEOB).
+- s3_gpi_wait differed from Linux gpi_process_events: we wrote the event doorbell with the RP (WP == RP,
+  "no space") and did so plus IEOB clear on every poll, even with no events. Linux advances a WP (primed at
+  base+len-16) per recycled event and writes doorbell + IEOB clear only after consuming events.
+- **0141** (written, syntax-checked, NOT built/run): Linux event-ring WP handling (s3.ev_wp); trace for the
+  first 3 transfers: "wait ch N: hw rp .. ev_rp .. ev_wp ..", each raw event, "events consumed, writing
+  event doorbell (wp)", "event doorbell + IEOB clear done". Timeout line shows hw rp.
+
 ### HOTDOGB: kernel 0139 - reset on the first GPI TX doorbell; 0140 adds the QUP2 bus votes (2026-11-06, 23:10)
 Kernel 0139 (`work/boot/kernel-0139`, SHA-256 7d3efc78...24fb, logs/runs/k0139-first): GPI DMA up, touch reset
 released, then `txn 0: write 2 (ff 00) read 0` and `txn write TREs queued, ringing TX doorbell` is the last
