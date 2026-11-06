@@ -5,6 +5,23 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0131 - GPI setup resets the phone at ~55 s; 0132 adds step logging to localize it
+Kernel 0131 (GPI 64-bit fix) ran, and now `s3_gpi_setup` actually executes (0130 bailed before it). The phone
+reset ~55 s after boot - back in fastboot at 68 s - during GPI setup (logs/runs/k0131-first). Proof it is the
+GPI setup: 0130, which bailed before it, ran the full 300 s; 0131 resets within ~2 s of entering it. The
+console log flushes to rawdump only every 2 s, so every print inside setup (se fw, SMMU, GPI DMA up) is lost
+before the reset, and the 7T's RAM rescue does not survive - the last line on disk is the RPMH L17A vote, just
+before the GPI work. So we cannot yet see which step resets it. (A transient USB "no link" also hit `fastboot
+boot` twice here; reseating the cable fixed it - unrelated to the kernel.)
+- **0132** (diagnostic, written/verified, NOT built/run): a `GPIDBG` marker after each setup milestone
+  (dma_pa, smmu ok, se gsi, irq masked, ev alloc, ev ring, ch alloc, ch ring) that, with `hdtouchlog=1`,
+  prints and waits past one 2 s flush. The last marker on disk then names the step that resets the phone.
+  Costs nothing without hdtouchlog. Build 0132 on the Mac (0131 tree needs only 0132), run with
+  `hdtouchlog=1`, and read the last `GPIDBG` line. Likely suspects by marker: stops at "se gsi" = the first
+  GPI 0xc00000 access hung (GPI engine unclocked - may need a gcc clock beyond the wrap2 votes); stops at
+  "irq masked"/"ev alloc" = the event-ring ALLOCATE command hung/faulted; stops at "ch alloc" = SMMU/DMA fault
+  on first ring access. hdtouchgpi=0 still gives the clean 0129 stop.
+
 ### HOTDOGB: kernel 0130 GPI touch reached DMA setup; 0131 fixes >4 GiB addressing (2026-11-06, 16:18)
 Kernel 0130 (`work/boot/kernel-0130`, SHA-256 da65d473...b00c5) ran the full 300 s, no reset - the GPI path
 touches nothing TrustZone-protected. Log (logs/runs/k0130-first/xnu.txt): the touch driver read the SE

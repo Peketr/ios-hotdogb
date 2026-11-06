@@ -1,0 +1,77 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -484,6 +484,15 @@
+ /* ---- GPI DMA (GSI mode) ---- */
+ 
+ /*
++ * Progress marker for bring-up: the console log only reaches rawdump on a 2 s
++ * timer, and a fault/hang inside setup resets the 7T before the next flush,
++ * losing every unflushed line. With hdtouchlog=1 each marker prints and then
++ * waits past one flush, so the last marker on disk names the step that reset
++ * the phone. Off (default) it costs nothing.
++ */
++#define GPIDBG(msg) do { if (s3.log) { printf("SWEET S3706: GPIDBG %s\n", (msg)); s3_wait(2100); } } while (0)
++
++/*
+  * apps SMMU (0x15000000) stage-1 bypass bank for the GPI's stream 0x7b6, so
+  * the engine reaches the physical ring/buffer addresses we program. Same
+  * "translation off, as ABL" bank sweet_usb.c uses for the DWC3 stream.
+@@ -610,12 +619,20 @@
+ 	/* RAM above 4 GiB is fine: the GPI engine is 64-bit, the ring CNTXT and the
+ 	 * DMA TREs carry the high word, and an 8 KiB block never straddles a 4 GiB
+ 	 * boundary (so the low-32 doorbell/event-RP math stays within one window). */
++	if (s3.log) {
++		printf("SWEET S3706: GPIDBG dma_pa %#llx regs %#lx\n", s3.dma_pa, (unsigned long)s3.gpi_regs);
++		s3_wait(2100);
++	}
+ 	if (s3_gpi_smmu() != 0) {
+ 		return false;
+ 	}
++	GPIDBG("smmu ok");
+ 	s3_gpi_se_mode();
++	GPIDBG("se gsi");
+ 
+-	/* No GPII interrupt: mask every source, we poll. */
++	/* No GPII interrupt: mask every source, we poll. First GPI 0xc00000 access:
++	 * if the engine is unclocked this write hangs the interconnect -> reset, and
++	 * the last marker on disk is "se gsi". */
+ 	s3_wr(s3.gpi_regs, G_TYPE_IRQ_MSK, 0);
+ 	s3_wr(s3.gpi_regs, G_CH_IRQ_MSK, 0);
+ 	s3_wr(s3.gpi_regs, G_EV_IRQ_MSK, 0);
+@@ -623,11 +640,13 @@
+ 	s3_wr(s3.gpi_regs, G_GLOB_IRQ_EN, 0);
+ 	s3_wr(s3.gpi_regs, G_GPII_IRQ_EN, 0);
+ 	s3_wr(s3.gpi_regs, G_INTSET, 1);
++	GPIDBG("irq masked");
+ 
+ 	/* Event ring: allocate, then program CNTXT (EL_SIZE 16, INTYPE 1, CHTYPE 2). */
+ 	if (!s3_gpi_cmd(G_EV_CMD, G_EV_CNTXT, GPI_OP_ALLOC, 0, GPI_ST_ALLOCATED)) {
+ 		return false;
+ 	}
++	GPIDBG("ev alloc");
+ 	s3_gpi_ring(G_EV_CNTXT, G_EV_DB, 0x10010002u, GD_EV_RING, GD_EV_LEN);
+ 	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_INT_MOD, 0);
+ 	s3_wr(s3.gpi_regs, G_EV_CNTXT + GC_MSI_LSB, 0);
+@@ -636,12 +655,14 @@
+ 	s3.ev_rp = 0;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	s3_wr(s3.gpi_regs, G_EV_DB, (uint32_t)(s3.dma_pa + GD_EV_RING + GD_EV_LEN - 16));
++	GPIDBG("ev ring");
+ 
+ 	/* TX channel 0 (DIR_OUT) and RX channel 1 (DIR_IN). */
+ 	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_ALLOC, GPI_CH_TX, GPI_ST_ALLOCATED) ||
+ 	    !s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_ALLOC, GPI_CH_RX, GPI_ST_ALLOCATED)) {
+ 		return false;
+ 	}
++	GPIDBG("ch alloc");
+ 	s3_gpi_ring(G_CH_CNTXT(GPI_CH_TX), G_CH_DB(GPI_CH_TX), 0x1000000au, GD_TX_RING, GD_RING_LEN);
+ 	s3_gpi_ring(G_CH_CNTXT(GPI_CH_RX), G_CH_DB(GPI_CH_RX), 0x10000002u, GD_RX_RING, GD_RING_LEN);
+ 	/* SCRATCH_0 = (pair<<16)|(proto<<4)|seid; pair = !chid. */
+@@ -650,6 +671,7 @@
+ 	s3_wr(s3.gpi_regs, G_CH_QOS(GPI_CH_TX), 1);
+ 	s3_wr(s3.gpi_regs, G_CH_QOS(GPI_CH_RX), 1);
+ 	s3.tx_wp = s3.rx_wp = 0;
++	GPIDBG("ch ring");
+ 
+ 	if (!s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_TX), GPI_OP_START, GPI_CH_TX, GPI_ST_STARTED) ||
+ 	    !s3_gpi_cmd(G_CH_CMD, G_CH_CNTXT(GPI_CH_RX), GPI_OP_START, GPI_CH_RX, GPI_ST_STARTED)) {
