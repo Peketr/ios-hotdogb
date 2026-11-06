@@ -1,0 +1,40 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -39,6 +39,7 @@
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
++extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern void sweet_log_kick(void);
+@@ -1158,6 +1159,29 @@
+ 	s3_wait(2);
+ 	s3_gpio(S3_PIN_1V8, 0, 3, 3, true, true);
+ 	s3_wait(10);
++	/*
++	 * 0140: bus votes for the QUP2 master (qcom,bus-mas-id MSM_BUS_MASTER_QUP_2 ->
++	 * EBI). The GPI's first memory access (TRE fetch on the TX doorbell) reset the
++	 * phone in kernel 0139. Linux se_geni_resources_on votes this path before any
++	 * GSI transfer. On sm8150 (sm8150-bus.dtsi): mas-qhm-qup2 = BCM QUP0 (also the
++	 * QUP core clock), aggre2_noc -> snoc = BCM SN11; SN0/SH0/MC0 carry CPU traffic
++	 * already and are left alone (an APPS vote there would replace the current one).
++	 * BCM command = commit(30) | valid(29) | AB(27:14) | IB(13:0); hdgpibcm=N sets
++	 * both to N (default 1 = lowest level), hdgpibcm=0 skips the votes.
++	 */
++	{
++		unsigned bw = 1;
++		(void)PE_parse_boot_argn("hdgpibcm", &bw, sizeof(bw));
++		if (bw) {
++			const char *bcms[] = {"QUP0", "SN11"};
++			for (unsigned i = 0; i < 2; i++) {
++				uint32_t off = 0, val = (1u << 30) | (1u << 29) | ((bw & 0x3fffu) << 14) | (bw & 0x3fffu);
++				int e = sweet_rpmh_write(bcms[i], 1, &off, &val);
++				printf("SWEET S3706: BCM %s vote %#x -> %d\n", bcms[i], val, e);
++			}
++			GPIDBG("bus votes sent");
++		}
++	}
+ 	if (!s3_clocks()) {
+ 		goto out;
+ 	}

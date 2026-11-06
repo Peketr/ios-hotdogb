@@ -5,6 +5,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0139 - reset on the first GPI TX doorbell; 0140 adds the QUP2 bus votes (2026-11-06, 23:10)
+Kernel 0139 (`work/boot/kernel-0139`, SHA-256 7d3efc78...24fb, logs/runs/k0139-first): GPI DMA up, touch reset
+released, then `txn 0: write 2 (ff 00) read 0` and `txn write TREs queued, ringing TX doorbell` is the last
+line; no "txn write rung" dump, no panic -> hardware reset the moment the GPI first masters memory (TRE fetch
+from 0x1_04978000) / drives SE17. (USB DMA is also >4 GiB through the same cb4 and works.)
+- Lead: the qupv3_2 wrapper node has `qcom,bus-mas-id = <MSM_BUS_MASTER_QUP_2>` -> EBI; Linux votes that path
+  (se_geni_resources_on) before any transfer. sm8150-bus.dtsi: mas-qhm-qup2 -> BCM QUP0 (also the QUP core
+  clock BCM), aggre2_noc -> snoc -> BCM SN11, then SN0/SH0/MC0 (CPU path, already on). An unvoted QUP2 NoC
+  path would hang/abort the first master access -> reset.
+- **0140** (written, syntax-checked, NOT built/run): before the clocks, ACTIVE BCM votes for QUP0 and SN11
+  via sweet_rpmh_write (cmd = commit|valid|AB<<14|IB, `hdgpibcm=N`, default 1; 0 = skip). Logs
+  `BCM QUP0 vote ... -> err` and marker "bus votes sent". Next if it still resets: DMA block below 4 GiB.
+
 ### HOTDOGB: kernel 0138 - GPI channels START fine; reset is a hardware reset in the first transfer; 0139 (2026-11-06, 23:00)
 Kernel 0138 (`work/boot/kernel-0138`, SHA-256 40d7824c...fb18):
 - k0138-first: `before start: ch0 0x1010001a ch1 0x10100112 ev 0x10110012 glob 0 gpii 0`, `tx started: ch0

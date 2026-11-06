@@ -126,3 +126,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0139 hotdogb: GPI I2C TREs as Linux (one message per transfer, read GO with link_rx|IEOB, IEOT on the
   write DMA); trace of the first 3 transfers and the touch reset release. Kernel 0138: START ok, hardware
   reset after it; hdgpipanic=1 proved the 0137 panic capture.
+- 0140 hotdogb: RPMh BCM votes QUP0 + SN11 (QUP2 master path to DDR) before the touch SE/GPI is used
+  (`hdgpibcm`). Kernel 0139 reset on the first GPI TX doorbell (first GPI memory access).
