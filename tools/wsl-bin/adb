@@ -1,0 +1,8 @@
+#!/bin/bash
+# WSL: run Windows' fastboot.exe (WSL has no USB access), with Linux paths of
+# existing files converted to Windows paths. Put tools/wsl-bin first in PATH.
+args=()
+for a in "$@"; do
+	if [ -e "$a" ]; then args+=("$(wslpath -w "$a")"); else args+=("$a"); fi
+done
+"${0##*/}.exe" "${args[@]}"

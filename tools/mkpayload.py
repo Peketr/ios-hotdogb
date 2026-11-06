@@ -41,10 +41,16 @@ RAMLOG = CMDLINE + BOOT_LINE_LENGTH - 16	# 0x298: ring_va, total_va
 
 
 def kernel_symbols(path, *names):
-    """Addresses of the named symbols (0 if absent), from nm."""
-    import subprocess
+    """Addresses of the named symbols (0 if absent), from nm.
+
+    llvm-nm first: GNU nm (Linux/WSL) cannot read arm64 Mach-O and prints
+    nothing, which silently zeroed the RAM-log rescue addresses."""
+    import shutil, subprocess
     found = dict.fromkeys(names, 0)
-    out = subprocess.run(['nm', path], capture_output=True, text=True).stdout
+    nm = shutil.which('llvm-nm') or 'nm'
+    out = subprocess.run([nm, path], capture_output=True, text=True).stdout
+    if not out:
+        print(f'warning: {nm} read no symbols from {path}', file=sys.stderr)
     for line in out.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2] in found:

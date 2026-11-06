@@ -12,6 +12,9 @@ cd "$(dirname "$0")"
 ROOT=$(cd .. && pwd)
 LLVM=/opt/homebrew/opt/llvm/bin
 LLD=/opt/homebrew/opt/lld/bin
+# Elsewhere (Linux, WSL): the distro's clang/lld from PATH.
+[ -x "$LLVM/clang" ] || LLVM=$(dirname "$(command -v clang)")
+[ -x "$LLD/ld.lld" ] || LLD=$(dirname "$(command -v ld.lld)")
 CC="$LLVM/clang --target=aarch64-none-elf"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-builtin -fno-pic -fno-pie -mgeneral-regs-only -mstrict-align
 	-fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra ${SHIM_CFLAGS:-}"

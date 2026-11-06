@@ -1,0 +1,5 @@
+# scripts run from WSL on a Windows checkout (core.autocrlf would give them CRLF)
+*.sh text eol=lf
+*.py text eol=lf
+tools/wsl-bin/* text eol=lf
+*.patch text eol=lf

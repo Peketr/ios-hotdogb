@@ -11,8 +11,10 @@ noted. Source: live FDT, /proc/iomem and the shim probe log of 2026-11-05.
 - PMIC (SPMI) + PON reboot reason: works, every reset lands in fastboot.
 - UFS reads/writes: works; logs go to `rawdump` (see below).
 - RAM 0x1_00000000-0x1_fff00000 read/write checked from the shim.
-- XNU: patches 0125-0126 written and checked to apply (0001-0126 on xnu-8796.141.3);
-  not built yet (needs macOS + Xcode), so nothing below has run on the phone.
+- XNU 0126: boots to the root mount (2026-11-06, `tools/hotdogb-run.sh` from WSL; HANDOFF.md
+  "HOTDOGB: kernel 0126 boots"). S3706 touch stops (SE FIFO interface disabled; 0127), the
+  Windows host has no CDC-ECM driver (0128: NCM). The kernel's console log (with `rd=ufsroot0`)
+  lands at the end of rawdump.
 
 ## Build and test (no Mac needed for the shim)
 
@@ -71,6 +73,42 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   from the register descriptors, objects reported to `sweet_hid_touch` in panel pixels.
   Replaces the FTS driver on hotdogb (its SPI SE at 0x890000 is an I2C bus on the 7T).
   Boot-args: `hdtouch=0`, `hdtouchdelay=N` (default 20 s), `hdtouchlog=1`.
+
+- **0127 S3706 FIFO mode**: kernel 0126 found the SE with I2C firmware (0x303) and 32-bit FIFOs
+  but GENI_IF_DISABLE_RO bit 0 set (GSI-only, Android uses GPI DMA). The driver now clears
+  SE_FIFO_IF_DISABLE (SE + 0x2008, the register Linux's GENI firmware loader programs) and checks
+  the read-only mirror again. Logs clk-ctrl/dma-if-en/fifo-if-disable first. `hdtouchfifo=0`
+  leaves the SE alone. Unverified: that 0x2008 is writable from the kernel (not xPU-protected).
+- **0128 USB NCM**: the Windows host had no driver for the CDC-ECM gadget. On hotdogb the gadget
+  is now CDC-NCM: device class EF/02/01 + IAD (Windows' composite driver enumerates the
+  function), MS OS 1.0 string 0xEE + extended compatible ID "WINNCM" (inbox UsbNcm),
+  bcdDevice 2.00 (Windows caches OS descriptors per VID/PID/bcdDevice), NTB16 framing (one
+  datagram per IN block, any number per OUT block, 2 KiB blocks), speed-change + connect
+  notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
+  The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
+
+### Kernel 0128 on the Mac
+
+    git pull                                    # in ~/gitrepos/ios-hotdogb
+    cd work/dxb/xnu
+    for p in 0127 0128; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+        patch -p1 < ../../../xnu/patches/$p-*.patch; done
+    cd ../../.. && tools/build-xnu.sh work/build-0128.log
+    # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+
+(A clean `build.sh` run copies every patch, 0127-0128 included, from xnu/patches.)
+
+### Running a kernel from the Windows PC (WSL)
+
+Copy the kernel to `work/boot/kernel-NNNN`, then from WSL Ubuntu:
+
+    PATH=$PWD/tools/wsl-bin:$PATH tools/hotdogb-run.sh NAME -k work/boot/kernel-NNNN -s 300 \
+        -a "rd=ufsroot0 ufsroot=rawdump sweetusb=2 sweetmtl=2"
+
+`tools/wsl-bin` runs Windows' fastboot.exe/adb.exe (WSL has no USB). Only `fastboot boot`; the
+console log reaches rawdump only with `rd=ufsroot0` (`ufsroot=rawdump`: read-only, userdata
+untouched). For ue0 over NCM, the Windows adapter needs 192.168.7.1/24 (the phone is .2); WSL's
+default NAT network cannot receive the live log, so run `tools/flame-live.py` with Windows' Python.
 
 Unverified assumptions to check in the first kernel log: wrap2 core/core_2x vote bits
 (0 and 3, from downstream), GPIO7 reads as an enabled input, the SE reports protocol 3

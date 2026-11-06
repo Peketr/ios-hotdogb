@@ -98,3 +98,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0123 en0 + Apple80211 for wifid (ios-topaz 0900 + 0128, from HackiOS), the station over /dev/wlan to
   wland in userland.
 - 0124 10-bit surfaces as BGRA only for WebContent (`sweetsurf10`); the joined network keeps its scan record.
+- 0125 hotdogb board, 0126 S3706 touch (OnePlus 7T; HOTDOGB.md).
+- 0127 hotdogb: S3706 SE left GSI-only by Android is switched to FIFO mode (`hdtouchfifo=0` keeps it).
+- 0128 hotdogb: USB gadget as CDC-NCM (IAD, MS OS "WINNCM", NTB16) so Windows' inbox UsbNcm binds;
+  `sweetusbncm=0|1` picks ECM/NCM (hotdogb default NCM, flame ECM).

@@ -5,6 +5,34 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0126 boots on the OnePlus 7T (2026-11-06, 14:20) - kernel 0126
+First XNU on hotdogb. `work/boot/kernel-0126` (SHA-256 d72b4823...61ea6ee, plain arm64), run from WSL with
+`tools/hotdogb-run.sh` (new; shim/build-hotdogb.sh + mkboot_hotdogb.py, logs from rawdump, `fastboot boot`
+only). Run k0126-rawdumplog, boot-args: hotdogb-run.sh base + `flamereboot=300 rd=ufsroot0 ufsroot=rawdump
+sweetusb=2 sweetmtl=2` (rawdump as a read-only "root" so the UFS driver and console log start; userdata untouched).
+Observed (logs/runs/k0126-rawdumplog/xnu.txt, 731 lines):
+- Shim loads the payload at 0x1_00000000 and jumps; kernel up to the root mount, scheduler alive for 300 s
+  (FLAME WDT pets until flamereboot, then resets into fastboot).
+- 8/8 CPUs via PSCI, cpufreq on all three clusters (prime 2956 MHz), PM8150 RTC, AppleCLCD 1080x2400 at
+  0x9c000000, UFS "rawdump" + console log to its end: all work.
+- PM8150 GPIO7 (vol-) reads as an enabled input (en 0x80, mode 0): assumption confirmed. Run k0126-screen
+  (same args): vol- (key 2, HID 0xea) and vol+ (key 1, 0xe9) give clean down/up pairs. On-screen console
+  (no sweetfb_noconsole) seen by the user: readable, upright, fills the 1080x2400 panel, no flicker or freeze.
+- S3706 SE: fw 0x303, protocol 3 (I2C) and 32-bit FIFOs as assumed, but **SE_FIFO_OFF bit 0 = 1** (FIFO
+  interface disabled: the SE is set up for GSI DMA), so the driver stops. Needs GSI or SE DMA, or clearing it.
+- USB: the host (a Windows PC) reads every descriptor, including the MS OS string 0xEE, and never
+  sends SET_CONFIGURATION: Windows lists "Sweet iOS (USB Ethernet)" with no driver (it has none for
+  CDC-ECM). The periodic `busERR addr 0 ... SMMU cb fsr 400` line is a status print, not a fault
+  (busERR addr 0 = no bus error). Kernel side works; fixed for Windows by 0128 (NCM).
+- Root mount fails as expected on rawdump (no HFS volume header), retried every 5 s, no panic.
+- RAM log rescue: mailbox at 0x1ffe00000 does not survive the 7T's reset ("no mailbox"); the UFS log is enough.
+Fixed: `tools/mkpayload.py` used GNU nm on Linux/WSL (no Mach-O support) -> ring addresses 0, shim never armed
+the RAM log; now llvm-nm. Without `rd=ufsroot0` the UFS driver never starts, so nothing reaches rawdump.
+Open: writing the iOS root to sda22 for a real root mount.
+Next kernel (not built or run yet): 0127 S3706 SE to FIFO mode, 0128 USB CDC-NCM for Windows hosts
+(HOTDOGB.md "Kernel 0128"). Check in its log: "fifo-if-disable now 0, fifo-off 0" then a PDT scan;
+"function CDC-NCM", "configured (1)", "NCM endpoints configured" and a Windows network adapter.
+
 ### WiFi IN SETTINGS: wifid, en0, iOS's own DHCP (2026-10-22, 11:15) - kernels 0123/0124
 Settings -> Wi-Fi: switch on, the home network ticked, nearby networks listed (from a
 background scan while joined), Wi-Fi icon in the status bar; configd's DHCP on **en0** is the primary

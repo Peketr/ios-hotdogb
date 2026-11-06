@@ -1,0 +1,47 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -15,7 +15,7 @@
+  * reset GPIO80 (active low), attention GPIO122 (active low).
+  *
+  * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+- * hdtouchlog=1 log every object.
++ * hdtouchlog=1 log every object, hdtouchfifo=0 keep a GSI-only SE as found.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -78,6 +78,15 @@
+ #define SE_TX_WM        0x80cu
+ #define SE_HW_TX        0xe24u
+ #define SE_HW_RX        0xe28u
++/*
++ * SE interface selection (QUPv3 SE register map, as written by Linux's GENI
++ * firmware loader, qcom-geni-se.c): GENI_IF_DISABLE_RO (SE_FIFO_OFF) bit 0
++ * mirrors SE_FIFO_IF_DISABLE bit 0. On the 7T, XBL/Android leave the touch SE
++ * GSI-only; clearing it selects FIFO mode with the same loaded I2C firmware.
++ */
++#define SE_CLK_CTRL     0x2000u
++#define SE_DMA_IF_EN    0x2004u
++#define SE_FIFO_IF_DIS  0x2008u
+ #define SE_DONE         (1u << 0)
+ #define SE_GP_IRQS      (0x3fu << 9)    /* I2C: NACK, bus protocol, arbitration lost ... */
+ #define SE_RX_WM_IRQ    (1u << 26)
+@@ -218,6 +227,19 @@
+ 	uint32_t tx = s3_rd(s3.se, SE_HW_TX), rx = s3_rd(s3.se, SE_HW_RX);
+ 	printf("SWEET S3706: se fw=%#x proto=%u status=%#x fifo-off=%#x tx=%#x rx=%#x\n",
+ 	    fw, (fw >> 8) & 0xffu, s3_rd(s3.se, SE_STATUS), s3_rd(s3.se, SE_FIFO_OFF), tx, rx);
++	if ((s3_rd(s3.se, SE_FIFO_OFF) & 1u) && ((fw >> 8) & 0xffu) == 3u) {
++		/* GSI-only (Android drives this SE with GPI DMA). hdtouchfifo=0: leave it. */
++		int fifo = 1;
++		(void)PE_parse_boot_argn("hdtouchfifo", &fifo, sizeof(fifo));
++		printf("SWEET S3706: SE is GSI-only: clk-ctrl=%#x dma-if-en=%#x fifo-if-disable=%#x%s\n",
++		    s3_rd(s3.se, SE_CLK_CTRL), s3_rd(s3.se, SE_DMA_IF_EN), s3_rd(s3.se, SE_FIFO_IF_DIS),
++		    fifo ? "; selecting FIFO mode" : "");
++		if (fifo) {
++			s3_wr(s3.se, SE_FIFO_IF_DIS, s3_rd(s3.se, SE_FIFO_IF_DIS) & ~1u);
++			printf("SWEET S3706: fifo-if-disable now %#x, fifo-off %#x\n",
++			    s3_rd(s3.se, SE_FIFO_IF_DIS), s3_rd(s3.se, SE_FIFO_OFF));
++		}
++	}
+ 	/* Protocol 3 = I2C; 32-bit FIFO words. */
+ 	if (((fw >> 8) & 0xffu) != 3u || (s3_rd(s3.se, SE_FIFO_OFF) & 1u) ||
+ 	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||

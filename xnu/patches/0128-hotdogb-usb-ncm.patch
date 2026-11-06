@@ -1,0 +1,423 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -21,6 +21,7 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
+ #include <kern/locks.h>
+ #include <sys/kpi_mbuf.h>
+ #include <sys/kpi_socket.h>
+@@ -242,7 +243,12 @@
+ 	unsigned    txq_head, txq_count;
+ 	bool        tx_busy;
+ 	uint64_t    rx_frames, tx_frames;
++	/* NCM */
++	bool        notify_pending; /* NETWORK_CONNECTION after CONNECTION_SPEED_CHANGE */
++	uint16_t    ntb_seq;
++	uint32_t    ntb_bad;
+ } ud;
++static bool ud_ncm;             /* CDC-NCM instead of CDC-ECM (sweetusbncm) */
+ 
+ static inline void
+ dwc_wr(uint32_t off, uint32_t v)
+@@ -368,6 +374,66 @@
+ };
+ static const uint8_t ud_phone_mac[ETHER_ADDR_LEN] = { 0x02, 0x00, 0x5e, 0x77, 0xee, 0x02 };
+ 
++/*
++ * CDC-NCM (hotdogb default, sweetusbncm=0/1 to choose): Windows 10/11 have
++ * no ECM driver (the 7T's host is a Windows PC: it read every descriptor,
++ * found no driver and never sent SET_CONFIGURATION) but bind their inbox
++ * UsbNcm driver to an NCM function; Linux (cdc_ncm) and macOS drive NCM as
++ * well. Windows only enumerates interfaces of a composite device
++ * (usbccgp), so the device is class EF/02/01 with an IAD, and the function
++ * also carries the MS OS 1.0 compatible ID "WINNCM". bcdDevice 2.00 makes
++ * Windows ask for the OS descriptor again (it caches the answer per
++ * VID/PID/bcdDevice). Framing: NTB16, one datagram per IN transfer, any
++ * number per OUT transfer (Linux drivers/usb/gadget/function/f_ncm.c).
++ */
++static const uint8_t ud_ncm_dev_desc[18] = {
++	18, 1, 0x00, 0x02, 0xef, 0x02, 0x01, 64,
++	0x09, 0x12, 0x01, 0x00, 0x00, 0x02, 1, 2, 3, 1,
++};
++static const uint8_t ud_ncm_cfg_desc[94] = {
++	9, 2, 94, 0, 2, 1, 0, 0x80, 250,                /* config: 2 interfaces, 500 mA */
++	8, 0x0b, 0, 2, 0x02, 0x0d, 0x00, 0,             /* IAD: interfaces 0-1, CDC NCM */
++	9, 4, 0, 0, 1, 0x02, 0x0d, 0x00, 0,             /* comm interface 0: CDC NCM, 1 endpoint */
++	5, 0x24, 0x00, 0x10, 0x01,                      /* header, CDC 1.10 */
++	5, 0x24, 0x06, 0, 1,                            /* union: control 0, data 1 */
++	13, 0x24, 0x0f, 4, 0, 0, 0, 0, 0xea, 0x05, 0, 0, 0, /* ethernet: MAC string 4, max segment 1514 */
++	6, 0x24, 0x1a, 0x00, 0x01, 0x00,                /* NCM 1.00, no optional requests */
++	7, 5, 0x82, 0x03, 16, 0, 9,                     /* ep 0x82 interrupt IN, 16 bytes */
++	9, 4, 1, 0, 0, 0x0a, 0x00, 0x01, 0,             /* data interface 1 alt 0: no endpoints */
++	9, 4, 1, 1, 2, 0x0a, 0x00, 0x01, 0,             /* data interface 1 alt 1: NTB bulk pair */
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,                /* ep 0x81 bulk IN, 512 */
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,                /* ep 0x01 bulk OUT, 512 */
++};
++#define UD_MS_VENDOR    0x01            /* bMS_VendorCode in the 0xEE string */
++#define UD_NTB_MAX      0x800           /* dwNtbIn/OutMaxSize = the RX/TX buffers */
++#define UD_NTB_HDR      28              /* NTH16 (12) + NDP16 with one entry (16) */
++#define NCM_NTH16_SIG   0x484d434eu     /* "NCMH" */
++#define NCM_NDP16_SIG   0x304d434eu     /* "NCM0" (no CRC) */
++
++static inline void
++ud_put16(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
++}
++
++static inline void
++ud_put32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
++}
++
++static inline uint32_t
++ud_get16(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8;
++}
++
++static inline uint32_t
++ud_get32(const uint8_t *p)
++{
++	return ud_get16(p) | ud_get16(p + 2) << 16;
++}
++
+ static uint32_t
+ ud_string(unsigned idx, uint8_t *out)
+ {
+@@ -375,6 +441,20 @@
+ 		out[0] = 4; out[1] = 3; out[2] = 0x09; out[3] = 0x04;   /* en-US */
+ 		return 4;
+ 	}
++	if (idx == 0xee && ud_ncm) {
++		/* MS OS string descriptor: "MSFT100", vendor code, pad */
++		static const char sig[] = "MSFT100";
++		uint32_t n = 2;
++		for (const char *s = sig; *s; s++) {
++			out[n++] = (uint8_t)*s;
++			out[n++] = 0;
++		}
++		out[n++] = UD_MS_VENDOR;
++		out[n++] = 0;
++		out[0] = (uint8_t)n;
++		out[1] = 3;
++		return n;
++	}
+ 	if (idx >= sizeof(ud_strings) / sizeof(ud_strings[0])) {
+ 		return 0;
+ 	}
+@@ -395,7 +475,7 @@
+ 
+ /* NETWORK_CONNECTION notification: the host brings its link up on it. */
+ static void
+-ud_notify_connected(void)
++ud_notify_connection(void)
+ {
+ 	uint8_t *n = (uint8_t *)(ud.dma + UD_NOTIFY);
+ 	n[0] = 0xa1; n[1] = 0x00;       /* NETWORK_CONNECTION */
+@@ -405,6 +485,73 @@
+ 	ud_start_trb(EP_INT, UD_TRB_INT, UD_NOTIFY, 8, TRBCTL_NORMAL);
+ }
+ 
++/*
++ * NCM: CONNECTION_SPEED_CHANGE (480 Mb/s each way) first, then
++ * NETWORK_CONNECTION when it completes (one notification at a time), as
++ * f_ncm does; ECM: the connection only.
++ */
++static void
++ud_notify_connected(void)
++{
++	if (!ud_ncm) {
++		ud_notify_connection();
++		return;
++	}
++	uint8_t *n = (uint8_t *)(ud.dma + UD_NOTIFY);
++	n[0] = 0xa1; n[1] = 0x2a;       /* CONNECTION_SPEED_CHANGE */
++	ud_put16(n + 2, 0);
++	ud_put16(n + 4, 0);             /* interface 0 */
++	ud_put16(n + 6, 8);
++	ud_put32(n + 8, 480000000u);    /* DLBitRate */
++	ud_put32(n + 12, 480000000u);   /* ULBitRate */
++	ud.notify_pending = true;
++	ud_start_trb(EP_INT, UD_TRB_INT, UD_NOTIFY, 16, TRBCTL_NORMAL);
++}
++
++/* NCM class requests on interface 0. false: stall. */
++static bool
++ud_ncm_request(uint8_t req, uint16_t length, uint8_t *data, uint32_t *n)
++{
++	switch (req) {
++	case 0x80:                      /* GET_NTB_PARAMETERS */
++		ud_put16(data + 0, 28);
++		ud_put16(data + 2, 1);          /* NTB16 only */
++		ud_put32(data + 4, UD_NTB_MAX); /* dwNtbInMaxSize */
++		ud_put16(data + 8, 4);          /* wNdpInDivisor */
++		ud_put16(data + 10, 0);         /* wNdpInPayloadRemainder */
++		ud_put16(data + 12, 4);         /* wNdpInAlignment */
++		ud_put16(data + 14, 0);
++		ud_put32(data + 16, UD_NTB_MAX); /* dwNtbOutMaxSize */
++		ud_put16(data + 20, 4);         /* wNdpOutDivisor */
++		ud_put16(data + 22, 0);         /* wNdpOutPayloadRemainder */
++		ud_put16(data + 24, 4);         /* wNdpOutAlignment */
++		ud_put16(data + 26, 0);         /* wNtbOutMaxDatagrams: no limit */
++		*n = 28;
++		return true;
++	case 0x83:                      /* GET_NTB_FORMAT: NTB16 */
++	case 0x89:                      /* GET_CRC_MODE: none */
++		ud_put16(data, 0);
++		*n = 2;
++		return true;
++	case 0x85:                      /* GET_NTB_INPUT_SIZE */
++		ud_put32(data, UD_NTB_MAX);
++		*n = 4;
++		return true;
++	case 0x87:                      /* GET_MAX_DATAGRAM_SIZE */
++		ud_put16(data, ETHER_MAX_LEN - ETHER_CRC_LEN);
++		*n = 2;
++		return true;
++	case 0x84:                      /* SET_NTB_FORMAT (NTB16 is all there is) */
++	case 0x86:                      /* SET_NTB_INPUT_SIZE: ours (one datagram) always fits */
++	case 0x88:                      /* SET_MAX_DATAGRAM_SIZE */
++	case 0x8a:                      /* SET_CRC_MODE */
++	case 0x43:                      /* SET_ETHERNET_PACKET_FILTER */
++		return true;
++	default:
++		return length == 0;
++	}
++}
++
+ /* SET_CONFIGURATION(1): bulk IN/OUT and the interrupt endpoint. */
+ static void
+ ud_configure(void)
+@@ -426,7 +573,7 @@
+ 	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | (1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT));
+ 	ud.configured = true;
+ 	ud_rx_arm();
+-	printf("SWEET USB: ECM endpoints configured\n");
++	printf("SWEET USB: %s endpoints configured\n", ud_ncm ? "NCM" : "ECM");
+ }
+ 
+ static void
+@@ -444,13 +591,31 @@
+ 	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
+ 	ud.data_in = (type & 0x80) != 0;
+ 	if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
+-		ok = (length == 0);
++		ok = ud_ncm ? ud_ncm_request(req, length, data, &n) : (length == 0);
++	} else if ((type & 0x60) == 0x40 && ud_ncm && (type & 0x80) && req == UD_MS_VENDOR &&
++	    index == 4) {
++		/* MS OS 1.0 extended compatible ID: interface 0 = "WINNCM" */
++		bzero(data, 40);
++		ud_put32(data + 0, 40);
++		ud_put16(data + 4, 0x0100);
++		ud_put16(data + 6, 4);
++		data[8] = 1;                    /* one function section */
++		data[16] = 0;                   /* bFirstInterfaceNumber */
++		data[17] = 1;
++		memcpy(data + 18, "WINNCM", 6);
++		n = 40;
+ 	} else if ((type & 0x60) != 0) {
+ 		ok = false;
+ 	} else if (req == 6) {          /* GET_DESCRIPTOR */
+ 		switch (value >> 8) {
+-		case 1: memcpy(data, ud_dev_desc, sizeof(ud_dev_desc)); n = sizeof(ud_dev_desc); break;
+-		case 2: memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc)); n = sizeof(ud_cfg_desc); break;
++		case 1:
++			n = ud_ncm ? sizeof(ud_ncm_dev_desc) : sizeof(ud_dev_desc);
++			memcpy(data, ud_ncm ? ud_ncm_dev_desc : ud_dev_desc, n);
++			break;
++		case 2:
++			n = ud_ncm ? sizeof(ud_ncm_cfg_desc) : sizeof(ud_cfg_desc);
++			memcpy(data, ud_ncm ? ud_ncm_cfg_desc : ud_cfg_desc, n);
++			break;
+ 		case 3: n = ud_string(value & 0xff, data); ok = n != 0; break;
+ 		default: ok = false; break;
+ 		}
+@@ -538,14 +703,11 @@
+ 	    len > 38 ? f[38] : 0, len > 39 ? f[39] : 0, len > 40 ? f[40] : 0, len > 41 ? f[41] : 0);
+ }
+ 
++/* One received Ethernet frame (from the RX buffer) to the stack. */
+ static void
+-ud_rx_done(void)
++ud_rx_frame(const uint8_t *f, uint32_t len)
+ {
+-	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + UD_TRB_RX);
+-	ud_sync(UD_TRB_RX, 16);
+-	uint32_t len = UD_FRAME_MAX - (t[2] & 0xffffff);
+-	ud_sync(UD_RX, UD_FRAME_MAX);
+-	ud_log_frame("rx", (const uint8_t *)(ud.dma + UD_RX), len);
++	ud_log_frame("rx", f, len);
+ 	if (ud.ifp != NULL && len >= ETHER_HDR_LEN && len <= ETHER_MAX_LEN) {
+ 		/*
+ 		 * One mbuf with a 2 KiB cluster holds any frame. (mbuf_allocpacket
+@@ -557,7 +719,7 @@
+ 		    mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
+ 		    (mbuf_flags(m) & MBUF_EXT) && mbuf_maxlen(m) >= len) {
+ 			struct ifnet_stat_increment_param stats = {};
+-			memcpy(mbuf_data(m), (const void *)(ud.dma + UD_RX), len);
++			memcpy(mbuf_data(m), f, len);
+ 			mbuf_setlen(m, len);
+ 			mbuf_pkthdr_setlen(m, len);
+ 			void *frame_header = mbuf_data(m);
+@@ -573,6 +735,61 @@
+ 			mbuf_freem(m);
+ 		}
+ 	}
++}
++
++/* NCM: every datagram of one NTB16 (NTH16, then a chain of NDP16s). */
++static void
++ud_rx_ntb(const uint8_t *b, uint32_t len)
++{
++	if (len < 12 || ud_get32(b) != NCM_NTH16_SIG || ud_get16(b + 4) != 12) {
++		if (ud.ntb_bad++ < 10) {
++			printf("SWEET USB: NCM: bad NTH16 (len %u, %02x %02x %02x %02x)\n", len,
++			    len > 0 ? b[0] : 0, len > 1 ? b[1] : 0, len > 2 ? b[2] : 0, len > 3 ? b[3] : 0);
++		}
++		return;
++	}
++	uint32_t blk = ud_get16(b + 8), ndp = ud_get16(b + 10);
++	if (blk == 0 || blk > len) {
++		blk = len;
++	}
++	for (unsigned guard = 0; ndp != 0 && guard < 8; guard++) {
++		if ((ndp & 3) || ndp + 16 > blk || ud_get32(b + ndp) != NCM_NDP16_SIG) {
++			if (ud.ntb_bad++ < 10) {
++				printf("SWEET USB: NCM: bad NDP16 at %u (block %u)\n", ndp, blk);
++			}
++			return;
++		}
++		uint32_t nlen = ud_get16(b + ndp + 4), next = ud_get16(b + ndp + 6);
++		if (nlen < 16 || ndp + nlen > blk) {
++			return;
++		}
++		for (uint32_t e = ndp + 8; e + 4 <= ndp + nlen; e += 4) {
++			uint32_t di = ud_get16(b + e), dl = ud_get16(b + e + 2);
++			if (di == 0 || dl == 0) {
++				break;
++			}
++			if (di + dl > blk) {
++				break;
++			}
++			ud_rx_frame(b + di, dl);
++		}
++		ndp = next;
++	}
++}
++
++static void
++ud_rx_done(void)
++{
++	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + UD_TRB_RX);
++	ud_sync(UD_TRB_RX, 16);
++	uint32_t len = UD_FRAME_MAX - (t[2] & 0xffffff);
++	ud_sync(UD_RX, UD_FRAME_MAX);
++	const uint8_t *b = (const uint8_t *)(ud.dma + UD_RX);
++	if (ud_ncm) {
++		ud_rx_ntb(b, len);
++	} else {
++		ud_rx_frame(b, len);
++	}
+ 	ud_rx_arm();
+ }
+ 
+@@ -589,9 +806,12 @@
+ 			mbuf_freem(m);
+ 			continue;
+ 		}
+-		mbuf_copydata(m, 0, len, (void *)(ud.dma + UD_TX));
++		/* NCM: the frame goes after the NTB16 headers (filled in below). */
++		uint32_t off = ud_ncm ? UD_NTB_HDR : 0;
++		uint8_t *fr = (uint8_t *)(ud.dma + UD_TX + off);
++		mbuf_copydata(m, 0, len, fr);
+ 		mbuf_freem(m);
+-		ud_log_frame("tx", (const uint8_t *)(ud.dma + UD_TX), (uint32_t)len);
++		ud_log_frame("tx", fr, (uint32_t)len);
+ 		/*
+ 		 * ARP replies go to the Ethernet broadcast address: macOS's ECM
+ 		 * driver shows the host as 02:00:5e:77:ee:01 (our iMACAddress) on
+@@ -599,7 +819,6 @@
+ 		 * ARP drops replies unicast to ..:01, so 192.168.7.2 never
+ 		 * resolved (frames carrying IP are accepted either way).
+ 		 */
+-		uint8_t *fr = (uint8_t *)(ud.dma + UD_TX);
+ 		if (len >= 42 && fr[12] == 0x08 && fr[13] == 0x06 && fr[20] == 0 && fr[21] == 2) {
+ 			memset(fr, 0xff, ETHER_ADDR_LEN);
+ 		}
+@@ -607,16 +826,36 @@
+ 		 * would: macOS drops shorter frames, e.g. our 42-byte ARP replies,
+ 		 * so the Mac never resolved 192.168.7.2. */
+ 		while (len < 60) {
+-			((uint8_t *)(ud.dma + UD_TX))[len++] = 0;
++			fr[len++] = 0;
+ 		}
+-		/* A frame of a multiple of 512 bytes would need a zero-length
+-		 * packet to end it; one pad byte does the same (IP ignores it). */
+-		if ((len % 512) == 0) {
+-			((uint8_t *)(ud.dma + UD_TX))[len++] = 0;
++		uint32_t xfer = (uint32_t)len;
++		if (ud_ncm) {
++			/* NTH16 at 0, NDP16 at 12 (one datagram), the datagram at 28 (4-aligned). */
++			uint8_t *h = (uint8_t *)(ud.dma + UD_TX);
++			xfer = UD_NTB_HDR + (uint32_t)len;
++			if ((xfer % 512) == 0) {
++				h[xfer++] = 0;          /* no ZLP needed: pad inside the block */
++			}
++			ud_put32(h + 0, NCM_NTH16_SIG);
++			ud_put16(h + 4, 12);
++			ud_put16(h + 6, ud.ntb_seq++);
++			ud_put16(h + 8, xfer);          /* wBlockLength */
++			ud_put16(h + 10, 12);           /* wNdpIndex */
++			ud_put32(h + 12, NCM_NDP16_SIG);
++			ud_put16(h + 16, 16);           /* wLength */
++			ud_put16(h + 18, 0);            /* wNextNdpIndex */
++			ud_put16(h + 20, UD_NTB_HDR);   /* datagram 0 */
++			ud_put16(h + 22, (uint32_t)len);
++			ud_put16(h + 24, 0);            /* terminator */
++			ud_put16(h + 26, 0);
++		} else if ((xfer % 512) == 0) {
++			/* A frame of a multiple of 512 bytes would need a zero-length
++			 * packet to end it; one pad byte does the same (IP ignores it). */
++			fr[xfer++] = 0;
+ 		}
+ 		ud.tx_busy = true;
+ 		ud.tx_frames++;
+-		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, (uint32_t)len, TRBCTL_NORMAL);
++		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, xfer, TRBCTL_NORMAL);
+ 	}
+ }
+ 
+@@ -802,6 +1041,13 @@
+ 		lck_mtx_unlock(ud.lock);
+ 		return;
+ 	}
++	if (ep == EP_INT && type == 1) {        /* NCM: speed change sent, now the connection */
++		if (ud.notify_pending) {
++			ud.notify_pending = false;
++			ud_notify_connection();
++		}
++		return;
++	}
+ 	if (ep > 1) {
+ 		return;
+ 	}
+@@ -1287,6 +1533,15 @@
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
++	/* sweetusbncm=1: CDC-NCM (Windows hosts), 0: CDC-ECM; hotdogb defaults to NCM. */
++#if defined(SWEET_HOTDOGB) && SWEET_HOTDOGB
++	int ncm = 1;
++#else
++	int ncm = 0;
++#endif
++	PE_parse_boot_argn("sweetusbncm", &ncm, sizeof(ncm));
++	ud_ncm = ncm != 0;
++	printf("SWEET USB: function %s\n", ud_ncm ? "CDC-NCM (NTB16, MS OS WINNCM)" : "CDC-ECM");
+ 	/*
+ 	 * flame: DMA buffers at a fixed physical address below 4 GB (RAM XNU
+ 	 * does not manage; ABL's own USB buffers were at 0xfd34c000), mapped
