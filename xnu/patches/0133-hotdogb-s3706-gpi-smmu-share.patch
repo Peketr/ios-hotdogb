@@ -1,0 +1,108 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -15,7 +15,8 @@
+  * reset GPIO80 (active low), attention GPIO122 (active low).
+  *
+  * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+- * hdtouchlog=1 log every object, hdtouchgpi=0 refuse GPI (stop as before).
++ * hdtouchlog=1 log every object, hdtouchgpi=0 refuse GPI (stop as before),
++ * hdgpismmu=1 share USB's SMMU bank (default) / 2 own bank / 0 no SMMU.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -500,6 +501,18 @@
+ static int
+ s3_gpi_smmu(void)
+ {
++	/*
++	 * hdgpismmu=1 (default): point 0x7b6 at the bank sweet_usb.c already set
++	 * up for the DWC3 stream 0x140 (translation off), so we write one SMR/S2CR
++	 * pair and touch no fresh bank. 2: own fresh bank (kernels 0130-0132,
++	 * which reset here). 0: leave the SMMU alone.
++	 */
++	int mode = 1;
++	(void)PE_parse_boot_argn("hdgpismmu", &mode, sizeof(mode));
++	if (mode == 0) {
++		GPIDBG("smmu skipped (hdgpismmu=0)");
++		return 0;
++	}
+ 	vm_offset_t as = ml_io_map(0x15000000ull, 0x100000);
+ 	if (!as) {
+ 		return -1;
+@@ -509,7 +522,7 @@
+ 	uint32_t pagesz = (idr1 >> 31) ? 0x10000u : 0x1000u;
+ 	uint32_t cbbase = (1u << (((idr1 >> 28) & 7u) + 1u)) * pagesz;
+ 	uint64_t used[2] = {0, 0};
+-	int smr = -1, cb = -1;
++	int smr = -1, cb = -1, usbcb = -1;
+ 	for (unsigned i = 0; i < nsmr; i++) {
+ 		uint32_t m = s3_rd(as, 0x800 + 4 * i), c = s3_rd(as, 0xc00 + 4 * i);
+ 		if (!(m >> 31)) {
+@@ -518,35 +531,55 @@
+ 			}
+ 			continue;
+ 		}
++		if (s3.log) {
++			printf("SWEET S3706: SMMU smr%u %#x s2cr %#x\n", i, m, c);
++		}
+ 		if (((c >> 16) & 3u) == 0) {
+ 			used[(c & 0xffu) / 64] |= 1ull << ((c & 0xffu) % 64);
++			if ((m & 0x7fffu) == 0x140u) {
++				usbcb = (int)(c & 0xffu);
++			}
+ 		}
+ 		if (((GPI_SMMU_SID ^ (m & 0x7fffu)) & ~((m >> 16) & 0x7fffu) & 0x7fffu) == 0) {
+ 			printf("SWEET S3706: SMMU smr%u already matches %#x (s2cr %#x)\n", i, GPI_SMMU_SID, c);
+ 			return -1;
+ 		}
+ 	}
+-	for (int c = 0; c < (int)ncb; c++) {
+-		if (!(used[c / 64] & (1ull << (c % 64))) && !(s3_rd(as, cbbase + c * pagesz) & 1u) &&
+-		    s3_rd(as, pagesz + 4 * c) == 0) {
+-			cb = c;
+-			break;
++	if (mode == 1 && usbcb >= 0) {
++		cb = usbcb;
++	} else {
++		for (int c = 0; c < (int)ncb; c++) {
++			if (!(used[c / 64] & (1ull << (c % 64))) && !(s3_rd(as, cbbase + c * pagesz) & 1u) &&
++			    s3_rd(as, pagesz + 4 * c) == 0) {
++				cb = c;
++				break;
++			}
+ 		}
+ 	}
++	printf("SWEET S3706: SMMU idr0 %#x idr1 %#x nsmr %u ncb %u mode %d -> smr %d cb %d (usb cb %d)\n",
++	    idr0, idr1, nsmr, ncb, mode, smr, cb, usbcb);
++	if (s3.log) {
++		s3_wait(2100);
++	}
+ 	if (smr < 0 || cb < 0) {
+ 		printf("SWEET S3706: SMMU: no free smr/cb (%d/%d)\n", smr, cb);
+ 		return -1;
+ 	}
+-	vm_offset_t cbv = as + cbbase + cb * pagesz;
+-	*(volatile uint32_t *)(cbv + 0x00) = 0xe0u;                     /* SCTLR: M=0 (translation off) */
+-	*(volatile uint32_t *)(as + pagesz + 0x800 + 4 * cb) = 1u;      /* CBA2R: AArch64 */
+-	*(volatile uint32_t *)(as + pagesz + 4 * cb) = 0x1f000u;        /* CBAR as ABL's banks */
+-	__asm__ volatile("dsb sy" ::: "memory");
++	if (cb != usbcb) {
++		vm_offset_t cbv = as + cbbase + cb * pagesz;
++		*(volatile uint32_t *)(cbv + 0x00) = 0xe0u;                     /* SCTLR: M=0 (translation off) */
++		*(volatile uint32_t *)(as + pagesz + 0x800 + 4 * cb) = 1u;      /* CBA2R: AArch64 */
++		*(volatile uint32_t *)(as + pagesz + 4 * cb) = 0x1f000u;        /* CBAR as ABL's banks */
++		__asm__ volatile("dsb sy" ::: "memory");
++		GPIDBG("smmu own bank written");
++	}
+ 	*(volatile uint32_t *)(as + 0xc00 + 4 * smr) = (uint32_t)cb;
++	__asm__ volatile("dsb sy" ::: "memory");
++	GPIDBG("smmu s2cr written");
+ 	*(volatile uint32_t *)(as + 0x800 + 4 * smr) = (1u << 31) | GPI_SMMU_SID;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+-	printf("SWEET S3706: SMMU smr%d %#x -> cb%d (translation off)\n", smr,
+-	    s3_rd(as, 0x800 + 4 * smr), cb);
++	printf("SWEET S3706: SMMU smr%d %#x s2cr %#x -> cb%d (translation off)\n", smr,
++	    s3_rd(as, 0x800 + 4 * smr), s3_rd(as, 0xc00 + 4 * smr), cb);
+ 	return 0;
+ }
+ 

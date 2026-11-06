@@ -89,6 +89,9 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   (no reset) and reached the SE read, then bailed at a >4 GiB DMA-address guard.
 - **0131 GPI 64-bit DMA**: the contiguous DMA block can land above 4 GiB (RAM is), so carry the high
   word in the DMA TRE dword1 and drop the bail (the engine is 64-bit, as the UFS driver relies on).
+- **0132 GPI step markers** (`hdtouchlog=1`): kernel 0132 showed the reset is in the touch SMMU setup.
+- **0133 GPI SMMU shares USB's bank**: stream 0x7b6 gets its own SMR but points at the translation-off
+  bank USB already set up, instead of writing a fresh bank (`hdgpismmu=2` old way, `0` none).
 - **0128 USB NCM**: the Windows host had no driver for the CDC-ECM gadget. On hotdogb the gadget
   is now CDC-NCM: device class EF/02/01 + IAD (Windows' composite driver enumerates the
   function), MS OS 1.0 string 0xEE + extended compatible ID "WINNCM" (inbox UsbNcm),
@@ -97,19 +100,18 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0131 on the Mac
+### Kernel 0133 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0131; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
-        patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0131.log
+    for p in 0133; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch &&         patch -p1 < ../../../xnu/patches/$p-*.patch; done
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0133.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c "GPI DMA up"  (want >=1)
+    # verify before sending: strings .../kernel.development.sweet | grep -c hdgpismmu  (want >=1)
 
-(Apply only the patches the tree does not yet have. The 0130 build tree needs just 0131; a tree built
-for 0128 needs 0129 0130 0131; a fresh `build.sh` tree needs 0127..0131. A clean `build.sh` run copies
-every patch from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
+(Apply only the patches the tree does not yet have. The 0132 build tree needs just 0133; a 0131 tree
+needs 0132 0133; a fresh `build.sh` tree needs 0127..0133. A clean `build.sh` run copies every patch
+from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)
 

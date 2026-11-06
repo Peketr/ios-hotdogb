@@ -108,3 +108,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   to the 0129 stop. Register/command model from Linux gpi.c + i2c-qcom-geni.c; logic host-tested.
 - 0131 hotdogb: GPI DMA buffers above 4 GiB (the DMA block can land there) - carry the high word in the
   TRE dword1 and drop the <4 GiB bail; ring CNTXT/doorbell already 64-bit. (Kernel 0130 bailed on this.)
+- 0132 hotdogb: GPIDBG step markers in GPI setup (hdtouchlog=1, each waits past a 2 s log flush). Showed the
+  reset is in s3_gpi_smmu (fresh SMR + context bank for stream 0x7b6).
+- 0133 hotdogb: GPI stream 0x7b6 shares USB's translation-off SMMU bank (`hdgpismmu=1` default; 2 = own bank,
+  0 = none) and logs the SMMU state/chosen smr+cb with step markers.

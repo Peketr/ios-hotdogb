@@ -5,6 +5,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0132 - the reset is inside the touch SMMU setup; 0133 shares USB's bank (2026-11-06, 21:50)
+Kernel 0132 (`work/boot/kernel-0132`, SHA-256 7c814889...b6f1) ran with `hdtouchlog=1` (logs/runs/k0132-first).
+Last line on disk: `GPIDBG dma_pa 0x1048f8000` - the marker before `s3_gpi_smmu`; "smmu ok" never landed,
+back in fastboot at 68 s (same wall time as 0131, so 0131 died at the same place). The GPI engine itself
+is not touched yet. s3_gpi_smmu is a copy of sweet_usb's working setup (USB: smr3 -> cb4, translation off),
+but touch must take a *fresh* SMR and a *fresh* context bank (cb5+); a reset on writing one of those points
+at a bank/SMR the hypervisor or secure world owns (reads as free, RAZ).
+- **0133** (written, syntax-checked, NOT built/run): `hdgpismmu=1` (default) points 0x7b6's new SMR at the
+  bank USB already configured (looked up via the SMR matching 0x140), so no fresh bank is written;
+  `hdgpismmu=2` = old fresh-bank path, `0` = skip the SMMU. With hdtouchlog it logs every live SMR/S2CR,
+  idr0/idr1, the chosen smr/cb, and markers "smmu own bank written" / "smmu s2cr written" before the SMR
+  write. Run with `hdtouchlog=1`; if it still resets, the line before the last marker names the write.
+
 ### HOTDOGB: kernel 0131 - GPI setup resets the phone at ~55 s; 0132 adds step logging to localize it
 Kernel 0131 (GPI 64-bit fix) ran, and now `s3_gpi_setup` actually executes (0130 bailed before it). The phone
 reset ~55 s after boot - back in fastboot at 68 s - during GPI setup (logs/runs/k0131-first). Proof it is the
