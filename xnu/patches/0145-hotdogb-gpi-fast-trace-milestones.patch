@@ -1,0 +1,201 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -44,6 +44,7 @@
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern void sweet_log_kick(void);
++extern int sweet_log_sync(void);
+ extern int sweet_usb_smmu_share(uint32_t sid);
+ extern void sweet_usb_smmu_status(const char *tag);
+ 
+@@ -836,11 +837,13 @@
+ 	(void)PE_parse_boot_argn("hdgpiprobe", &probe, sizeof(probe));
+ 	if (probe) {
+ 		s3_gpi_probe(probe);
++		printf("#### GPI PROBE %d DONE, NO RESET\n", probe);
+ 		printf("SWEET S3706: GPIDBG hdgpiprobe=%d done, no reset; touch stays off\n", probe);
+ 		sweet_log_kick();
+ 		return false;
+ 	}
+ 	s3.gpi = true;
++	printf("#### GPI DMA UP\n");
+ 	printf("SWEET S3706: GPI DMA up (GPII %u, dma_pa %#llx)\n", GPII, s3.dma_pa);
+ 	return true;
+ }
+@@ -917,6 +920,30 @@
+ 	return EIO;
+ }
+ 
++/*
++ * 0145: what Linux gpi_dump_debug_reg logs (GPI microcontroller PC, SW_RF
++ * 10/11/12/21, QSB bus log), the raw GPII interrupt status (masked here, but
++ * still latched) and the SE's own state (GENI status, M command, IRQ status).
++ */
++static void
++s3_gpi_probe_more(const char *tag)
++{
++	vm_offset_t g = s3.gpi_regs, e = s3.se;
++	printf("SWEET S3706: GPIDBG %s: gpi pc %#x rf10 %#x rf11 %#x rf12 %#x rf21 %#x "
++	    "qsb err %#x log %#x %#x %#x misc %#x %#x %#x %#x\n", tag,
++	    s3_rd(g, 0x5048), s3_rd(g, 0x5128), s3_rd(g, 0x512c), s3_rd(g, 0x5130), s3_rd(g, 0x5154),
++	    s3_rd(g, 0x5060), s3_rd(g, 0x5064), s3_rd(g, 0x5068), s3_rd(g, 0x506c),
++	    s3_rd(g, 0x5070), s3_rd(g, 0x5074), s3_rd(g, 0x5078), s3_rd(g, 0x507c));
++	printf("SWEET S3706: GPIDBG %s: gpii type %#x ch %#x ev %#x ieob %#x glob %#x gpii %#x\n", tag,
++	    s3_rd(g, 0x23080u + 0x4000u * GPII), s3_rd(g, 0x23090u + 0x4000u * GPII),
++	    s3_rd(g, 0x23094u + 0x4000u * GPII), s3_rd(g, 0x230b0u + 0x4000u * GPII),
++	    s3_rd(g, 0x23100u + 0x4000u * GPII), s3_rd(g, 0x23118u + 0x4000u * GPII));
++	printf("SWEET S3706: GPIDBG %s: se status %#x mcmd %#x mirq %#x sirq %#x dtx %#x drx %#x "
++	    "gsi_ev %#x irq_en %#x dma_mode %#x ios %#x\n", tag,
++	    s3_rd(e, 0x40), s3_rd(e, 0x600), s3_rd(e, 0x610), s3_rd(e, 0x640), s3_rd(e, 0xc40),
++	    s3_rd(e, 0xd40), s3_rd(e, 0xe18), s3_rd(e, 0xe1c), s3_rd(e, 0x258), s3_rd(e, 0x908));
++}
++
+ static void
+ s3_gpi_probe_regs(const char *tag)
+ {
+@@ -928,6 +955,7 @@
+ 	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB),
+ 	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_WP_LSB));
+ 	sweet_usb_smmu_status(tag);
++	s3_gpi_probe_more(tag);
+ }
+ 
+ /*
+@@ -937,6 +965,14 @@
+  *   1  TX doorbell with no new TREs (WP = RP): the doorbell write itself
+  *   2  RX DMA TRE alone: the GPI fetches a TRE through the SMMU, no SE command
+  *   3  CONFIG0 alone (IEOT): the GPI programs the SE, no I2C traffic
++ * Kernel 0144: all three survive, with no SMMU fault, but the GPI never moves
++ * a read pointer (CONFIG0 alone is not consumed). 0145:
++ *   4  the real first write (CONFIG0, GO write 0x20, DMA "ff 00"), with the
++ *      log written to disk synchronously before the doorbell and after each
++ *      of 40 back-to-back register dumps, to catch the moments before reset
++ *   5  CONFIG0 (chain) + GO write, no DMA TRE: the SE starts, the GPI has no
++ *      data to give it
++ * The touch controller is still held in reset here, so it cannot ACK.
+  */
+ static void
+ s3_gpi_probe(int p)
+@@ -961,8 +997,39 @@
+ 		s3_dma_sync(GD_TX_RING, GD_RING_LEN);
+ 		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+ 		break;
++	case 4:
++	case 5: {
++		static const uint8_t w[2] = {0xff, 0x00};
++		uint64_t txpa = s3.dma_pa + GD_TXBUF;
++		memcpy((void *)(s3.dma + GD_TXBUF), w, sizeof(w));
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0318050cu, 0, 2, TRE_TYPE_CFG0 | TRE_CHAIN);
++		if (p == 4) {
++			s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8), 0, 0,
++			    TRE_TYPE_GO | TRE_CHAIN);
++			s3_gpi_push(GD_TX_RING, &s3.tx_wp, (uint32_t)txpa, (uint32_t)(txpa >> 32), sizeof(w),
++			    TRE_TYPE_DMA | TRE_IEOT);
++		} else {
++			s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_WRITE | (S3_ADDR << 8), 0, 0,
++			    TRE_TYPE_GO | TRE_IEOT);
++		}
++		s3_dma_sync(GD_TXBUF, sizeof(w));
++		s3_dma_sync(GD_TX_RING, GD_RING_LEN);
++		printf("#### GPI PROBE %d: RINGING TX DOORBELL NOW (%s)\n", p,
++		    p == 4 ? "CONFIG0 + GO + DMA" : "CONFIG0 + GO, NO DMA");
++		int se = sweet_log_sync();
++		printf("SWEET S3706: GPIDBG probe %d: log synced (%d), ringing\n", p, se);
++		(void)sweet_log_sync();
++		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++		for (unsigned i = 0; i < 40; i++) {
++			printf("SWEET S3706: GPIDBG probe %d fast %u\n", p, i);
++			s3_gpi_probe_regs("fast");
++			(void)sweet_log_sync();
++		}
++		printf("#### GPI PROBE %d SURVIVED 40 DUMPS\n", p);
++		break;
++	}
+ 	default:
+-		printf("SWEET S3706: GPIDBG hdgpiprobe=%d unknown (1-3)\n", p);
++		printf("SWEET S3706: GPIDBG hdgpiprobe=%d unknown (1-5)\n", p);
+ 		return;
+ 	}
+ 	printf("SWEET S3706: GPIDBG probe %d rung\n", p);
+@@ -973,7 +1040,7 @@
+ 	}
+ 	if (p == 2) {
+ 		(void)s3_gpi_wait(GPI_CH_RX, true);
+-	} else if (p == 3) {
++	} else if (p >= 3) {
+ 		(void)s3_gpi_wait(GPI_CH_TX, true);
+ 	}
+ 	s3_gpi_probe_regs("probe end");
+@@ -1020,6 +1087,7 @@
+ 	s3_dma_sync(GD_TXBUF, wlen);
+ 	s3_dma_sync(GD_TX_RING, GD_RING_LEN);
+ 	if (dbg) {
++		printf("#### RINGING GPI TX DOORBELL (TRANSFER %u)\n", n);
+ 		GPIDBG("txn write TREs queued, ringing TX doorbell");
+ 	}
+ 	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+@@ -1281,6 +1349,7 @@
+ 	(void)arg;
+ 	(void)result;
+ 	(void)PE_parse_boot_argn("hdtouchdelay", &delay_s, sizeof(delay_s));
++	printf("#### TOUCHSCREEN DRIVER LOADED, STARTING IN %u S\n", delay_s);
+ 	printf("SWEET S3706: starting in %u s\n", delay_s);
+ 	s3_wait(delay_s * 1000u);
+ 	s3.gcc = ml_io_map(S3_GCC_PA, 0x60000);
+@@ -1338,10 +1407,12 @@
+ 	if (!s3_se_init()) {
+ 		goto out;
+ 	}
++	printf("#### RELEASING TOUCH CONTROLLER RESET\n");
+ 	GPIDBG("se init done, releasing touch reset");
+ 	s3_gpio(S3_PIN_RESET, 0, 3, 3, true, true);
+ 	s3_wait(150);   /* firmware boot after reset */
+ 	GPIDBG("touch reset released, first I2C transfer next");
++	printf("#### FIRST I2C TRANSFER TO THE TOUCH CONTROLLER\n");
+ 	err = s3_scan_pdt();
+ 	if (err || s3.dead) {
+ 		printf("SWEET S3706: PDT scan failed %d (no F01/F12)\n", err);
+@@ -1375,6 +1446,7 @@
+ 		printf("SWEET S3706: irq enable %02x %02x %02x %02x err=%d\n",
+ 		    ien[0], ien[1], ien[2], ien[3], err);
+ 	}
++	printf("#### TOUCHSCREEN RUNNING\n");
+ 	printf("SWEET S3706: %u objects, polling every 8 ms\n", s3.fingers);
+ 	uint8_t pkt[8u + 8u * S3_MAX + 64u];
+ 	unsigned need = s3.data1_off + 8u * s3.fingers, errors = 0, ticks = 0;
+@@ -1409,6 +1481,7 @@
+ 	}
+ 	s3_release_all();
+ out:
++	printf("#### TOUCHSCREEN STOPPED\n");
+ 	printf("SWEET S3706: thread exits\n");
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1005,6 +1005,25 @@
+ 	(void)sweet_log_flush_locked();
+ }
+ 
++/*
++ * 0145: write the console log to disk now and wait for it (thread context,
++ * interrupts on). For markers right before a suspected hardware reset, where
++ * sweet_log_kick's wakeup may not get the log thread scheduled in time.
++ */
++int sweet_log_sync(void);
++
++int
++sweet_log_sync(void)
++{
++	if (!sweet_log_running || !su.ready) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&sweet_ufs_lock);
++	int error = sweet_log_flush_locked();
++	lck_mtx_unlock(&sweet_ufs_lock);
++	return error;
++}
++
+ /* Flush the console log now (debug markers before a suspected reset). */
+ void sweet_log_kick(void);
+ 

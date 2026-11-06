@@ -5,6 +5,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0144 probes 1-3 all survive; GPI never consumes a TRE; 0145 fast trace (2026-11-07)
+Kernel 0144 (`work/boot/kernel-0144`, SHA-256 4d1eed36...91e8; logs/runs/k0144-probe1..3, all ran 300 s):
+- probe 1 (empty TX doorbell), 2 (RX DMA TRE alone), 3 (CONFIG0 alone, IEOT): no reset, no SMMU global
+  fault (sCR0 0x2f0406, sGFSR 0). WP registers follow the doorbells (tx wp 0xf0001010 / rx wp 0xf0001410)
+  but RP never moves and no event arrives: the GPI does not consume even a lone CONFIG0.
+- So the reset needs the full chain (CONFIG0 + GO + DMA). probe 1's first try ran fine; only the rescue
+  boot afterwards failed (`fastboot: error: Command failed`, phone left on the bootloader screen); retried.
+- **0145** (written, syntax-checked, NOT built/run): `sweet_log_sync()` (sweet_ufs.c) writes the log to disk
+  synchronously; probe dumps add GPI PC/SW_RF/QSB log, raw GPII IRQ status and SE status/M_CMD/IRQ
+  registers. New probes: 4 = the real first write with a synced log before the doorbell and 40 synced
+  dumps after it; 5 = CONFIG0 + GO without DMA. Also `#### ALL CAPS` milestone lines in the touch flow
+  (user request). Run order: probe 4, then 5.
+
 ### HOTDOGB: kernel 0143 - same reset at the first TX doorbell with the block at 0xf0000000; 0144 probes (2026-11-07)
 Kernel 0143 (`work/boot/kernel-0143`, SHA-256 c6a8bfcd...6883, logs/runs/k0143-first; the first upload was
 truncated at 13 MB, the Downloads copy is the full 17.4 MB): `GPI DMA block at fixed 0xf0000000`, setup and

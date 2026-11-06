@@ -111,6 +111,9 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   (0142's allocation failed), so the block is unmanaged DDR mapped write-combining; doorbells are 32-bit.
 - **0144 GPI doorbell probes** (`hdgpiprobe=1|2|3`, default 0): empty TX doorbell / RX DMA TRE alone /
   CONFIG0 alone, each followed by GPI RP/WP and SMMU global fault dumps; the touch thread then stops.
+- **0145 GPI fast trace** (`hdgpiprobe=4|5`): the real first write / CONFIG0 + GO only, with the log synced
+  to disk (`sweet_log_sync`) before the doorbell and after each dump; GPI PC/QSB and SE status in every dump.
+  Milestones in the log start with `####`.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi

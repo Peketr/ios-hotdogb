@@ -136,3 +136,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   write-combining. Kernel 0142 found no XNU RAM below 4 GiB (highmem layout) and stopped before the GPI.
 - 0144 hotdogb: `hdgpiprobe` 1-3 isolates the first-doorbell reset (empty TX doorbell, RX TRE alone,
   CONFIG0 alone) and logs the apps SMMU global fault registers. Kernel 0143 reset at the same doorbell.
+- 0145 hotdogb: synchronous log flush (`sweet_log_sync`), GPI/SE debug dumps, probes 4 (real first write,
+  fast synced trace) and 5 (CONFIG0 + GO, no DMA), `####` milestone lines. 0144 probes 1-3 all survived;
+  the GPI never moved a read pointer.
