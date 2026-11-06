@@ -93,8 +93,12 @@ echo "building (log: $LOG) ..."
 tools/build-xnu.sh "$LOG"
 
 K=$ROOT/work/dxb/build/xnu.obj/kernel.development.sweet
-[ -f "$K" ] || K=$ROOT/work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+K2=$ROOT/work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+if [ -f "$K2" ] && { [ ! -f "$K" ] || [ "$K2" -nt "$K" ]; }; then
+	K=$K2   # the newer of the two build outputs
+fi
 [ -f "$K" ] || { echo "no kernel found after the build" >&2; exit 1; }
+echo "kernel: $K"
 
 ok=1
 if [ -f "$CHECKS" ]; then
@@ -103,7 +107,9 @@ if [ -f "$CHECKS" ]; then
 		s=${s%$'\r'}
 		case $n in ''|\#*) continue ;; esac
 		grep -q "^$n-" "$STATE" || continue
-		if printf '%s\n' "$strs" | grep -qF -- "$s"; then
+		# Here-string, not a pipe: grep -q stops at the first match, and with
+		# pipefail the writer's SIGPIPE would turn every hit into a failure.
+		if grep -qF -- "$s" <<< "$strs"; then
 			echo "check $n ok: $s"
 		else
 			echo "check $n FAILED: '$s' not in the kernel" >&2
