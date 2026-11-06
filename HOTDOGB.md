@@ -109,6 +109,8 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0142 GPI DMA below 4 GiB** (`hdgpilow=1` default): Linux only gives the GPI 32-bit IOVAs.
 - **0143 GPI DMA fixed low block** (`hdgpilowpa`, default 0xf0000000): XNU has no RAM below 4 GiB here
   (0142's allocation failed), so the block is unmanaged DDR mapped write-combining; doorbells are 32-bit.
+- **0144 GPI doorbell probes** (`hdgpiprobe=1|2|3`, default 0): empty TX doorbell / RX DMA TRE alone /
+  CONFIG0 alone, each followed by GPI RP/WP and SMMU global fault dumps; the touch thread then stops.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi

@@ -12,3 +12,4 @@
 0141 events consumed
 0142 hdgpilow
 0143 hdgpilowpa
+0144 hdgpiprobe

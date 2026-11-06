@@ -1,0 +1,136 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -45,6 +45,7 @@
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern void sweet_log_kick(void);
+ extern int sweet_usb_smmu_share(uint32_t sid);
++extern void sweet_usb_smmu_status(const char *tag);
+ 
+ static bool s3_gpi_setup(void);
+ static int s3_gpi_txn(const uint8_t *wbuf, unsigned wlen, uint8_t *rbuf, unsigned rlen);
+@@ -695,6 +696,8 @@
+ 	s3_wr(s3.se, SE_I2C_SCL, I2C_SCL);
+ }
+ 
++static void s3_gpi_probe(int p);
++
+ static bool
+ s3_gpi_setup(void)
+ {
+@@ -828,6 +831,15 @@
+ 		return false;
+ 	}
+ 	s3_gpi_dump("rx started");
++	/* 0144: hdgpiprobe=N runs one isolated doorbell experiment, then stops. */
++	int probe = 0;
++	(void)PE_parse_boot_argn("hdgpiprobe", &probe, sizeof(probe));
++	if (probe) {
++		s3_gpi_probe(probe);
++		printf("SWEET S3706: GPIDBG hdgpiprobe=%d done, no reset; touch stays off\n", probe);
++		sweet_log_kick();
++		return false;
++	}
+ 	s3.gpi = true;
+ 	printf("SWEET S3706: GPI DMA up (GPII %u, dma_pa %#llx)\n", GPII, s3.dma_pa);
+ 	return true;
+@@ -905,6 +917,68 @@
+ 	return EIO;
+ }
+ 
++static void
++s3_gpi_probe_regs(const char *tag)
++{
++	printf("SWEET S3706: GPIDBG %s: tx rp %#x wp %#x rx rp %#x wp %#x ev rp %#x wp %#x\n", tag,
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_TX) + GC_RP_LSB),
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_TX) + GC_WP_LSB),
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_RX) + GC_RP_LSB),
++	    s3_rd(s3.gpi_regs, G_CH_CNTXT(GPI_CH_RX) + GC_WP_LSB),
++	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB),
++	    s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_WP_LSB));
++	sweet_usb_smmu_status(tag);
++}
++
++/*
++ * 0144: kernels 0139-0143 reset within milliseconds of the first TX doorbell
++ * (CONFIG0 + GO + DMA), wherever the DMA block was. Each probe isolates one
++ * step; run them with boot-args, no rebuild:
++ *   1  TX doorbell with no new TREs (WP = RP): the doorbell write itself
++ *   2  RX DMA TRE alone: the GPI fetches a TRE through the SMMU, no SE command
++ *   3  CONFIG0 alone (IEOT): the GPI programs the SE, no I2C traffic
++ */
++static void
++s3_gpi_probe(int p)
++{
++	uint64_t rxpa = s3.dma_pa + GD_RXBUF;
++	s3_gpi_probe_regs("probe before");
++	switch (p) {
++	case 1:
++		GPIDBG("probe 1: TX doorbell, empty ring");
++		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++		break;
++	case 2:
++		GPIDBG("probe 2: RX DMA TRE alone, ringing RX doorbell");
++		s3_gpi_push(GD_RX_RING, &s3.rx_wp, (uint32_t)rxpa, (uint32_t)(rxpa >> 32), 16,
++		    TRE_TYPE_DMA | TRE_IEOT);
++		s3_dma_sync(GD_RX_RING, GD_RING_LEN);
++		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_RX), (uint32_t)(s3.dma_pa + GD_RX_RING + s3.rx_wp));
++		break;
++	case 3:
++		GPIDBG("probe 3: CONFIG0 alone, ringing TX doorbell");
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0318050cu, 0, 2, TRE_TYPE_CFG0 | TRE_IEOT);
++		s3_dma_sync(GD_TX_RING, GD_RING_LEN);
++		s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
++		break;
++	default:
++		printf("SWEET S3706: GPIDBG hdgpiprobe=%d unknown (1-3)\n", p);
++		return;
++	}
++	printf("SWEET S3706: GPIDBG probe %d rung\n", p);
++	sweet_log_kick();
++	for (unsigned i = 0; i < 4; i++) {
++		s3_gpi_probe_regs("probe after");
++		s3_gpi_dump("probe after");
++	}
++	if (p == 2) {
++		(void)s3_gpi_wait(GPI_CH_RX, true);
++	} else if (p == 3) {
++		(void)s3_gpi_wait(GPI_CH_TX, true);
++	}
++	s3_gpi_probe_regs("probe end");
++}
++
+ /*
+  * One I2C transaction over GPI: write wlen bytes (register + payload), then,
+  * if rlen, a repeated-start read of rlen bytes. The slave address goes in the
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1702,4 +1702,29 @@
+ 	    ud_smmu_cbn);
+ 	return free_smr;
+ }
++
++/*
++ * 0144: apps SMMU global fault state (sCR0, sGFSR, sGFSYNR0/1, sGFAR) and the
++ * shared bank's FSR/FAR, read through this driver's mapping (touch GPI probes).
++ */
++void sweet_usb_smmu_status(const char *tag);
++
++void
++sweet_usb_smmu_status(const char *tag)
++{
++	vm_offset_t as = ud_smmu_as;
++	if (!as) {
++		printf("SWEET USB: SMMU %s: no mapping\n", tag);
++		return;
++	}
++	volatile uint32_t *g = (volatile uint32_t *)as;
++	printf("SWEET USB: SMMU %s: cr0 %x gfsr %x gfsynr0 %x gfsynr1 %x gfar %x%08x", tag,
++	    g[0x00 / 4], g[0x48 / 4], g[0x50 / 4], g[0x54 / 4], g[0x44 / 4], g[0x40 / 4]);
++	if (ud_smmu_cb) {
++		volatile uint32_t *c = (volatile uint32_t *)ud_smmu_cb;
++		printf("; cb%d fsr %x far %x%08x fsynr0 %x", ud_smmu_cbn, c[0x58 / 4], c[0x64 / 4],
++		    c[0x60 / 4], c[0x68 / 4]);
++	}
++	printf("\n");
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

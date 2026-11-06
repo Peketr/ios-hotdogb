@@ -134,3 +134,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   doorbell (0140's extra line was flush timing), i.e. on the GPI's first TRE fetch from 0x1_049xxxxx.
 - 0143 hotdogb: GPI DMA block at a fixed unmanaged PA below 4 GiB (`hdgpilowpa`, default 0xf0000000),
   write-combining. Kernel 0142 found no XNU RAM below 4 GiB (highmem layout) and stopped before the GPI.
+- 0144 hotdogb: `hdgpiprobe` 1-3 isolates the first-doorbell reset (empty TX doorbell, RX TRE alone,
+  CONFIG0 alone) and logs the apps SMMU global fault registers. Kernel 0143 reset at the same doorbell.

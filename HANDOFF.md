@@ -5,6 +5,21 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0143 - same reset at the first TX doorbell with the block at 0xf0000000; 0144 probes (2026-11-07)
+Kernel 0143 (`work/boot/kernel-0143`, SHA-256 c6a8bfcd...6883, logs/runs/k0143-first; the first upload was
+truncated at 13 MB, the Downloads copy is the full 17.4 MB): `GPI DMA block at fixed 0xf0000000`, setup and
+START fine, last line again `txn write TREs queued, ringing TX doorbell`, back in fastboot after 80 s, no
+panic. So address width was not (alone) the cause.
+- Checked against OnePlus i2c-qcom-geni.c/gpi.c: TRE words (CONFIG0/GO/DMA, chain/IEOT/link_rx), channel
+  and event CNTXT, SCRATCH_0, QOS, INTSET, ev ring priming all match. GCC 0x1e008 = 0x80000002 is s_ahb
+  under HW gating (bit 1), not a clock left off.
+- **0144** (written, syntax-checked, NOT built/run): `hdgpiprobe=N` runs one doorbell experiment after
+  channel START and then stops the touch thread: 1 = TX doorbell with no new TREs (the register write
+  itself), 2 = an RX DMA TRE alone (TRE fetch through the SMMU, no SE command), 3 = CONFIG0 alone (GPI
+  programs the SE). Each prints ch/event RP/WP and the apps SMMU global fault state
+  (`sweet_usb_smmu_status`: sCR0, sGFSR, sGFSYNR0/1, sGFAR, shared cb4 FSR/FAR). Default 0 = unchanged.
+  Run order: probe 1, 2, 3, adding `hdgpiprobe=N` to the run's -a boot-args.
+
 ### HOTDOGB: kernel 0142 - no RAM below 4 GiB for XNU; 0143 uses a fixed low block (2026-11-07)
 Kernel 0142 (`work/boot/kernel-0142`, SHA-256 91702962...fec0, logs/runs/k0142-first): no reset, ran the
 full 300 s - but the touch thread stopped at `GPI DMA alloc failed (3, below 4 GiB 1)`: on hotdogb XNU only
