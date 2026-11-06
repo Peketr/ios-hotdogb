@@ -5,6 +5,18 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0142 - no RAM below 4 GiB for XNU; 0143 uses a fixed low block (2026-11-07)
+Kernel 0142 (`work/boot/kernel-0142`, SHA-256 91702962...fec0, logs/runs/k0142-first): no reset, ran the
+full 300 s - but the touch thread stopped at `GPI DMA alloc failed (3, below 4 GiB 1)`: on hotdogb XNU only
+manages RAM from 0x1_00000000 up (mkadt.py --highmem), so vm_page_find_contiguous below 4 GiB finds nothing.
+- Second reason the high block was wrong: the channel/event doorbells take only the low 32 bits of a ring
+  pointer, so with the block at 0x1_049xxxxx the first TX doorbell pointed outside the ring.
+- **0143** (written, syntax-checked, NOT built/run): fixed DDR block below 4 GiB that XNU does not manage
+  (`hdgpilowpa`, default 0xf0000000; fixed carve-outs end at 0xa8800000), mapped write-combining like
+  sweet_usb.c's sweetusbdma path; cache flushes become a dsb for it (`s3_dma_sync`). `hdgpilow=0`: old
+  kernel-memory block. Look for `GPI DMA block at fixed 0xf0000000`, then whether the run gets past
+  "ringing TX doorbell" to "txn write rung", the wait/event lines and "txn 0 write done".
+
 ### HOTDOGB: kernel 0141 - reset within ms of the first TX doorbell (0140 just flushed one line more); 0142 (2026-11-06, 23:30)
 Kernel 0141 (`work/boot/kernel-0141`, SHA-256 2145ce08...01f9, logs/runs/k0141-first): last line again
 `txn write TREs queued, ringing TX doorbell` (back at 80 s), no "txn write rung". So 0140's extra line was

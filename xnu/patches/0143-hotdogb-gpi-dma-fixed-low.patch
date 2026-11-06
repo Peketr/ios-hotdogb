@@ -1,0 +1,147 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -37,6 +37,7 @@
+ 
+ #if SWEET_HOTDOGB
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
+@@ -228,6 +229,7 @@
+ 	vm_offset_t gpi_regs;           /* qcom,gpi-dma@0xc00000 (GPII window) */
+ 	vm_offset_t dma;                /* contiguous rings + I2C buffers */
+ 	uint64_t dma_pa;
++	bool dma_nc;                    /* fixed low block, write-combining: no cache maintenance */
+ 	unsigned tx_wp, rx_wp, ev_rp;   /* byte offsets into their rings */
+ 	unsigned ev_wp;                 /* event ring write pointer we give back (Linux ev_ring->wp) */
+ 	bool cfg_done;                  /* CONFIG0 TRE already issued once */
+@@ -250,6 +252,17 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ }
+ 
++/* Make CPU writes to the DMA block visible to the GPI (and its writes to us). */
++static void
++s3_dma_sync(unsigned off, unsigned len)
++{
++	if (s3.dma_nc) {
++		__asm__ volatile("dsb sy" ::: "memory");
++	} else {
++		flush_dcache64((addr64_t)(s3.dma_pa + off), len, TRUE);
++	}
++}
++
+ static void
+ s3_wait(unsigned ms)
+ {
+@@ -691,29 +704,48 @@
+ 		return false;
+ 	}
+ 	/*
+-	 * 0142: below 4 GiB by default (hdgpilow=0: anywhere). Linux only ever hands
+-	 * the GPI IOVAs in 0x100000..0x200000 (qcom,iova-range); kernels 0139-0141,
+-	 * with the block at 0x1_049xxxxx, reset within milliseconds of the first TX
+-	 * doorbell, i.e. on the GPI's first TRE fetch - consistent with a 32-bit
+-	 * master whose truncated address hits someone else's (secure) memory.
++	 * 0143: on hotdogb XNU only manages RAM from 0x1_00000000 up (mkadt.py
++	 * --highmem), so 0142's kmem_alloc_contig below 4 GiB found nothing
++	 * (KERN_NO_SPACE). Instead, like sweet_usb.c's sweetusbdma path, take a
++	 * fixed block of DDR below 4 GiB that XNU does not manage, mapped
++	 * write-combining: hdgpilowpa (default 0xf0000000, above every fixed
++	 * reserved-memory carve-out, which end at 0xa8800000). hdgpilow=0: the
++	 * old kernel-memory block (lands above 4 GiB here).
++	 * Why it matters: Linux only gives the GPI IOVAs in 0x100000..0x200000,
++	 * and the channel/event doorbells take only the low 32 bits of a ring
++	 * pointer; kernels 0139-0141 (block at 0x1_049xxxxx) reset within
++	 * milliseconds of the first TX doorbell.
+ 	 */
+ 	int low = 1;
+ 	(void)PE_parse_boot_argn("hdgpilow", &low, sizeof(low));
+-	ppnum_t maxpn = low ? (ppnum_t)(atop_64(0x100000000ULL) - 1) : 0;
+-	kern_return_t kr = kmem_alloc_contig(kernel_map, &s3.dma, GD_SIZE, PAGE_MASK, maxpn, 0,
+-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
+-	if (kr != KERN_SUCCESS) {
+-		printf("SWEET S3706: GPI DMA alloc failed (%d, below 4 GiB %d)\n", kr, low);
+-		return false;
+-	}
+-	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)s3.dma);
+-	if (!pn) {
+-		return false;
+-	}
+-	s3.dma_pa = ptoa_64(pn);
+-	if (low && (s3.dma_pa >> 32)) {
+-		printf("SWEET S3706: GPI DMA at %#llx despite the 4 GiB limit; stopping\n", s3.dma_pa);
+-		return false;
++	if (low) {
++		uint64_t lowpa = 0xf0000000ULL;
++		(void)PE_parse_boot_argn("hdgpilowpa", &lowpa, sizeof(lowpa));
++		if ((lowpa & PAGE_MASK) || lowpa + GD_SIZE > 0x100000000ULL) {
++			printf("SWEET S3706: hdgpilowpa %#llx unusable (page aligned, below 4 GiB)\n", lowpa);
++			return false;
++		}
++		s3.dma = ml_io_map_wcomb((vm_offset_t)lowpa, PAGE_SIZE);
++		if (!s3.dma) {
++			printf("SWEET S3706: GPI low DMA map %#llx failed\n", lowpa);
++			return false;
++		}
++		bzero((void *)s3.dma, GD_SIZE);
++		s3.dma_pa = lowpa;
++		s3.dma_nc = true;
++		printf("SWEET S3706: GPI DMA block at fixed %#llx (write-combining)\n", lowpa);
++	} else {
++		kern_return_t kr = kmem_alloc_contig(kernel_map, &s3.dma, GD_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
++		if (kr != KERN_SUCCESS) {
++			printf("SWEET S3706: GPI DMA alloc failed (%d)\n", kr);
++			return false;
++		}
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)s3.dma);
++		if (!pn) {
++			return false;
++		}
++		s3.dma_pa = ptoa_64(pn);
+ 	}
+ 	/* The ring CNTXT and the DMA TREs carry the high word anyway, and an 8 KiB
+ 	 * block never straddles a 4 GiB boundary (low-32 doorbell math stays valid). */
+@@ -822,7 +854,7 @@
+ 	 */
+ 	uint32_t ev_lo = (uint32_t)(s3.dma_pa + GD_EV_RING);
+ 	for (unsigned i = 0; i < 5000; i++) {
+-		flush_dcache64((addr64_t)(s3.dma_pa + GD_EV_RING), GD_EV_LEN, TRUE);
++		s3_dma_sync(GD_EV_RING, GD_EV_LEN);
+ 		uint32_t hw = s3_rd(s3.gpi_regs, G_EV_CNTXT + GC_RP_LSB);
+ 		unsigned hw_off = (hw - ev_lo) & (GD_EV_LEN - 1u);
+ 		if (dbg && i == 0) {
+@@ -911,8 +943,8 @@
+ 	s3_gpi_push(GD_TX_RING, &s3.tx_wp,
+ 	    I2C_GO_WRITE | (S3_ADDR << 8) | (rlen ? I2C_GO_STRETCH : 0u), 0, 0, TRE_TYPE_GO | TRE_CHAIN);
+ 	s3_gpi_push(GD_TX_RING, &s3.tx_wp, txlo, txhi, wlen, TRE_TYPE_DMA | TRE_IEOT);
+-	flush_dcache64((addr64_t)(s3.dma_pa + GD_TXBUF), wlen, TRUE);
+-	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
++	s3_dma_sync(GD_TXBUF, wlen);
++	s3_dma_sync(GD_TX_RING, GD_RING_LEN);
+ 	if (dbg) {
+ 		GPIDBG("txn write TREs queued, ringing TX doorbell");
+ 	}
+@@ -932,9 +964,9 @@
+ 	s3_gpi_push(GD_RX_RING, &s3.rx_wp, rxlo, rxhi, rlen, TRE_TYPE_DMA | TRE_IEOT);
+ 	s3_gpi_push(GD_TX_RING, &s3.tx_wp, I2C_GO_READ | (S3_ADDR << 8), 0, rlen,
+ 	    TRE_TYPE_GO | TRE_LINK_RX | TRE_IEOB);
+-	flush_dcache64((addr64_t)(s3.dma_pa + GD_TX_RING), GD_RING_LEN, TRUE);
+-	flush_dcache64((addr64_t)(s3.dma_pa + GD_RX_RING), GD_RING_LEN, TRUE);
+-	flush_dcache64((addr64_t)(s3.dma_pa + GD_RXBUF), rlen, TRUE);
++	s3_dma_sync(GD_TX_RING, GD_RING_LEN);
++	s3_dma_sync(GD_RX_RING, GD_RING_LEN);
++	s3_dma_sync(GD_RXBUF, rlen);
+ 	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_RX), (uint32_t)(s3.dma_pa + GD_RX_RING + s3.rx_wp));
+ 	s3_wr(s3.gpi_regs, G_CH_DB(GPI_CH_TX), (uint32_t)(s3.dma_pa + GD_TX_RING + s3.tx_wp));
+ 	if (dbg) {
+@@ -945,7 +977,7 @@
+ 		printf("SWEET S3706: GPIDBG txn %u read done err %d\n", n, err);
+ 	}
+ 	if (!err) {
+-		flush_dcache64((addr64_t)(s3.dma_pa + GD_RXBUF), rlen, TRUE);
++		s3_dma_sync(GD_RXBUF, rlen);
+ 		memcpy(rbuf, (const void *)(s3.dma + GD_RXBUF), rlen);
+ 	}
+ 	return err;

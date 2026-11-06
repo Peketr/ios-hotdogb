@@ -132,3 +132,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   clear only after events), wait traced. Kernel 0140: votes fixed the doorbell reset; reset in the wait.
 - 0142 hotdogb: GPI DMA block below 4 GiB (`hdgpilow`). Kernel 0141 reset within ms of the first TX
   doorbell (0140's extra line was flush timing), i.e. on the GPI's first TRE fetch from 0x1_049xxxxx.
+- 0143 hotdogb: GPI DMA block at a fixed unmanaged PA below 4 GiB (`hdgpilowpa`, default 0xf0000000),
+  write-combining. Kernel 0142 found no XNU RAM below 4 GiB (highmem layout) and stopped before the GPI.

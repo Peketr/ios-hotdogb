@@ -11,3 +11,4 @@
 0140 hdgpibcm
 0141 events consumed
 0142 hdgpilow
+0143 hdgpilowpa
