@@ -111,4 +111,8 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0132 hotdogb: GPIDBG step markers in GPI setup (hdtouchlog=1, each waits past a 2 s log flush). Showed the
   reset is in s3_gpi_smmu (fresh SMR + context bank for stream 0x7b6).
 - 0133 hotdogb: GPI stream 0x7b6 shares USB's translation-off SMMU bank (`hdgpismmu=1` default; 2 = own bank,
-  0 = none) and logs the SMMU state/chosen smr+cb with step markers.
+  0 = none) and logs the SMMU state/chosen smr+cb with step markers. (Kernel 0133: still resets, no marker.)
+- 0134 hotdogb: sweet_log_kick() (sweet_ufs.c) flushes the console log on demand; GPIDBG kicks + waits 2.5 s;
+  finer markers through s3_gpi_smmu (enter, mapped, idr read, every 16 SMRs, scan done).
+- 0135 hotdogb: cross-check vs OnePlus/LineageOS S3706 + Linux GENI/GPI: GPI SE index 0 (was 3, read from the
+  wrong DT node), I2C 400 kHz timing 5/12/24 as Linux, 12-bit coordinates, F01 device-status logging.

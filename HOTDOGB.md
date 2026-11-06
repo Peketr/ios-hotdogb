@@ -92,6 +92,19 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0132 GPI step markers** (`hdtouchlog=1`): kernel 0132 showed the reset is in the touch SMMU setup.
 - **0133 GPI SMMU shares USB's bank**: stream 0x7b6 gets its own SMR but points at the translation-off
   bank USB already set up, instead of writing a fresh bank (`hdgpismmu=2` old way, `0` none).
+- **0134 log kick + finer SMMU markers**: GPIDBG wakes the log thread so each marker reaches disk.
+- **0135 cross-check fixes**: GPI SE index 0 (touch = qupv3_se17_i2c, `dmas = <&gpi_dma2 ch 0 3 64 0>`),
+  Linux 400 kHz I2C timing (div 2, t_high 5, t_low 12, t_cycle 24), 12-bit x/y, F01 device status.
+
+Reference sources for the touch path (read-only, not vendored):
+- OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
+  (qupv3_se17_i2c), sm8150.dtsi (gpi_dma2 @0xc00000, gpii-mask 0xfa, iommus 0x7b6, smmu-cfg 1),
+  sm8150-oem.dtsi + hotdogb.dtsi (synaptics-s3706@20, reset GPIO80, attn GPIO122 0x2008, L17A 3.008 V,
+  1.8 V via GPIO119 pull-up), drivers/dma/qcom/gpi.c, drivers/i2c/busses/i2c-qcom-geni.c.
+- LineageOS/android_kernel_oneplus_sm8150: drivers/input/touchscreen/oplus_touchscreen/Synaptics/S3706/
+  (synaptics_get_chip_info: PDT at 0xDD/0xE3/0xE9 page 0, F51 page 4; get_touch_points: attention word
+  at F12 data15 = data base + 3, then 8 bytes/finger from data base; trigger_reason: F01 data word,
+  status byte non-zero = exception, irq bit 0x04 = touch; reset 10 ms low, 80 ms after).
 - **0128 USB NCM**: the Windows host had no driver for the CDC-ECM gadget. On hotdogb the gadget
   is now CDC-NCM: device class EF/02/01 + IAD (Windows' composite driver enumerates the
   function), MS OS 1.0 string 0xEE + extended compatible ID "WINNCM" (inbox UsbNcm),
@@ -100,17 +113,18 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0133 on the Mac
+### Kernel 0135 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0133; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch &&         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0133.log
+    for p in 0134 0135; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+        patch -p1 < ../../../xnu/patches/$p-*.patch; done
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0135.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c hdgpismmu  (want >=1)
+    # verify before sending: strings .../kernel.development.sweet | grep -c "device status %#x"  (want >=1)
 
-(Apply only the patches the tree does not yet have. The 0132 build tree needs just 0133; a 0131 tree
-needs 0132 0133; a fresh `build.sh` tree needs 0127..0133. A clean `build.sh` run copies every patch
+(Apply only the patches the tree does not yet have. The 0133 build tree needs 0134 0135; a 0134 tree
+needs just 0135; a fresh `build.sh` tree needs 0127..0135. A clean `build.sh` run copies every patch
 from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)

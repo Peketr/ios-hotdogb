@@ -1,0 +1,66 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -109,7 +109,8 @@
+ #define I2C_STOP_STRETCH (1u << 2)
+ /* 19.2 MHz XO: 400 kHz = div 2, t_high 5, t_low 11, t_cycle 22 (geni_i2c_clk_map_19p2mhz) */
+ #define I2C_MCLK        ((2u << 4) | 1u)
+-#define I2C_SCL         ((5u << 20) | (11u << 10) | 22u)
++/* Linux i2c-qcom-geni geni_i2c_clk_map, 400 kHz @ 19.2 MHz: div 2, t_high 5, t_low 12, t_cycle 24. */
++#define I2C_SCL         ((5u << 20) | (12u << 10) | 24u)
+ 
+ /* RMI4 */
+ #define RMI_PAGE_SELECT 0xffu
+@@ -138,7 +139,8 @@
+ #define GPII            1u              /* gpi_dmac00000_gpii1 (live FDT) */
+ #define GPI_CH_TX       0u
+ #define GPI_CH_RX       1u
+-#define GPI_SEID        3u              /* i2c@c80000 dmas seid (FDT) */
++#define GPI_SEID        0u              /* i2c@0xc80000 dmas = <&gpi_dma2 ch 0 3 64 0>: SE index 0, proto 3
++                                         * (live FDT + OnePlus sm8150-qupv3.dtsi; 3 was i2c@c8c000's) */
+ #define GPI_PROTO_I2C   3u              /* dt-bindings/dma/qcom-gpi.h QCOM_GPI_I2C */
+ #define GPI_SMMU_SID    0x7b6u
+ 
+@@ -794,8 +796,8 @@
+ 	uint32_t rxlo = (uint32_t)rxpa, rxhi = (uint32_t)(rxpa >> 32);
+ 
+ 	if (!s3.cfg_done) {
+-		/* CONFIG0: 400 kHz @ 19.2 MHz (tlow 11, thigh 5, tcyl 22), clk_div 2, packed. */
+-		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0316050bu, 0, 2, TRE_TYPE_CFG0 | TRE_CHAIN);
++		/* CONFIG0 as Linux geni_i2c_gsi_xfer: pack | t_cycle 24 | t_high 5 | t_low 12, clk_div 2. */
++		s3_gpi_push(GD_TX_RING, &s3.tx_wp, 0x0318050cu, 0, 2, TRE_TYPE_CFG0 | TRE_CHAIN);
+ 		s3.cfg_done = true;
+ 	}
+ 	if (rlen == 0) {
+@@ -1010,7 +1012,8 @@
+ {
+ 	/* rmi_f12_process_objects: type, x lo/hi, y lo/hi, z, wx, wy. */
+ 	unsigned type = obj[0];
+-	int x = obj[1] | obj[2] << 8, y = obj[3] | obj[4] << 8;
++	/* OnePlus synaptics_get_touch_points: 12-bit coordinates, high nibble in obj[2]/obj[4]. */
++	int x = obj[1] | (obj[2] & 0x0f) << 8, y = obj[3] | (obj[4] & 0x0f) << 8;
+ 	bool down = type == 1 || type == 6;     /* finger, glove */
+ 	if (s3.log && (down || (s3.active & (1u << id)))) {
+ 		printf("SWEET S3706: obj %u type %u x %d y %d z %u\n", id, type, x, y, obj[5]);
+@@ -1129,14 +1132,20 @@
+ 		/* Attention is active low; also read every ~100 ms in case it is not wired as assumed. */
+ 		bool attn = !(s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_ATTN)) & 1u);
+ 		if (attn || (++ticks % 12u) == 0) {
+-			uint8_t ist[4] = {0};
+-			if (s3_read(s3.f01_data + 1u, ist, ibytes ? ibytes : 1u) ||
++			/* As OnePlus synaptics_trigger_reason: F01 data0 = device status, then
++			 * the interrupt status bytes; a non-zero device status is an exception
++			 * (reset/unconfigured/flash), logged. */
++			uint8_t ist[5] = {0};
++			if (s3_read(s3.f01_data, ist, 1u + (ibytes ? ibytes : 1u)) ||
+ 			    s3_read(s3.f12_data, pkt, need)) {
+ 				if ((errors++ % 100u) == 0) {
+ 					printf("SWEET S3706: read error (%u)\n", errors);
+ 				}
+ 				s3.page = 0xff;
+ 			} else {
++				if (ist[0] && (errors++ % 100u) == 0) {
++					printf("SWEET S3706: device status %#x irq %#x\n", ist[0], ist[1]);
++				}
+ 				for (unsigned id = 0; id < s3.fingers; ++id) {
+ 					s3_report(pkt + s3.data1_off + 8u * id, id);
+ 				}

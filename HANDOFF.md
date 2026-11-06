@@ -5,6 +5,33 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: S3706 cross-checked against OnePlus/Linux sources; 0135 fixes the GPI SE index (2026-11-06)
+OnePlusOSS/android_kernel_oneplus_sm8150 (branch oneplus/SM8150_R_10.0) has the DT and the GPI/GENI drivers,
+but its touch driver (`CONFIG_TOUCHPANEL_ONEPLUS` -> drivers/input/oneplus_touchscreen/) is not published on
+any branch; LineageOS/android_kernel_oneplus_sm8150 carries it as
+drivers/input/touchscreen/oplus_touchscreen/Synaptics/S3706/. Findings (details in HOTDOGB.md):
+- **Bug: GPI SE index.** Touch is qupv3_se17_i2c @0xc80000, `dmas = <&gpi_dma2 {0,1} 0 3 64 0>` = SE index 0,
+  proto 3 (I2C). Our GPI_SEID 3 came from the gpidump of i2c@c8c000 (the dump missed i2c@0xc80000; live FDT
+  re-read via adb confirms 0). Fixed in **0135**.
+- I2C timing: Linux 400 kHz = div 2, t_high 5, t_low 12, t_cycle 24 (we had 5/11/22). Fixed in 0135 (CONFIG0
+  TRE 0x0318050c and SE_I2C_SCL). No qcom,clk-freq-out on the node -> Linux default 400 kHz.
+- GPII 1 is right (Linux takes the lowest free GPII in gpii-mask 0xfa); stream 0x7b6 is right; Linux runs it
+  with smmu-cfg 1 (S1 translation, IOVA 0x100000+1 MB), not a bypass bank.
+- RMI4 side matches OnePlus: reset low 10 ms / high + 80 ms, L17A 3.008 V, reset GPIO80, attn GPIO122 active
+  low, F01 ctrl0 (|0x80 configured), int-enable, F12 data1 8-byte objects. 0135 masks x/y to 12 bits like
+  OnePlus and reads F01 data0 (device status) with the IRQ status, logging non-zero status.
+- 0135 does not address the reset inside s3_gpi_smmu (0134's markers are still the way to find it).
+
+### HOTDOGB: kernel 0133 - same reset, nothing from inside s3_gpi_smmu reached disk; 0134 flushes per marker (2026-11-06, 22:05)
+Kernel 0133 (`work/boot/kernel-0133`, SHA-256 247c3e81...923b, logs/runs/k0133-first): identical end - last
+line `GPIDBG dma_pa 0x104914000`, back in fastboot at 68 s. Not even the SMR dump / idr line (printed before
+any SMMU write, then a 2.1 s wait) landed. Either the very first SMMU reads/mapping kill it, or the markers
+are lost: the log thread sleeps 2 s *then* flushes, so its period is 2 s + flush time and a 2.1 s wait can
+miss. 0130 (bailed just before s3_gpi_smmu, same DMA PA) ran 300 s, so the cause is after dma_pa.
+- **0134** (written, syntax-checked, NOT built/run): `sweet_log_kick()` in sweet_ufs.c wakes the log thread;
+  GPIDBG prints, kicks, waits 2.5 s. New markers: "smmu enter", "smmu mapped", idr0/idr1 + "smmu idr read",
+  "smr read N" every 16 SMRs, "smr scan done", then 0133's "smmu own bank written"/"smmu s2cr written".
+
 ### HOTDOGB: kernel 0132 - the reset is inside the touch SMMU setup; 0133 shares USB's bank (2026-11-06, 21:50)
 Kernel 0132 (`work/boot/kernel-0132`, SHA-256 7c814889...b6f1) ran with `hdtouchlog=1` (logs/runs/k0132-first).
 Last line on disk: `GPIDBG dma_pa 0x1048f8000` - the marker before `s3_gpi_smmu`; "smmu ok" never landed,

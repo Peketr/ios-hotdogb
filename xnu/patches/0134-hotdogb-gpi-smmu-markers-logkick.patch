@@ -1,0 +1,85 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -40,6 +40,7 @@
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void sweet_log_kick(void);
+ 
+ static bool s3_gpi_setup(void);
+ static int s3_gpi_txn(const uint8_t *wbuf, unsigned wlen, uint8_t *rbuf, unsigned rlen);
+@@ -491,7 +492,8 @@
+  * waits past one flush, so the last marker on disk names the step that reset
+  * the phone. Off (default) it costs nothing.
+  */
+-#define GPIDBG(msg) do { if (s3.log) { printf("SWEET S3706: GPIDBG %s\n", (msg)); s3_wait(2100); } } while (0)
++/* Kick the log thread (it may be mid-flush, so still wait past one 2 s period). */
++#define GPIDBG(msg) do { if (s3.log) { printf("SWEET S3706: GPIDBG %s\n", (msg)); sweet_log_kick(); s3_wait(2500); } } while (0)
+ 
+ /*
+  * apps SMMU (0x15000000) stage-1 bypass bank for the GPI's stream 0x7b6, so
+@@ -513,17 +515,28 @@
+ 		GPIDBG("smmu skipped (hdgpismmu=0)");
+ 		return 0;
+ 	}
++	GPIDBG("smmu enter");
+ 	vm_offset_t as = ml_io_map(0x15000000ull, 0x100000);
+ 	if (!as) {
+ 		return -1;
+ 	}
++	GPIDBG("smmu mapped");
+ 	uint32_t idr0 = s3_rd(as, 0x20), idr1 = s3_rd(as, 0x24);
+ 	unsigned nsmr = idr0 & 0xffu, ncb = idr1 & 0xffu;
++	if (s3.log) {
++		printf("SWEET S3706: SMMU idr0 %#x idr1 %#x\n", idr0, idr1);
++	}
++	GPIDBG("smmu idr read");
+ 	uint32_t pagesz = (idr1 >> 31) ? 0x10000u : 0x1000u;
+ 	uint32_t cbbase = (1u << (((idr1 >> 28) & 7u) + 1u)) * pagesz;
+ 	uint64_t used[2] = {0, 0};
+ 	int smr = -1, cb = -1, usbcb = -1;
+ 	for (unsigned i = 0; i < nsmr; i++) {
++		if (s3.log && (i % 16) == 0) {
++			printf("SWEET S3706: GPIDBG smr read %u\n", i);
++			sweet_log_kick();
++			s3_wait(2500);
++		}
+ 		uint32_t m = s3_rd(as, 0x800 + 4 * i), c = s3_rd(as, 0xc00 + 4 * i);
+ 		if (!(m >> 31)) {
+ 			if (smr < 0) {
+@@ -545,6 +558,7 @@
+ 			return -1;
+ 		}
+ 	}
++	GPIDBG("smr scan done");
+ 	if (mode == 1 && usbcb >= 0) {
+ 		cb = usbcb;
+ 	} else {
+@@ -654,7 +668,8 @@
+ 	 * boundary (so the low-32 doorbell/event-RP math stays within one window). */
+ 	if (s3.log) {
+ 		printf("SWEET S3706: GPIDBG dma_pa %#llx regs %#lx\n", s3.dma_pa, (unsigned long)s3.gpi_regs);
+-		s3_wait(2100);
++		sweet_log_kick();
++		s3_wait(2500);
+ 	}
+ 	if (s3_gpi_smmu() != 0) {
+ 		return false;
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -937,6 +937,15 @@
+ 	}
+ }
+ 
++/* Flush the console log now (debug markers before a suspected reset). */
++void sweet_log_kick(void);
++
++void
++sweet_log_kick(void)
++{
++	wakeup(&sweet_log_chan);
++}
++
+ static void
+ sweet_log_start(void)
+ {
