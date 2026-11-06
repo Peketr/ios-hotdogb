@@ -95,6 +95,10 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0134 log kick + finer SMMU markers**: GPIDBG wakes the log thread so each marker reaches disk.
 - **0135 cross-check fixes**: GPI SE index 0 (touch = qupv3_se17_i2c, `dmas = <&gpi_dma2 ch 0 3 64 0>`),
   Linux 400 kHz I2C timing (div 2, t_high 5, t_low 12, t_cycle 24), 12-bit x/y, F01 device status.
+- **0136 GPI SMMU via USB**: sweet_usb.c adds the touch stream's SMR through its own SMMU mapping
+  (`hdgpismmu=3` default); the touch driver no longer maps 0x15000000 itself.
+- **0137 panic log to disk**: at panic, the console ring (panic string + backtraces, via 0098) is written
+  to rawdump synchronously; hooks in osfmk/arm/model_dep.c SavePanicInfo / paniclog_flush.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
@@ -113,18 +117,18 @@ Reference sources for the touch path (read-only, not vendored):
   notifications. macOS and Linux drive NCM as well. `sweetusbncm=0` brings back ECM.
   The framing, descriptors and parser were unit-tested on the host (not yet on the phone).
 
-### Kernel 0135 on the Mac
+### Kernel 0136 + 0137 on the Mac
 
     git pull                                    # in ~/gitrepos/ios-hotdogb
     cd work/dxb/xnu
-    for p in 0134 0135; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
+    for p in 0136 0137; do patch -p1 --dry-run < ../../../xnu/patches/$p-*.patch && \
         patch -p1 < ../../../xnu/patches/$p-*.patch; done
-    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0135.log
+    cd ../../.. && tools/build-xnu.sh $PWD/work/build-0137.log
     # -> work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-    # verify before sending: strings .../kernel.development.sweet | grep -c "device status %#x"  (want >=1)
+    # verify before sending: strings .../kernel.development.sweet | grep -c -e "smmu share via usb" -e "panic flush"  (want >=2)
 
-(Apply only the patches the tree does not yet have. The 0133 build tree needs 0134 0135; a 0134 tree
-needs just 0135; a fresh `build.sh` tree needs 0127..0135. A clean `build.sh` run copies every patch
+(Apply only the patches the tree does not yet have. The 0135 build tree needs 0136 0137; a 0133 tree
+needs 0134..0137; a fresh `build.sh` tree needs 0127..0137. A clean `build.sh` run copies every patch
 from xnu/patches. If a patch reports "previously applied", that one is already in the tree.)
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)

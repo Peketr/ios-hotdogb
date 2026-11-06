@@ -1,0 +1,112 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -16,7 +16,8 @@
+  *
+  * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+  * hdtouchlog=1 log every object, hdtouchgpi=0 refuse GPI (stop as before),
+- * hdgpismmu=1 share USB's SMMU bank (default) / 2 own bank / 0 no SMMU.
++ * hdgpismmu=3 SMR via sweet_usb.c onto its bank (default), 1 same via our own
++ * mapping, 2 own bank, 0 no SMMU.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -41,6 +42,7 @@
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern void sweet_log_kick(void);
++extern int sweet_usb_smmu_share(uint32_t sid);
+ 
+ static bool s3_gpi_setup(void);
+ static int s3_gpi_txn(const uint8_t *wbuf, unsigned wlen, uint8_t *rbuf, unsigned rlen);
+@@ -511,12 +513,20 @@
+ 	 * pair and touch no fresh bank. 2: own fresh bank (kernels 0130-0132,
+ 	 * which reset here). 0: leave the SMMU alone.
+ 	 */
+-	int mode = 1;
++	int mode = 3;
+ 	(void)PE_parse_boot_argn("hdgpismmu", &mode, sizeof(mode));
+ 	if (mode == 0) {
+ 		GPIDBG("smmu skipped (hdgpismmu=0)");
+ 		return 0;
+ 	}
++	if (mode == 3) {
++		/* Default (0136): sweet_usb.c adds the SMR through its own mapping; mapping
++		 * 0x15000000 again from here reset the phone (kernel 0135, "smmu enter"). */
++		GPIDBG("smmu share via usb");
++		int smr = sweet_usb_smmu_share(GPI_SMMU_SID);
++		GPIDBG(smr >= 0 ? "smmu shared" : "smmu share failed");
++		return smr >= 0 ? 0 : -1;
++	}
+ 	GPIDBG("smmu enter");
+ 	vm_offset_t as = ml_io_map(0x15000000ull, 0x100000);
+ 	if (!as) {
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -265,6 +265,8 @@
+ 
+ static bool ud_dma_uncached;
+ static vm_offset_t ud_smmu_cb;  /* our apps SMMU context bank (flame), for fault logging */
++static vm_offset_t ud_smmu_as;  /* apps SMMU mapping, shared with sweet_usb_smmu_share() */
++static int ud_smmu_cbn = -1;    /* index of that translation-off bank */
+ 
+ static void
+ ud_sync(uint32_t off, uint32_t len)
+@@ -1380,6 +1382,8 @@
+ 		*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | 0x140;
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		ud_smmu_cb = cbv;
++		ud_smmu_as = as;
++		ud_smmu_cbn = cb;
+ 		printf("SWEET USB: SMMU smr%d %x s2cr %x -> cb%d cbar %x cba2r %x sctlr %x (translation off, as ABL)\n",
+ 		    free_smr, usb_rd(as, 0x800 + 4 * free_smr), usb_rd(as, 0xc00 + 4 * free_smr), cb,
+ 		    usb_rd(as, pagesz + 4 * cb), usb_rd(as, pagesz + 0x800 + 4 * cb), usb_rd(cbv, 0));
+@@ -1653,4 +1657,49 @@
+ 		sweet_files_start();    /* tcp 2223: bsd/dev/sweet_files.c */
+ 	}
+ }
++/*
++ * Let another driver's DMA stream use the translation-off bank set up above
++ * (hotdogb: the touch GPI engine, stream 0x7b6), through this driver's
++ * existing SMMU mapping: kernels 0131-0135 reset the phone when the touch
++ * driver mapped 0x15000000 a second time. Returns the SMR index, or -1.
++ */
++int sweet_usb_smmu_share(uint32_t sid);
++
++int
++sweet_usb_smmu_share(uint32_t sid)
++{
++	vm_offset_t as = ud_smmu_as;
++	if (!as || ud_smmu_cbn < 0) {
++		printf("SWEET USB: SMMU share %#x: no USB bank\n", sid);
++		return -1;
++	}
++	unsigned nsmr = *(volatile uint32_t *)(as + 0x20) & 0xff;
++	int free_smr = -1;
++	for (unsigned i = 0; i < nsmr; i++) {
++		uint32_t m = *(volatile uint32_t *)(as + 0x800 + 4 * i);
++		if (!(m >> 31)) {
++			if (free_smr < 0) {
++				free_smr = (int)i;
++			}
++			continue;
++		}
++		if (((sid ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
++			printf("SWEET USB: SMMU share %#x: smr%u %x already matches (s2cr %x)\n", sid, i, m,
++			    *(volatile uint32_t *)(as + 0xc00 + 4 * i));
++			return -1;
++		}
++	}
++	if (free_smr < 0) {
++		printf("SWEET USB: SMMU share %#x: no free SMR\n", sid);
++		return -1;
++	}
++	*(volatile uint32_t *)(as + 0xc00 + 4 * free_smr) = (uint32_t)ud_smmu_cbn;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | (sid & 0x7fff);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET USB: SMMU share smr%d %x s2cr %x -> cb%d (translation off)\n", free_smr,
++	    *(volatile uint32_t *)(as + 0x800 + 4 * free_smr), *(volatile uint32_t *)(as + 0xc00 + 4 * free_smr),
++	    ud_smmu_cbn);
++	return free_smr;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

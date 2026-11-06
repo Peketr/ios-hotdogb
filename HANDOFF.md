@@ -5,6 +5,35 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: panics were on screen but never on disk; 0137 flushes the log at panic time (2026-11-06)
+The user saw a kernel panic on screen at the end of the recent runs; none of it is in logs/runs/*/xnu.txt or
+xnu.raw. 0098 already puts the panic string and backtraces into the persistent ring (consdebug_putc), but
+the ring only reaches UFS from the log thread, which never runs again after a panic, and the 7T's RAM rescue
+does not survive the reset. So the "resets" in 0131-0135 may be panics - the panic text is the real evidence.
+- **0137** (written, syntax-checked with stubs, NOT built/run): sweet_ufs.c `sweet_log_panic_flush()` -
+  polled UFS write of the unflushed ring + header + SYNC CACHE, no mutex (a stopped CPU may hold it), waits
+  for / clears a command left in slot 0, UFS error printfs quiet. Hooked from osfmk/arm/model_dep.c (stock
+  file, first patch to touch it): top of SavePanicInfo (panic string; before the panic_info wait that
+  spins forever without a panic region) and top of paniclog_flush (after print_all_backtraces). The log
+  thread's flush is now the shared sweet_log_flush_locked(). Expect "SWEET LOG: panic flush" then the panic.
+- Build 0136 + 0137 together; run with `hdtouchlog=1`.
+
+### HOTDOGB: kernel 0135 pins the reset to the touch driver's SMMU map; GPI setup works without it; 0136 (2026-11-06, 22:30)
+Kernel 0135 (`work/boot/kernel-0135`, SHA-256 d1a336e1...b0b4), with the log kick:
+- k0135-first (default): last marker `GPIDBG smmu enter` (33.9 s), never `smmu mapped` -> the reset is at
+  `ml_io_map(0x15000000)` in s3_gpi_smmu (or within 2.5 s of it), before any SMMU read/write. sweet_usb.c
+  maps the same block at 11 s fine.
+- k0135-nosmmu (`hdgpismmu=0`): GPI setup runs all the way - smmu skipped, se gsi, irq masked, ev alloc,
+  ev ring, ch alloc, ch ring (51.9 s) - then reset at channel START / first DMA: stream 0x7b6 unmatched in
+  the SMMU (the same global-fault reset USB had before it got a bank). So the GPI engine is clocked and
+  its registers, commands and rings work.
+- (The recurring "SWEET USB: busERR ... fsr 400" line and "mount(N) failed" retries are in every run,
+  including 300 s ones: unrelated.)
+- **0136** (written, syntax-checked, NOT built/run): `sweet_usb_smmu_share(sid)` in sweet_usb.c adds an SMR
+  for 0x7b6 -> USB's translation-off bank through USB's existing mapping; s3_gpi_smmu uses it by default
+  (`hdgpismmu=3`; 1/2/0 keep the older paths). Markers: "smmu share via usb", "smmu shared"/"smmu share
+  failed", then the setup markers. Run with `hdtouchlog=1`.
+
 ### HOTDOGB: S3706 cross-checked against OnePlus/Linux sources; 0135 fixes the GPI SE index (2026-11-06)
 OnePlusOSS/android_kernel_oneplus_sm8150 (branch oneplus/SM8150_R_10.0) has the DT and the GPI/GENI drivers,
 but its touch driver (`CONFIG_TOUCHPANEL_ONEPLUS` -> drivers/input/oneplus_touchscreen/) is not published on

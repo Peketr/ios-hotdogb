@@ -116,3 +116,8 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   finer markers through s3_gpi_smmu (enter, mapped, idr read, every 16 SMRs, scan done).
 - 0135 hotdogb: cross-check vs OnePlus/LineageOS S3706 + Linux GENI/GPI: GPI SE index 0 (was 3, read from the
   wrong DT node), I2C 400 kHz timing 5/12/24 as Linux, 12-bit coordinates, F01 device-status logging.
+- 0136 hotdogb: GPI stream 0x7b6's SMR is written by sweet_usb.c (sweet_usb_smmu_share) through USB's SMMU
+  mapping onto its translation-off bank; kernel 0135 reset on the touch driver's own map of 0x15000000,
+  and with hdgpismmu=0 the whole GPI setup ran (reset only at the first DMA, stream unmatched).
+- 0137 hotdogb: panic-time console-log flush - sweet_log_panic_flush() (polled UFS, no mutex) called from
+  SavePanicInfo and paniclog_flush (osfmk/arm/model_dep.c), so panics land in rawdump (7T RAM is lost).
