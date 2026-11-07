@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0151 - full-screen GPU present; a client's first GPU resets forgiven (2026-11-07)
+Run k0151-fill-1107 (`work/boot/kernel-0151` SHA-256 978b9910...7cc0, hotdogb-run-current.sh: -q -G, sweetmtl=2):
+`present: fill (crop the overhang)`; panel captures have content in rows 0 and 2399 and columns 0 and 1079
+(0150's fit left rows 0-29 and 2369-2399 black); Settings > Wallpaper drawn edge to edge. Why 0151's second
+half: in k0150-metal2-safari-1107 a GPU fault at 508 s (backboardd's own work, read at 0x12952c2e0, fsr 2)
+was reported to backboardd as a fault -> Turnip DeviceLost -> ~7000 refused command buffers, frozen panel.
+Now the first 3 (`sweetgpuforgive`) lost-work resets per client log `lost its work (N of 3 forgiven, device
+kept)` instead. The fault's cause is still open (0x308 crash and this fault both after app switches).
+
 ### HOTDOGB: Metal on the Adreno 640 - backboardd + SpringBoard draw through SweetMetal2 (2026-11-07)
 SweetMetal2.bundle built on the Mac (tools/setup-metal2-trees.sh: work/turnip, work/metal2vulkan, work/UniXNU;
 then build-turnip-ios.sh, build-m2v-bridge.sh, phone/metal2/build.sh; tgz SHA-256 569d91f0...72b6), installed

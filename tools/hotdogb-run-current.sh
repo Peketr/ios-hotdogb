@@ -9,7 +9,8 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-07): kernel 0150 with the Adreno 640 on (-G: sweetgpu=1 + the 7T's GPU firmware from
+# Current (2026-11-07): kernel 0151 (GPU present fills the panel, sweetfb_fill=0 = bars; a client's first 3
+# GPU resets forgiven, sweetgpuforgive=N) with the Adreno 640 on (-G: sweetgpu=1 + the 7T's GPU firmware from
 # ../hotdogb/fw/gpu; 0149 = the 7T's zap shader region, 0150 = margins cleared after CPU-copy frames). iOS root on userdata read-write, with wland
 # (Wi-Fi at boot, log /var/local/wland.log) and oslog-wifid (/var/local/oslog-wifid.log) launchd jobs.
 # No kernel text on screen once the GUI presents (-q), 900 s, live log only. Wi-Fi off: sweetwifi=0.
@@ -18,8 +19,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=work/boot/kernel-0150
-TAG=k0150-metal2-safari
+KERNEL=work/boot/kernel-0151
+TAG=k0151-fill
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"
