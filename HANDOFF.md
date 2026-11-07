@@ -5,6 +5,24 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: why wifid does not auto-join; GPU bring-up started (2026-11-07)
+- **Auto-join**: run k0148-oslog-wifid with `oslog -l wifid` as a launchd job (tools/hotdogb-launchd-job.py,
+  oslog from phone/tools; log /var/local/oslog-wifid.log). wifid has the network in "List of known networks",
+  scans every few s, finds it and decides `AUTO-JOIN: Join candidate ... is not allowed (error=(1 'Below
+  minimum RSSI threshold'))` for both of its BSSs at -38..-43 dBm (13 times) - so its minimum is ~0, not a
+  real dBm value. The password lookup itself runs (WiFiNetworkCopyPasswordWithTimeout). Our kernel side
+  (redwood_apple80211.c): scan results carry rssi but noise = snr = noise_known = 0; NOISE (17) is refused,
+  RSSI (16) errors when not joined, RSSI_BOUNDS (106, 16 bytes) is refused. itlwm (macOS) answers RSSI/NOISE
+  with 52-byte apple80211_rssi_data/noise_data (version, num_radios, unit, [4], aggregate, ext[4], ext agg)
+  and has no RSSI_BOUNDS. Next try: noise -95 + snr in scan results, NOISE answered; RSSI_BOUNDS layout
+  unknown. Setting console logging for wifid's job (launchd.plist.pre-wifidlog on the phone) gave nothing:
+  os_log is not mirrored for daemons; use oslog.
+- **GPU**: the A640 driver (sweet_gpu.c/sweet_a6xx.c) only starts with `sweetgpu=1` + firmware in the ADT.
+  Only flame-specific value: ZAP_REGION 0x9a915000 -> 0149 makes it 0x99515000 on hotdogb (dtbo overlay 3,
+  fragment@90). `hotdogb-run.sh -G` = sweetgpu=1 + `--gpufw ../hotdogb/fw/gpu` (a640_gmu.bin, a630_sqe.fw,
+  a640_zap.mdt/.b02 from the 7T's vendor_a: super partition, LP metadata v10.0, vendor_a one extent at
+  sector 8690688, 603 MiB, ext4; read with `flame-files.py part super` + debugfs).
+
 ### HOTDOGB: Wi-Fi works end to end - joined from Settings, DHCP, real traffic (2026-11-07)
 Run k0148-wifi-3 (kernel 0148, wland job, root rw): the user picked the network in Settings, typed the
 password and pressed Join; wifid ASSOCIATE -> wland WPA2 4-way handshake -> link up (422.6 s) -> configd's

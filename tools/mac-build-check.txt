@@ -17,3 +17,4 @@
 0146 hdqupsid
 0147 FINGERS DOWN AT ONCE
 0148 SWEET FILES: PARTS
+0149 zap: region %#llx

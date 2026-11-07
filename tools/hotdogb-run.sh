@@ -15,6 +15,8 @@
 # Root boot-args: -a "rd=ufsroot0 ufsrw=1 rootrw=1 ..."; -a "rd=ufsroot0
 # ufsroot=rawdump" keeps the root read-only on rawdump (no userland).
 # -q: no kernel text on screen once the GUI presents (sweetfb_noconsole=1).
+# -G: the Adreno 640 in the kernel (sweetgpu=1): firmware from ../hotdogb/fw/gpu into the ADT
+#     (a640_gmu.bin, a630_sqe.fw, a640_zap.mdt + .b02 from the 7T vendor partition; kernel 0149+).
 # -L: no live recorder (another listener, e.g. tools/flame-live.py in a terminal, has the log).
 # -T: afterwards also read the rawdump log ring (from boot, survives a crash before USB is up)
 #     through TWRP (`fastboot boot` of -t IMG; not working on this phone yet, 2026-11-07).
@@ -26,11 +28,11 @@ cd "$(dirname "$0")/.."
 ROOT=$PWD
 HD=$ROOT/../hotdogb
 name=$1; shift
-kernel="" secs=600 extra="" rescue=1 pull=none quiet=0 live=1
+kernel="" secs=600 extra="" rescue=1 pull=none quiet=0 live=1 gpu=0
 twrp=$HD/downloads/twrp/twrp-3.7.0_11-0-hotdog.img
-while getopts "k:s:a:nATt:qL" o; do
+while getopts "k:s:a:nATt:qLG" o; do
 	case $o in k) kernel=$OPTARG ;; s) secs=$OPTARG ;; a) extra=$OPTARG ;; n) rescue=0 ;;
-		A) pull=android ;; T) pull=twrp ;; t) twrp=$OPTARG ;; q) quiet=1 ;; L) live=0 ;; *) exit 2 ;; esac
+		A) pull=android ;; T) pull=twrp ;; t) twrp=$OPTARG ;; q) quiet=1 ;; L) live=0 ;; G) gpu=1 ;; *) exit 2 ;; esac
 done
 [ "$pull" != twrp ] || [ -f "$twrp" ] || { echo "no TWRP image $twrp" >&2; exit 2; }
 [ "$pull" != none ] || rescue=0		# the rescue shim only matters when rawdump is read
@@ -40,6 +42,14 @@ base="$base unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checki
 # On-screen console on (bring-up) unless -q.
 base="$base wdt=-1 sweetfb_hz=60 ufslogsecs=2"
 [ "$quiet" = 0 ] || base="$base sweetfb_noconsole=1"
+gpufw=()
+if [ "$gpu" = 1 ]; then
+	for f in a640_gmu.bin a630_sqe.fw a640_zap.mdt a640_zap.b02; do
+		[ -f "$HD/fw/gpu/$f" ] || { echo "-G: no $HD/fw/gpu/$f" >&2; exit 2; }
+	done
+	gpufw=(--gpufw "$HD/fw/gpu")
+	base="$base sweetgpu=1"
+fi
 cmdline="$base flamereboot=$secs $extra"
 out=$ROOT/logs/runs/$name
 mkdir -p "$out" "$ROOT/work/boot/runs"
@@ -49,7 +59,7 @@ cp "$kernel" "$out/kernel"
 echo "$cmdline" > "$out/cmdline"
 
 bash shim/build-hotdogb.sh "$HD/stock/dtb" "$probe" >/dev/null
-python3 tools/mkpayload.py "$kernel" work/boot/hotdogb.adt "$out/payload.bin" --cmdline "$cmdline" >/dev/null
+python3 tools/mkpayload.py "$kernel" work/boot/hotdogb.adt "$out/payload.bin" --cmdline "$cmdline" "${gpufw[@]}" >/dev/null
 python3 tools/mkboot_hotdogb.py shim/out-hotdogb/Image "$HD/stock/dtb" "$img" "$out/payload.bin"
 rm -f "$out/payload.bin"
 

@@ -1,0 +1,28 @@
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -647,7 +647,16 @@
+ /* ---- zap shader through TrustZone PAS ---- */
+ 
+ #define PAS_GPU		13
+-#define ZAP_REGION	0x9a915000ull	/* reserved-memory pil_gpu_region */
++#if defined(SWEET_HOTDOGB) && SWEET_HOTDOGB
++/*
++ * 0149: OnePlus 7T pil_gpu_region. The base DTBs say 0x98715000, but ABL applies dtbo_a overlay 3, which
++ * moves the pil regions up (fragment@90: <0x99515000 0x2000>, after IPA fw/GSI at 0x99500000/0x99510000;
++ * the modem region moved the same way, HOTDOGB.md "Wi-Fi").
++ */
++#define ZAP_REGION	0x99515000ull
++#else
++#define ZAP_REGION	0x9a915000ull	/* Pixel 4 reserved-memory pil_gpu_region */
++#endif
+ #define ZAP_SIZE	0x2000u
+ #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
+ 
+@@ -673,6 +682,7 @@
+ 		a6_log("zap: init image rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
+ 		return -1;
+ 	}
++	a6_log("zap: region %#llx+%#x\n", (unsigned long long)ZAP_REGION, ZAP_SIZE);
+ 	rc = scm(2, 3, PAS_GPU, ZAP_REGION, ZAP_SIZE, &r1);
+ 	if (rc || r1) {
+ 		a6_log("zap: mem setup rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
