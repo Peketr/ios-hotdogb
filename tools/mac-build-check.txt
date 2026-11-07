@@ -20,3 +20,4 @@
 0149 zap: region %#llx
 0150 CPU fallbacks
 0151 fill (crop the overhang)
+0152 FIRST PANEL BRIGHTNESS COMMAND SENT

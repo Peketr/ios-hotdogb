@@ -152,3 +152,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   overhang cropped (hotdogb: source columns 14..1109 -> 1080x2400), touch mapped through the whole frame's
   rectangle (-14,0 1109x2400). v2 clients: the first `sweetgpuforgive` (default 3) GPU resets that lost their
   work are not reported as faults (Turnip's DeviceLost froze backboardd for good).
+- 0152 hotdogb panel brightness (after ios-topaz 0104/0105): DCS 0x51 (10-bit, high 2 bits first) through
+  DSI0's command DMA (0xae94000), packet in ABL's display carve-out (0x9e300000; kernel RAM is above 4 GiB);
+  AppleARMBacklight (backlight-control) for CoreBrightness; IOMFBBrightnessLevel nits 16.16 -> 1..0x3ff at
+  500 nits; level 0 while the display is off. Boot-arg `sweetbl` (default 1 with sweetmtl, else 0).
