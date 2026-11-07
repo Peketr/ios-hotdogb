@@ -5,6 +5,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0148 works; Wi-Fi firmware pulled and installed (2026-11-07)
+Run k0148-root-1107-1211 (kernel-0148 SHA-256 6ddd1584...0ec6, 900 s, root rw, -q): PARTS lists 118 partitions
+on LUN 0-5; PART read modem_a (LUN 4, 300 MB in ~4 min) and modemst1/modemst2/fsg/fsc (LUN 5), plus dtbo_a.
+No panic, no refused writes. Found: the 7T's real modem region is 0x8dc00000 + 0xa000000 (dtbo overlay 3,
+HOTDOGB.md "Wi-Fi"); board.h fixed, so the first wland-hotdogb build (0x8d800000) must not run - rebuild.
+Firmware + EFS images are on the iOS root (/var/local/fw), no launchd job yet. Next: rebuilt wland,
+`python tools/hotdogb-wifi-install.py` (adds the job), reboot, then a run and /var/local/wland.log.
+
 ### HOTDOGB: Wi-Fi port started; runs without TWRP; kernel 0148 raw partition reads (2026-11-07)
 - TWRP stopped working in the user's runs, so `tools/hotdogb-run.sh` no longer uses it by default: it records the
   live log into logs/runs/NAME/live.txt (Windows Python through WSL interop) and leaves the phone in fastboot

@@ -219,6 +219,20 @@ Zero-filled free space after ~15.1 GiB still holds old userdata bytes (harmless 
 the image against sda22 after any reflash.
 Android's data is gone. To get Android back: `fastboot erase userdata` (or format in recovery).
 
+## Wi-Fi (wland, phone/wifi)
+
+Same WLAN path as flame (HANDOFF "WiFi, part 1"): WCSS 0x18800000, SMMU stream 0x640, MSA 0x8bc00000 (1 MB),
+regulators pm8150 l1/l7 + pm8150l l2/l11. **Reserved memory: the base DTBs are not what Linux saw** - ABL
+applies dtbo_a overlay 3 (`dtbo_idx 3`), which moves modem_region to 0x8dc00000 + 0xa000000 (fragment@85;
+base DTBs: 0x8d800000 + 0x9600000), adsp to 0x8be00000 + 0x1e00000 and video/slpi/ipa/... up to 0x9ab00000.
+The OnePlus modem.mdt spans exactly 0x8dc00000-0x97c00000. Check the overlay before trusting any carve-out.
+
+Firmware (kernel 0148, `python tools/hotdogb-fw-pull.py` during a run, 2026-11-07; ../hotdogb/fw, not in git):
+modem_a (LUN 4, vfat, MPSS.HE build in modem-image/verinfo) -> modem.mdt + b00-b31, wlanmdsp.mbn,
+modemr.jsn + modemuw.jsn (the adsp/cdsp/slpi .jsn are left out, as on flame), bdwlan.bin (default board
+data; 34 board-specific bdwlan.bNN also there); modemst1/modemst2/fsg/fsc from LUN 5. Installed on the
+iOS root with `python tools/hotdogb-wifi-install.py --no-job` (read back and compared).
+
 ## Next
 
 1. Build 0126 on macOS (darwin-xnu-build once, then `tools/build-xnu.sh`), boot with

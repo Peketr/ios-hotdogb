@@ -14,9 +14,13 @@
 
 #if SWEET_HOTDOGB
 #define BOARD_NAME	"hotdogb"
-/* OnePlus 7T live FDT: reserved-memory/modem_region <0x8d800000 0x9600000> */
-#define MPSS_PA		0x8d800000ull
-#define MPSS_SIZE	0x09600000ull
+/*
+ * OnePlus 7T: the base DTBs say modem_region <0x8d800000 0x9600000>, but ABL applies dtbo_a overlay 3,
+ * whose fragment@85 moves it to <0x8dc00000 0xa000000> - exactly the span of the OnePlus modem.mdt
+ * load segments (0x8dc00000-0x97c00000, relocatable). The video/SLPI/... regions move up behind it.
+ */
+#define MPSS_PA		0x8dc00000ull
+#define MPSS_SIZE	0x0a000000ull
 /* the OnePlus board data, copied to this name (HOTDOGB.md "Wi-Fi") */
 #define BDF_PATH	"/var/local/fw/modem/bdwlan.bin"
 #else
