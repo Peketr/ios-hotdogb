@@ -6,6 +6,9 @@ Run with Windows Python from src while a kernel runs (192.168.7.1 on the phone's
   python tools/hotdogb-launchd-job.py add NAME [--log FILE] [--keep] -- PROGRAM [ARGS...]
   python tools/hotdogb-launchd-job.py remove NAME
   python tools/hotdogb-launchd-job.py list
+  python tools/hotdogb-launchd-job.py disable LABEL   (any job, e.g. com.apple.fairplayd.H2: kept on the phone in
+                                                    /var/local/launchd-disabled/LABEL.plist)
+  python tools/hotdogb-launchd-job.py enable LABEL    (puts a disabled job back)
 
 NAME becomes the label org.iosonpixel.NAME; the job runs once at boot as root (RunAtLoad; --keep: launchd
 restarts it when it exits, at most every 10 s), stdout + stderr to FILE (default /var/local/NAME.log). Edits /System/Library/xpc/launchd.plist through the
@@ -35,7 +38,7 @@ def key(name):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ('add', 'remove', 'list') or (a[0] != 'list' and len(a) < 2):
+    if not a or a[0] not in ('add', 'remove', 'list', 'disable', 'enable') or (a[0] != 'list' and len(a) < 2):
         sys.exit(__doc__)
     tmp = tempfile.mkdtemp()
     cur = os.path.join(tmp, 'launchd.plist')
@@ -49,7 +52,23 @@ def main():
                 print(j['Label'], j.get('ProgramArguments'), '->', j.get('StandardOutPath'))
         return
     name = a[1]
-    if a[0] == 'remove':
+    saved = f'/var/local/launchd-disabled/{name}.plist'
+    if a[0] == 'disable':
+        k = next((k for k, j in jobs.items() if j.get('Label') == name), None)
+        if k is None:
+            sys.exit(f'no job labelled {name}')
+        one = os.path.join(tmp, 'one.plist')
+        with open(one, 'wb') as f:
+            plistlib.dump({k: jobs.pop(k)}, f)
+        files('mkdir', '/var/local/launchd-disabled', '755', check=False)
+        files('put', one, saved, '644')
+    elif a[0] == 'enable':
+        one = os.path.join(tmp, 'one.plist')
+        if files('get', saved, one, check=False).returncode:
+            sys.exit(f'no {saved} on the phone')
+        with open(one, 'rb') as f:
+            jobs.update(plistlib.load(f))
+    elif a[0] == 'remove':
         if jobs.pop(key(name), None) is None:
             print(f'no job {PREFIX}{name}')
             return
@@ -80,7 +99,8 @@ def main():
     with open(new, 'wb') as f:
         plistlib.dump(p, f, fmt=plistlib.FMT_BINARY)
     files('put', new, CACHE, '644')
-    print(f'{a[0]} {PREFIX}{name}: {len(jobs)} jobs; reboot (python tools/flame-cmd.py reboot) and boot again')
+    label = name if a[0] in ('disable', 'enable') else PREFIX + name
+    print(f'{a[0]} {label}: {len(jobs)} jobs; reboot (python tools/flame-cmd.py reboot) and boot again')
 
 
 if __name__ == '__main__':

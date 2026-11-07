@@ -11,7 +11,10 @@ screen (image versions v8-v14 in NOTES.md):
 
   launchd.plist   _PanicOnCrash -> _PanicOnCrasX (a crashing daemon must not
                   panic the system); CommCenter jobs removed (no baseband: it
-                  crash-loops and Setup blocks on its CoreTelephony XPC)
+                  crash-loops and Setup blocks on its CoreTelephony XPC); fairplayd.H2
+                  removed (exits at once, relaunched every 10 s: its queued requests
+                  deadlock locationd, and every synchronous CoreLocation caller hangs
+                  with it - Settings > Date & Time froze)
   containers      /private/var/containers/{Bundle,Data/System,Shared/SystemGroup,Temp}
                   (on iOS they live on the data volume)
   migration       LastSystemVersion so DataMigration does not run for an hour
@@ -66,11 +69,11 @@ def launchd(root):
         if '_PanicOnCrash' in job:
             job['_PanicOnCrasX'] = job.pop('_PanicOnCrash')
             renamed += 1
-    removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
+    removed = [k for k, j in jobs.items() if j.get('Label') in ('com.apple.CommCenter', 'com.apple.fairplayd.H2')]
     for k in removed:
         del jobs[k]
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter/fairplayd.H2 jobs removed')
 
 
 def containers(root):

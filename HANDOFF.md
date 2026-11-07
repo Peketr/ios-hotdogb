@@ -5,6 +5,36 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Settings > Date & Time froze Settings - fairplayd.H2 removed (2026-11-07)
+Same as on the flame (2026-10-21): fairplayd.H2 exits right after starting and launchd relaunches it every 10 s
+(13 `exec fairplayd.H2` in the first 150 s of k0156-1107), so requests to com.apple.fairplayd.versioned queue
+forever; locationd blocks on one at startup and every synchronous CoreLocation caller hangs with it (Date & Time's
+automatic time zone). `python tools/hotdogb-launchd-job.py disable com.apple.fairplayd.H2` (new disable/enable
+commands; the job is kept in /var/local/launchd-disabled/ on the phone): in k0156-datetime-1107 Date & Time opens.
+tools/sweet-root-tweaks.py now removes the job from new roots too. Phone jobs now: wland, oslog-wifid, oslog-ui
+(`oslog -l Preferences locationd timed` -> /var/local/oslog-ui.log; remove it when no longer needed).
+
+### HOTDOGB: BRIGHTNESS SLIDER WORKS (2026-11-07) - kernel 0156
+Run k0156-1107 (`work/boot/kernel-0156` SHA-256 54472cd2...01fd, hotdogb-run-current.sh defaults: -q -G, sweetmtl=2;
+the backlight service is now on by default). The user: "It works perfectly". Control Center's slider moves the panel
+(`panel level 0x3ef ... 0x29d` while dragging, 34.8 fps), display off = dark, on = the last level.
+How it got there (0155, 0156, after the 0152-0154 notes below):
+- backboardd's unified log (job org.iosonpixel.oslog-bb: `oslog -l backboardd` -> /var/local/oslog-bb.log) showed
+  CoreBrightness finding AppleARMBacklight, then `failed to create DisplayRef` / `failed to create a display module`.
+  Disassembly of CoreBrightness (extracted on the Mac: `ipsw dyld extract research/dsc/dyld_shared_cache_arm64
+  CoreBrightness`, read with llvm-objdump; research/ stays out of git): DisplayCreateWithID returns NULL when
+  IORegistryEntryCreateCFProperty(backlight, "IODisplayParameters") is NULL. With no display module, libEDR's server
+  never started, and CA's EDRClient (pstack: render thread in IOMFBServer::set_enabled -> register_libedr_callbacks
+  -> EDRClient::client, a worker in EDRGetDefaultMinScalingFactor's mach_msg) waited on it every frame = the
+  0.2-0.4 fps.
+- 0155: IODisplayParameters {brightness {min 0, max 65536, value}} + the ADT /backlight properties on the service ->
+  `load_libEDR`, `EDR service kick off`, `CBEDRServerAddMainDisplay: main display: 1`, normal frame rate.
+  CoreBrightness still reads no calibration it recognises ("hardware max: 1.000000"): it works in fractions of 1.
+- 0156: per slider step it sets "backlight-level" (= "brightness") 0..65536 of that maximum (slider 0.505 -> 10709,
+  perceptual curve): mapped linearly to DBV 1..0x3ff; IOMFBBrightnessLevel on the framebuffer (it sets 0) ignored.
+Open: real calibration (nits) so iOS knows the panel's range; auto-brightness has no ambient light sensor
+("timeout waiting for ALS arrival" at every boot).
+
 ### HOTDOGB: panel brightness commands work; iOS's brightness slider does not (2026-11-07) - kernels 0152-0154
 - **DSI DCS 0x51 works** (0152): `panel level 0: done` on display off, `0x199: done` (200 nits) on, every time;
   the user confirmed the panel goes fully dark with the power button (k0154-1107). Packet in ABL's display

@@ -9,8 +9,8 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-07): kernel 0155 (backlight IODisplayParameters + /backlight panel description; testing it with
-# sweetbl=2) on 0154 (panel dark while the display is off; sweetbl=2 adds the backlight service, which
+# Current (2026-11-07): kernel 0156 (brightness slider -> panel; backlight service on by default, sweetbl=1 = panel
+# off/on only) on 0155 (backlight IODisplayParameters + /backlight panel description) on 0154 (panel dark while the display is off; sweetbl=2 adds the backlight service, which
 # stalls backboardd) on 0153 (logs and accepts display/backlight property keys) on 0152 (panel brightness: DCS 0x51 + AppleARMBacklight, sweetbl=0 = off) on 0151 (GPU present fills the panel, sweetfb_fill=0 = bars; a client's first 3
 # GPU resets forgiven, sweetgpuforgive=N) with the Adreno 640 on (-G: sweetgpu=1 + the 7T's GPU firmware from
 # ../hotdogb/fw/gpu; 0149 = the 7T's zap shader region, 0150 = margins cleared after CPU-copy frames). iOS root on userdata read-write, with wland
@@ -21,11 +21,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=work/boot/kernel-0155
-TAG=k0155-bl2
+KERNEL=work/boot/kernel-0156
+TAG=k0156
 SECS=900
 OPTS=(-q -G)
-ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweetbl=2"
+ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}
 [ -f "$KERNEL" ] || { echo "no kernel $KERNEL (fetch it from the NAS first)" >&2; exit 1; }
