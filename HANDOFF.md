@@ -5,6 +5,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0145 - probe 5 works, probe 4 resets: unmapped QUP2 data stream 0x7a3; 0146 (2026-11-07)
+Kernel 0145 (`work/boot/kernel-0145`, SHA-256 abba2ec7...6d27; logs/runs/k0145-probe4, k0145-probe5):
+- probe 4 (CONFIG0 + GO + DMA): reset right after the synced "ringing" line (73 s), no dump made it.
+- probe 5 (CONFIG0 + GO, no DMA): ran 300 s. TX RP 0xf0001010 (CONFIG0 consumed), GPI PC 0x4d -> 0x3df,
+  QSB log 0xf000101c (TRE fetch via stream 0x7b6 works), SE status 0x41, M_CMD0 0x08004000 (I2C write to
+  0x20 started, waiting for data). So TRE fetch and SE command work; the DMA TRE resets.
+- Cause (DT): the touch SE's wrapper `qcom,qupv3_2_geni_se@cc0000` has its own context bank,
+  iommus = <&apps_smmu 0x7a3 0>, qcom,iommu-s1-bypass; Linux maps I2C buffers for the wrapper device.
+  0x7a3 had no SMR; sCR0 0x270406 has USFCFG set -> unmatched-stream fault -> reset.
+- **0146** (written, syntax-checked, NOT built/run): also share stream 0x7a3 onto the USB translation-off
+  bank (`hdqupsid=1` default, 0 = old behaviour); `#### SMMU: QUP WRAPPER 2 DATA STREAM 0x7A3 MAPPED`.
+  Run the normal path first (no hdgpiprobe); then probe 4 if it still resets.
+
 ### HOTDOGB: kernel 0144 probes 1-3 all survive; GPI never consumes a TRE; 0145 fast trace (2026-11-07)
 Kernel 0144 (`work/boot/kernel-0144`, SHA-256 4d1eed36...91e8; logs/runs/k0144-probe1..3, all ran 300 s):
 - probe 1 (empty TX doorbell), 2 (RX DMA TRE alone), 3 (CONFIG0 alone, IEOT): no reset, no SMMU global

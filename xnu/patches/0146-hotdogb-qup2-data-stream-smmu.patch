@@ -1,0 +1,43 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -149,6 +149,16 @@
+                                          * (live FDT + OnePlus sm8150-qupv3.dtsi; 3 was i2c@c8c000's) */
+ #define GPI_PROTO_I2C   3u              /* dt-bindings/dma/qcom-gpi.h QCOM_GPI_I2C */
+ #define GPI_SMMU_SID    0x7b6u
++/*
++ * 0146: the QUPv3 wrapper 2 (qcom,qupv3_2_geni_se@cc0000, the touch SE's
++ * qcom,wrapper-core) masters the I2C data buffers on its own stream:
++ * qcom,iommu_qupv3_2_geni_se_cb iommus = <&apps_smmu 0x7a3 0>, with
++ * qcom,iommu-s1-bypass; Linux maps the TX/RX buffers for that device
++ * (geni_se_iommu_map_buf(wrapper_dev)), not for the GPI. Kernel 0145 probe 5
++ * (CONFIG0 + GO, no DMA TRE) ran fine with the GPI fetching TREs on 0x7b6 and
++ * the SE starting the write; probe 4 (with the DMA TRE) reset at once.
++ */
++#define QUP2_SMMU_SID   0x7a3u
+ 
+ #define G_CH_CNTXT(k)   (0x20000u + 0x4000u * GPII + 0x80u * (k))
+ #define G_CH_QOS(k)     (0x2005cu + 0x4000u * GPII + 0x80u * (k))
+@@ -544,7 +554,22 @@
+ 		GPIDBG("smmu share via usb");
+ 		int smr = sweet_usb_smmu_share(GPI_SMMU_SID);
+ 		GPIDBG(smr >= 0 ? "smmu shared" : "smmu share failed");
+-		return smr >= 0 ? 0 : -1;
++		if (smr < 0) {
++			return -1;
++		}
++		int qup = 1;
++		(void)PE_parse_boot_argn("hdqupsid", &qup, sizeof(qup));
++		if (qup) {
++			int q = sweet_usb_smmu_share(QUP2_SMMU_SID);
++			printf("#### SMMU: QUP WRAPPER 2 DATA STREAM 0x7A3 %s\n", q >= 0 ? "MAPPED" : "NOT MAPPED");
++			GPIDBG(q >= 0 ? "smmu qup2 data stream shared" : "smmu qup2 data stream share failed");
++			if (q < 0) {
++				return -1;
++			}
++		} else {
++			GPIDBG("hdqupsid=0: qup2 data stream 0x7a3 left unmapped");
++		}
++		return 0;
+ 	}
+ 	GPIDBG("smmu enter");
+ 	vm_offset_t as = ml_io_map(0x15000000ull, 0x100000);

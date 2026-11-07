@@ -114,6 +114,8 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
 - **0145 GPI fast trace** (`hdgpiprobe=4|5`): the real first write / CONFIG0 + GO only, with the log synced
   to disk (`sweet_log_sync`) before the doorbell and after each dump; GPI PC/QSB and SE status in every dump.
   Milestones in the log start with `####`.
+- **0146 QUP2 data stream** (`hdqupsid=1` default): the wrapper's SE DMA reads/writes the I2C buffers on
+  SMMU stream 0x7a3 (DT qcom,iommu_qupv3_2_geni_se_cb), not the GPI's 0x7b6; both now map to the bank.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi

@@ -139,3 +139,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0145 hotdogb: synchronous log flush (`sweet_log_sync`), GPI/SE debug dumps, probes 4 (real first write,
   fast synced trace) and 5 (CONFIG0 + GO, no DMA), `####` milestone lines. 0144 probes 1-3 all survived;
   the GPI never moved a read pointer.
+- 0146 hotdogb: SMR for the QUP wrapper 2 data stream 0x7a3 (I2C buffers), shared onto the USB bank
+  (`hdqupsid`). Kernel 0145 probe 5 (no DMA TRE) worked; probe 4 (DMA TRE) reset.
