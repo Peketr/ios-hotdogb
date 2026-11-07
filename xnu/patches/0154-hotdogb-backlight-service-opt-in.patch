@@ -15,15 +15,14 @@
  	uint32_t mtl = 0, bl;
  	PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
  	bl = mtl ? 1 : 0;
-@@ -305,7 +309,11 @@
+@@ -305,7 +309,10 @@
  		    *(volatile uint32_t *)(fDsi + 0x004), *(volatile uint32_t *)(fDsi + 0x084),
  		    *(volatile uint32_t *)(fDsi + 0x03c), SWEET_BL_MAX_LEVEL, SWEET_BL_MAX_NITS);
  		setProperty("IOMFBBrightnessLevel", (unsigned long long)SWEET_BL_DEFAULT_NITS << 16, 32);
 -		AppleARMBacklight *bls = OSTypeAlloc(AppleARMBacklight);
 +		AppleARMBacklight *bls = bl >= 2 ? OSTypeAlloc(AppleARMBacklight) : NULL;
 +		if (bls == NULL) {
-+			IOLog("SWEET FB: no AppleARMBacklight service (sweetbl=2 publishes it)
-+");
++			IOLog("SWEET FB: no AppleARMBacklight service (sweetbl=2 publishes it)\n");
 +		}
  		if (bls != NULL && bls->init()) {
  			bls->fFB = this;
