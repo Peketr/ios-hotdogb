@@ -160,8 +160,15 @@ Copy the kernel to `work/boot/kernel-NNNN`, then from WSL Ubuntu:
         -a "rd=ufsroot0 ufsroot=rawdump sweetusb=2 sweetmtl=2"
 
 `tools/wsl-bin` runs Windows' fastboot.exe/adb.exe (WSL has no USB). Only `fastboot boot`; the
-console log reaches rawdump only with `rd=ufsroot0` (`ufsroot=rawdump`: read-only, userdata
-untouched). For ue0 over NCM, the Windows adapter needs 192.168.7.1/24 (the phone is .2); WSL's
+console log reaches rawdump only with `rd=ufsroot0` (`ufsroot=rawdump`: read-only root on rawdump,
+no userland; `rd=ufsroot0 ufsrw=1 rootrw=1` without `ufsroot=` mounts the iOS root on userdata).
+
+**Since 2026-11-07 userdata holds the iOS root**, so Android must not boot: its /data mount fails and
+recovery offers "factory data reset", which would wipe the root. If the phone ever shows that screen,
+pick "Try again" or power off, never the reset. The run script reads rawdump through TWRP instead
+(`fastboot boot ../hotdogb/downloads/twrp/twrp-3.7.0_11-0-hotdog.img`, official build for the 7T,
+SHA-256 96a15ec1...6ba80, nothing flashed) and goes back to fastboot afterwards; `-A` is the old
+Android path. For ue0 over NCM, the Windows adapter needs 192.168.7.1/24 (the phone is .2); WSL's
 default NAT network cannot receive the live log, so run `tools/flame-live.py` with Windows' Python.
 
 Unverified assumptions to check in the first kernel log: wrap2 core/core_2x vote bits
@@ -190,6 +197,18 @@ then includes the real `/product` node.
 
 **Writing it**: only to `/dev/block/by-name/userdata` (sda22). The README's `sda15` is
 flame's userdata; on the 7T sda15 is `super`.
+
+Written 2026-11-07 from bootloader fastboot (userdata 0x1850185000 bytes, reported as f2fs):
+`img2simg` in WSL (12.1 GB sparse, SHA-256 41901d97...ed63), copied to
+`hotdogb/downloads/root/` on C:, then `fastboot -S 512M flash userdata <that copy>` from PowerShell
+(24 transfers, 394 s). Reading the image straight from `\\wsl.localhost` failed mid-flash ("Error
+reading sparse file") and left the bootloader answering "no link" until a restart from its menu.
+**Check after flashing:** the OnePlus ABL acknowledged all 24 transfers, but the device's last
+backup-header block was missing (16 MiB windows compared from TWRP: all 744 data windows matched
+except the last). Fixed by writing that 4 KiB block (LBA 4194303 of the image) with dd from TWRP.
+Zero-filled free space after ~15.1 GiB still holds old userdata bytes (harmless for HFS+). Compare
+the image against sda22 after any reflash.
+Android's data is gone. To get Android back: `fastboot erase userdata` (or format in recovery).
 
 ## Next
 

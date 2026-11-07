@@ -5,6 +5,39 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0147 with the iOS root - SpringBoard up, backboardd gets touches (2026-11-07)
+Run k0147-root (`work/boot/kernel-0147`, 600 s, `-a "rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"`,
+log through TWRP): the root mounted read-write, and launchd started SpringBoard and backboardd (103 s on the log clock).
+`#### HID SweetHIDTouch OPENED BY IOHIDEventServiceUserClient` at 108.9 s (backboardd, plus SweetHIDButtons).
+Touch running at 120.6 s, `#### FIRST TOUCH EVENT SENT TO IOS HID (1 CLIENTS)` at 128.7 s, and 220
+touch-downs up to the end. SpringBoard (pid 26) still alive at 722 s and redrawing: SWEET FB 6-16 fps
+while touched, 4000+ swaps. 484 `CRASH` lines, all background processes (TTS synthesizers, assetsd,
+Spotlight importers; bluetoothd and fairplayd.H2 respawned 62 times each). No panic. The kernel sent
+ARP for 192.168.7.1 (no IP set on the Windows side yet). Open: what the screen showed (user report);
+the respawn loops; the live log over NCM.
+
+### HOTDOGB: iOS root written to userdata (sda22); Android must not boot (2026-11-07)
+`ios16-root-20H392.img` (SHA-256 d699e211...3502, checked before writing) went to userdata as a sparse
+image with `fastboot -S 512M flash userdata` (details and the check in HOTDOGB.md "iOS root image").
+Afterwards the device matched the image in every 16 MiB window that holds data, except the last
+block (backup volume header), which I wrote by hand from TWRP and then verified. Android's data is gone.
+Android must not boot now: its /data mount would fail and recovery offers "factory data reset", which
+would wipe the root. `tools/hotdogb-run.sh` therefore reads rawdump through TWRP 3.7.0_11-0-hotdog
+(`fastboot boot` only; `hotdogb/downloads/twrp/`, SHA-256 matches twrp.me) and goes back to fastboot;
+`-A` is the old Android path. Tested by hand: TWRP adb is root, logpull.sh `/tmp/shimlog` pulled the
+k0147 log, identical. Not run yet: a kernel with the root mounted (`-a "rd=ufsroot0 ufsrw=1 rootrw=1
+sweetusb=2 sweetmtl=2"`), and the USB NCM live log, which needs 192.168.7.1/24 on the phone's network
+adapter in Windows (the user sets it).
+
+### HOTDOGB: kernel 0147 - touch up at 32 s, 10-finger multi-touch works (2026-11-07)
+Kernel 0147 (`work/boot/kernel-0147`, SHA-256 e6f8f46e...126c, logs/runs/k0147-first, ran 300 s; fetched
+from peketr@truenas.local:~/ios-kernels): `#### TOUCHSCREEN RUNNING` at 31.97 s (0.17 s after the 20 s
+start delay; was 132 s). `#### MULTI-TOUCH: 10 FINGERS DOWN AT ONCE` at 40.9 s; 3907 reports over all 10
+objects, 158 HID down/up events, no read errors or GPI timeouts. `FIRST TOUCH EVENT SENT TO IOS HID
+(0 CLIENTS)`: no userland, as expected. Next: a run with the iOS root so backboardd opens SweetHIDTouch.
+- First 0147 attempt: `fastboot boot` itself failed (USB "no link"/"Too many links"); fixed by rebooting
+  the phone into the bootloader by hand.
+
 ### HOTDOGB: 0147 - fast touch start-up, multi-touch and HID milestones (2026-11-07)
 - Input path already exists: s3_report -> sweet_hid_touch -> SweetHIDTouch (SweetHID.cpp), panel pixels;
   the S3706 reports panel pixels too (DT touchpanel,panel-coords 1079x2399). In k0146-first SweetHID
