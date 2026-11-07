@@ -18,13 +18,16 @@ MESA_COMMIT=85fda3b36405bcaea8bffc64aa4f2651dc90770d
 M2V_COMMIT=720ef1ce
 UNIXNU_DATE=2026-10-22T04:00
 echo "== tree $ROOT"
-ls -ld "$W" 2>&1 | sed 's/^/   /'
-if [ -L "$W" ] && [ ! -d "$W" ]; then
-	echo "work is a symlink to $(readlink "$W"), which is not there: create that folder or remove the link" >&2
-	exit 1
-fi
-[ ! -e "$W" ] || [ -d "$W" ] || { echo "$W exists but is not a folder" >&2; exit 1; }
-mkdir -p "$T" || { echo "cannot create $T (see the work line above)" >&2; exit 1; }
+# work/ and the trees in it may be symlinks to another clone's (the old flame checkout): a link whose target
+# is gone makes mkdir fail with "No such file or directory" on the link itself
+for d in "$W" "$T" "$W/UniXNU" "$W/metal2vulkan"; do
+	if [ -L "$d" ]; then
+		echo "   ${d#$ROOT/} -> $(readlink "$d")"
+		[ -d "$d" ] || { echo "${d#$ROOT/} is a symlink to $(readlink "$d"), which is not there: point it at the tree or remove the link (rm ${d#$ROOT/})" >&2; exit 1; }
+	fi
+	[ ! -e "$d" ] || [ -d "$d" ] || { echo "$d exists but is not a folder" >&2; exit 1; }
+done
+mkdir -p "$T" || { ls -ld "$W" "$T" >&2; exit 1; }
 
 echo "== host tools"
 missing=()
@@ -65,19 +68,31 @@ echo "   UniXNU at $U ($(git -C "$W/UniXNU" log -1 --format=%cd --date=short))"
 J=$W/UniXNU/scripts/data/adreno-compiler-inputs.json
 pin=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['mesa']['commit'])" "$J")
 [ "$pin" = "$MESA_COMMIT" ] || { echo "UniXNU pins Mesa $pin, flame used $MESA_COMMIT" >&2; exit 1; }
+# the patch list is top-level "patches" (paths relative to the UniXNU root)
+list=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); [print(p) for p in d.get('patches') or d['mesa']['patches']]" "$J")
 mesa_patches=()	# (macOS bash 3.2: no mapfile)
-while IFS= read -r p; do mesa_patches+=("$p"); done < <(python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['mesa']['patches']]" "$J")
+while IFS= read -r p; do [ -n "$p" ] && mesa_patches+=("$p"); done <<EOF
+$list
+EOF
+((${#mesa_patches[@]})) || { echo "no Mesa patches listed in $J" >&2; exit 1; }
 echo "   ${#mesa_patches[@]} Mesa patches listed"
 
 echo "== Mesa $MESA_COMMIT"
-if [ ! -d "$T/mesa/.git" ]; then
-	git init -q "$T/mesa"
-	git -C "$T/mesa" remote add origin https://gitlab.freedesktop.org/mesa/mesa.git
-	# one commit, not the whole history (falls back to a full fetch if the server refuses)
-	git -C "$T/mesa" fetch -q --depth 1 origin "$MESA_COMMIT" || git -C "$T/mesa" fetch -q origin
+[ -d "$T/mesa/.git" ] || git init -q "$T/mesa"
+if ! git -C "$T/mesa" cat-file -e "$MESA_COMMIT^{commit}" 2>/dev/null; then
+	# one commit, not the whole history: freedesktop first, then the Chromium mirror UniXNU lists
+	ok=
+	for url in https://gitlab.freedesktop.org/mesa/mesa.git \
+	    https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa; do
+		echo "   fetching from $url"
+		if git -C "$T/mesa" fetch -q --depth 1 "$url" "$MESA_COMMIT"; then ok=1; break; fi
+	done
+	[ -n "$ok" ] || { echo "could not fetch Mesa $MESA_COMMIT" >&2; exit 1; }
+fi
+if [ "$(git -C "$T/mesa" rev-parse -q --verify HEAD || true)" != "$MESA_COMMIT" ]; then
+	[ -z "$(git -C "$T/mesa" status --porcelain 2>/dev/null)" ] || { echo "work/turnip/mesa has changes, not at $MESA_COMMIT" >&2; exit 1; }
 	git -C "$T/mesa" checkout -q "$MESA_COMMIT"
 fi
-[ "$(git -C "$T/mesa" rev-parse HEAD)" = "$MESA_COMMIT" ] || { echo "work/turnip/mesa is not at $MESA_COMMIT" >&2; exit 1; }
 apply "$T/mesa" $(printf "$W/UniXNU/%s " "${mesa_patches[@]}") "$ROOT"/phone/turnip/patches/*.patch
 
 echo "== Python venv for Mesa's build"
