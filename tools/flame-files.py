@@ -8,6 +8,8 @@
   tools/flame-files.py link TARGET REMOTE          (symlink)
   tools/flame-files.py rm REMOTE
   tools/flame-files.py chmod REMOTE MODE
+  tools/flame-files.py parts                       (kernel 0148: every GPT partition, all LUNs)
+  tools/flame-files.py part NAME LOCAL [OFFSET LEN] (kernel 0148: raw read-only partition bytes)
 """
 import os, socket, stat, sys
 
@@ -72,6 +74,31 @@ def main(argv):
         data = read_range(s, args[0], int(args[1], 0), int(args[2], 0))
         open(args[3], 'wb').write(data)
         print(args[0], len(data), 'bytes ->', args[3])
+    elif cmd == 'parts':
+        s.sendall(b'PARTS\n')
+        n = int(reply(s).split()[1])
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = s.recv(n - len(buf))
+            if not chunk:
+                raise SystemExit('short read')
+            buf += chunk
+        sys.stdout.write(buf.decode(errors='replace'))
+    elif cmd == 'part':
+        # whole partition (or OFFSET LEN bytes of it), streamed to LOCAL
+        off = int(args[2], 0) if len(args) > 2 else 0
+        n = int(args[3], 0) if len(args) > 3 else 0
+        s.sendall(f'PART {args[0]} {off} {n}\n'.encode())
+        n = int(reply(s).split()[1])
+        got = 0
+        with open(args[1], 'wb') as f:
+            while got < n:
+                chunk = s.recv(min(1 << 20, n - got))
+                if not chunk:
+                    raise SystemExit(f'short read: {got} of {n} bytes')
+                f.write(chunk)
+                got += len(chunk)
+        print(args[0], got, 'bytes ->', args[1])
     elif cmd in ('mkdir', 'link', 'rm', 'chmod'):
         verb = {'mkdir': 'MKDIR', 'link': 'LINK', 'rm': 'RM', 'chmod': 'CHMOD'}[cmd]
         if cmd == 'mkdir' and len(args) == 1:

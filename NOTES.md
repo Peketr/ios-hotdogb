@@ -143,3 +143,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   (`hdqupsid`). Kernel 0145 probe 5 (no DMA TRE) worked; probe 4 (DMA TRE) reset.
 - 0147 hotdogb: GPI debug pauses only with `hdgpidbg=1` (fast touch start-up), multi-touch and HID
   milestones (`####`). Kernel 0146: touchscreen works over GPI DMA, 443 reports, HID events sent.
+- 0148 hotdogb: read-only raw partition reads over the file server (`PARTS`, `PART name off len`; any
+  GPT partition on LUN 0-7), writes refused off the home LUN. For firmware without Android/TWRP.

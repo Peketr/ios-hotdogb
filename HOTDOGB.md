@@ -119,6 +119,10 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   Kernel 0146: the touchscreen works (PDT, F12 10 objects, reports into SweetHID).
 - **0147 touch start-up / multi-touch / HID**: `hdgpidbg=1` brings back the 2.5 s debug pauses; `####`
   lines for first touch, max fingers down, HID service opened by iOS and first HID touch event.
+- **0148 raw partition reads**: the file server's `PARTS` lists every GPT partition on LUN 0-7, `PART
+  name offset len` streams one read-only (`flame-files.py parts` / `part NAME LOCAL`). sweet_ufs.c moves
+  su.lun only inside these reads, under its lock; writes are refused unless su.lun is the home LUN 0, and
+  the panic flush resets it. `tools/hotdogb-fw-pull.py` uses it for the modem firmware and EFS partitions.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi
@@ -168,10 +172,12 @@ no userland; `rd=ufsroot0 ufsrw=1 rootrw=1` without `ufsroot=` mounts the iOS ro
 
 **Since 2026-11-07 userdata holds the iOS root**, so Android must not boot: its /data mount fails and
 recovery offers "factory data reset", which would wipe the root. If the phone ever shows that screen,
-pick "Try again" or power off, never the reset. The run script reads rawdump through TWRP instead
-(`fastboot boot ../hotdogb/downloads/twrp/twrp-3.7.0_11-0-hotdog.img`, official build for the 7T,
-SHA-256 96a15ec1...6ba80, nothing flashed) and goes back to fastboot afterwards; `-A` is the old
-Android path. For ue0 over NCM, the Windows adapter needs 192.168.7.1/24 (the phone is .2); WSL's
+pick "Try again" or power off, never the reset. The run script records the live log (UDP 5140 over
+the NCM link, Windows Python through WSL interop) into logs/runs/NAME/live.txt and leaves the phone in
+fastboot. `-T` also reads the rawdump ring through TWRP (`fastboot boot` of
+../hotdogb/downloads/twrp/twrp-3.7.0_11-0-hotdog.img, official 7T build, SHA-256 96a15ec1...6ba80):
+worked once by hand on 2026-11-07, then not in the user's runs - not the default until fixed.
+`-A` is the old Android path. For ue0 over NCM, the Windows adapter needs 192.168.7.1/24 (the phone is .2); WSL's
 default NAT network cannot receive the live log, so run `tools/flame-live.py` with Windows' Python.
 
 Unverified assumptions to check in the first kernel log: wrap2 core/core_2x vote bits

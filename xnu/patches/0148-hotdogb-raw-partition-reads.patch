@@ -1,0 +1,316 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -125,6 +125,15 @@
+ /* Set by sweet_log_panic_flush(): other CPUs are stopped, no printf, no locks. */
+ static bool sweet_ufs_panicking;
+ 
++/*
++ * 0148: the LUN of the root and the log partitions. su.lun moves away from it
++ * only inside sweet_ufs_part_find/read (read-only, under sweet_ufs_lock); every
++ * write is refused unless su.lun is back here, and the panic flush resets it.
++ */
++#define UFS_HOME_LUN    0
++/* 0148: quiet GPT lookups while scanning every LUN */
++static bool ufs_gpt_quiet;
++
+ static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
+ static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
+ 
+@@ -294,7 +303,7 @@
+ static int
+ ufs_write_blocks(uint64_t lba, uint32_t count)
+ {
+-	if (!su.writable || !su.nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
++	if (su.lun != UFS_HOME_LUN || !su.writable || !su.nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
+ 	    lba < su.first_block || lba - su.first_block >= su.nblocks ||
+ 	    count > su.nblocks - (lba - su.first_block) || lba + count - 1 > UINT32_MAX) {
+ 		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
+@@ -317,7 +326,7 @@
+ static int
+ ufs_write_log_blocks(uint64_t lba, uint32_t count)
+ {
+-	if (!su.log_nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
++	if (su.lun != UFS_HOME_LUN || !su.log_nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
+ 	    lba < su.log_first || lba - su.log_first >= su.log_nblocks ||
+ 	    count > su.log_nblocks - (lba - su.log_first) || lba + count - 1 > UINT32_MAX) {
+ 		printf("SWEET UFS: refusing log write of %u blocks at 0x%llx\n", count, lba);
+@@ -352,7 +361,9 @@
+ 		return error;
+ 	}
+ 	if (memcmp(b, "EFI PART", 8) != 0) {
+-		printf("SWEET UFS: LUN %u has no GPT\n", su.lun);
++		if (!ufs_gpt_quiet) {
++			printf("SWEET UFS: LUN %u has no GPT\n", su.lun);
++		}
+ 		return ENXIO;
+ 	}
+ 	uint64_t entry_lba;
+@@ -393,7 +404,9 @@
+ 		*out_n = last - first + 1;
+ 		return 0;
+ 	}
+-	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
++	if (!ufs_gpt_quiet) {
++		printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
++	}
+ 	return ENOENT;
+ }
+ 
+@@ -668,7 +681,7 @@
+ 		return ENOMEM;
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+-	su.lun = 0;
++	su.lun = UFS_HOME_LUN;
+ 	su.secsize = DEV_BSIZE;
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+@@ -747,6 +760,141 @@
+  * ring offset of byte n = n % ring size. Read it from a recovery with
+  * tools/sweet-log-pull.sh. Disabled with boot-arg sweetlog=0.
+  */
++/*
++ * 0148: read-only access to any GPT partition on LUN 0-7 by name, for the file
++ * server's PARTS/PART commands (sweet_files.c): firmware and the modem's EFS
++ * partitions on hotdogb, where neither Android nor TWRP is available. Only
++ * READ(10) is issued on a foreign LUN; su.lun is restored before the lock is
++ * dropped.
++ */
++#define UFS_MAX_LUN     8
++
++/* Try a command up to 3 times: the first one to a LUN may report a unit attention. */
++static int
++ufs_read_gpt_retry(const char *want, uint64_t *first, uint64_t *n)
++{
++	int err = EIO;
++	for (int i = 0; i < 3; i++) {
++		err = ufs_find_partition_range(want, first, n);
++		if (err != EIO) {
++			break;
++		}
++	}
++	return err;
++}
++
++int sweet_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *nblocks);
++
++int
++sweet_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *nblocks)
++{
++	if (!su.ready) {
++		return ENXIO;
++	}
++	int err = ENOENT;
++	lck_mtx_lock(&sweet_ufs_lock);
++	ufs_gpt_quiet = true;
++	for (uint8_t l = 0; l < UFS_MAX_LUN; l++) {
++		su.lun = l;
++		if (ufs_read_gpt_retry(name, first, nblocks) == 0) {
++			*lun = l;
++			err = 0;
++			break;
++		}
++	}
++	ufs_gpt_quiet = false;
++	su.lun = UFS_HOME_LUN;
++	lck_mtx_unlock(&sweet_ufs_lock);
++	return err;
++}
++
++/* len bytes at byte offset off of a partition (as found above) into dst; len <= 512 KiB. */
++int sweet_ufs_part_read(uint8_t lun, uint64_t first, uint64_t nblocks, uint64_t off, void *dst, uint32_t len);
++
++int
++sweet_ufs_part_read(uint8_t lun, uint64_t first, uint64_t nblocks, uint64_t off, void *dst, uint32_t len)
++{
++	if (!su.ready || lun >= UFS_MAX_LUN || len == 0 || len > BOUNCE_SIZE / 2) {
++		return EINVAL;
++	}
++	uint64_t size = nblocks * UFS_BLOCK;
++	if (off >= size || len > size - off) {
++		return EINVAL;
++	}
++	uint64_t lba = first + off / UFS_BLOCK;
++	uint32_t skip = (uint32_t)(off % UFS_BLOCK);
++	uint32_t count = (skip + len + UFS_BLOCK - 1) / UFS_BLOCK;
++	lck_mtx_lock(&sweet_ufs_lock);
++	su.lun = lun;
++	int err = ufs_read_blocks(lba, count);
++	if (err == EIO) {
++		err = ufs_read_blocks(lba, count);      /* unit attention on the first command */
++	}
++	su.lun = UFS_HOME_LUN;
++	if (!err) {
++		memcpy(dst, (const uint8_t *)(su.dma + DMA_BOUNCE) + skip, len);
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	return err;
++}
++
++/* Text list "name lun first_block blocks\n" of every partition on every LUN; returns its length. */
++int sweet_ufs_part_list(char *out, uint32_t max, uint32_t *used);
++
++int
++sweet_ufs_part_list(char *out, uint32_t max, uint32_t *used)
++{
++	if (!su.ready) {
++		return ENXIO;
++	}
++	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
++	uint32_t n = 0;
++	lck_mtx_lock(&sweet_ufs_lock);
++	for (uint8_t l = 0; l < UFS_MAX_LUN; l++) {
++		su.lun = l;
++		int err = ufs_read_blocks(1, 1);
++		if (err == EIO) {
++			err = ufs_read_blocks(1, 1);
++		}
++		if (err || memcmp(b, "EFI PART", 8) != 0) {
++			continue;
++		}
++		uint64_t entry_lba;
++		uint32_t nent, esz;
++		memcpy(&entry_lba, b + 72, 8);
++		memcpy(&nent, b + 80, 4);
++		memcpy(&esz, b + 84, 4);
++		if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE ||
++		    ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK)) {
++			continue;
++		}
++		for (uint32_t i = 0; i < nent && n + 80 < max; i++) {
++			const uint8_t *e = b + i * esz;
++			uint64_t f, last;
++			memcpy(&f, e + 32, 8);
++			memcpy(&last, e + 40, 8);
++			if (f == 0 || last < f) {
++				continue;
++			}
++			char name[37];
++			unsigned c;
++			for (c = 0; c < 36; c++) {
++				uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++				if (ch == 0 || ch > 0x7f || ch <= ' ') {
++					break;
++				}
++				name[c] = (char)ch;
++			}
++			name[c] = 0;
++			n += (uint32_t)snprintf(out + n, max - n, "%s %u %llu %llu\n", c ? name : "-", l, f, last - f + 1);
++		}
++	}
++	su.lun = UFS_HOME_LUN;
++	lck_mtx_unlock(&sweet_ufs_lock);
++	*used = MIN(n, max);
++	return 0;
++}
++
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
+ #define SWEET_LOG_SECS          10u
+@@ -987,6 +1135,7 @@
+ 		return;
+ 	}
+ 	sweet_ufs_panicking = true;
++	su.lun = UFS_HOME_LUN;          /* 0148: a raw partition read may have been on another LUN */
+ 	uint64_t now = mach_absolute_time(), deadline;
+ 	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
+ 	deadline += now;
+--- a/bsd/dev/sweet_files.c
++++ b/bsd/dev/sweet_files.c
+@@ -12,6 +12,10 @@
+  *   LINK <target> <path>\n                        -> "OK\n"  (symlink)
+  *   RM <path>\n                                   -> "OK\n"
+  *   CHMOD <path> <mode-octal>\n                   -> "OK\n"
++ *   PARTS\n                                       -> "OK <size>\n<text>": "name lun first blocks"
++ *                                                    lines, every GPT partition on LUN 0-7 (0148)
++ *   PART <name> <offset> <len>\n                  -> "OK <len>\n<bytes>": read-only raw bytes of a
++ *                                                    partition by name (len 0: to its end) (0148)
+  *
+  * Errors: "ERR <errno>\n". Paths have no spaces. Started with the USB
+  * gadget (sweet_usb.c) when the interface comes up.
+@@ -37,6 +41,9 @@
+ extern int sweet_vfs_symlink(const char *target, const char *link);
+ extern int sweet_vfs_unlink(const char *path);
+ extern kern_return_t thread_terminate(thread_t);
++extern int sweet_ufs_part_find(const char *name, uint8_t *lun, uint64_t *first, uint64_t *nblocks);
++extern int sweet_ufs_part_read(uint8_t lun, uint64_t first, uint64_t nblocks, uint64_t off, void *dst, uint32_t len);
++extern int sweet_ufs_part_list(char *out, uint32_t max, uint32_t *used);
+ void sweet_files_start(void);
+ 
+ #define SF_BUF  (64 * 1024)
+@@ -263,6 +270,49 @@
+ 	return err;
+ }
+ 
++/* 0148: raw, read-only partition bytes (sweet_ufs.c), for firmware without Android/TWRP. */
++static int
++sf_part(socket_t so, const char *name, uint64_t off, uint64_t len)
++{
++	uint8_t lun = 0;
++	uint64_t first = 0, nblocks = 0;
++	int err = sweet_ufs_part_find(name, &lun, &first, &nblocks);
++	uint64_t size = nblocks * 4096;
++	if (!err && (off > size || len > size - off)) {
++		err = EINVAL;
++	}
++	if (err) {
++		sf_reply(so, err, 0, false);
++		return err;
++	}
++	if (len == 0) {
++		len = size - off;
++	}
++	printf("SWEET FILES: PART %s: LUN %u blocks %llu+%llu, %llu bytes at %llu\n", name, lun, first, nblocks, len, off);
++	sf_reply(so, 0, len, true);
++	for (uint64_t done = 0; done < len && !err;) {
++		uint32_t chunk = (uint32_t)MIN((uint64_t)SF_BUF, len - done);
++		err = sweet_ufs_part_read(lun, first, nblocks, off + done, sf_buf, chunk);
++		if (!err) {
++			err = sf_send(so, sf_buf, chunk);
++		}
++		done += chunk;
++	}
++	return err;
++}
++
++static int
++sf_parts(socket_t so)
++{
++	uint32_t used = 0;
++	int err = sweet_ufs_part_list(sf_buf, SF_BUF, &used);
++	sf_reply(so, err, used, true);
++	if (!err && used) {
++		err = sf_send(so, sf_buf, used);
++	}
++	return err;
++}
++
+ static void
+ sf_handle(socket_t so)
+ {
+@@ -295,6 +345,25 @@
+ 		printf("SWEET FILES: GET %s -> %d\n", line + 4, err);
+ 		return;
+ 	}
++	if (!strcmp(line, "PARTS")) {
++		err = sf_parts(so);
++		printf("SWEET FILES: PARTS -> %d\n", err);
++		return;
++	}
++	if (!strncmp(line, "PART ", 5)) {
++		char *p = line + 5, *sp = strchr(p, ' ');
++		if (!sp || (size_t)(sp - p) >= sizeof(a)) {
++			sf_reply(so, EINVAL, 0, false);
++			return;
++		}
++		memcpy(a, p, (size_t)(sp - p));
++		a[sp - p] = 0;
++		unsigned long long off = strtoul(sp + 1, &p, 10);   /* 64-bit long */
++		n = sf_dec(p);
++		err = sf_part(so, a, off, n);
++		printf("SWEET FILES: PART %s %llu %llu -> %d\n", a, off, n, err);
++		return;
++	}
+ 	if (!strncmp(line, "READ ", 5)) {
+ 		char *p = line + 5, *sp = strchr(p, ' ');
+ 		if (!sp || (size_t)(sp - p) >= sizeof(a)) {

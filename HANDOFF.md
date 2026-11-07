@@ -5,6 +5,18 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Wi-Fi port started; runs without TWRP; kernel 0148 raw partition reads (2026-11-07)
+- TWRP stopped working in the user's runs, so `tools/hotdogb-run.sh` no longer uses it by default: it records the
+  live log into logs/runs/NAME/live.txt (Windows Python through WSL interop) and leaves the phone in fastboot
+  (`-T` = the TWRP rawdump pull, `-L` = no recorder). Earlier: one TWRP pull by hand worked.
+- Wi-Fi: same WLAN hardware as flame (0x18800000, SMMU stream 0x640, MSA 0x8bc00000 1 MB, regulators
+  pm8150 l1/l7 + pm8150l l2/l11 at the same voltages); the modem region differs (0x8d800000 + 0x9600000).
+  `phone/wifi/board.h` (BOARD=hotdogb default in build.sh). The kernel side already runs on hotdogb
+  (`/dev/wlan`, wifid starts). Missing: OnePlus firmware + EFS partitions, a Mac build of wland, install.
+- 0148 (not built yet): file server `PARTS`/`PART` read any partition read-only, so
+  `python tools/hotdogb-fw-pull.py` gets the firmware during a run. Then `python tools/hotdogb-wifi-install.py`
+  (wland + firmware + launchd job), reboot, boot again. `tools/hotdogb-run-current.sh` = kernel 0148, 900 s.
+
 ### HOTDOGB: kernel 0147 with the iOS root - SpringBoard up, backboardd gets touches (2026-11-07)
 Run k0147-root (`work/boot/kernel-0147`, 600 s, `-a "rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"`,
 log through TWRP): the root mounted read-write, and launchd started SpringBoard and backboardd (103 s on the log clock).

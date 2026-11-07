@@ -5,7 +5,7 @@ Run with Windows Python from src while a kernel runs (192.168.7.1 on the phone's
 
   python tools/hotdogb-wifi-install.py [--fw DIR] [--wland FILE] [--no-job]
 
-  --fw     firmware folder from tools/hotdogb-fw-pull.sh (default ../hotdogb/fw):
+  --fw     firmware folder from tools/hotdogb-fw-pull.py (default ../hotdogb/fw):
            modem/  modem.mdt + modem.bNN, wlanmdsp.mbn, *.jsn, bdwlan.bin   -> /var/local/fw/modem
            rmtfs/  modemst1.img modemst2.img fsg.img fsc.img (IMEI etc.)    -> /var/local/fw/rmtfs
   --wland  phone/wifi/out/wland built on the Mac with BOARD=hotdogb phone/wifi/build.sh
