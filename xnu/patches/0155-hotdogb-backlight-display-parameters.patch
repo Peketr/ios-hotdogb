@@ -1,0 +1,126 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -70,6 +70,8 @@
+ #else
+ #define SWEET_BL                        0
+ #define SWEET_DSI_CMD_PA                0ull      /* no brightness control (fDsi stays NULL) */
++#define SWEET_BL_MAX_NITS               500
++#define SWEET_BL_DEFAULT_NITS           200
+ #endif
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+@@ -78,6 +80,7 @@
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <libkern/c++/OSCollectionIterator.h>
++#include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOLocks.h>
+ #include <IOKit/IOWorkLoop.h>
+@@ -193,6 +196,7 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
++static void sweet_bl_describe(IOService *bl);     /* 0155 */
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+@@ -318,6 +322,7 @@
+ 			bls->setProperty("backlight-control", true);
+ 			bls->setProperty("brightness-nits", (unsigned long long)SWEET_BL_DEFAULT_NITS, 32);
+ 			bls->setProperty("max-nits", (unsigned long long)SWEET_BL_MAX_NITS, 32);
++			sweet_bl_describe(bls);
+ 			if (bls->attach(this)) {
+ 				bls->registerService();
+ 				IOLog("#### BRIGHTNESS CONTROL PUBLISHED (AppleARMBacklight)\n");
+@@ -757,13 +762,89 @@
+ 	return kIOReturnSuccess;
+ }
+ 
++/*
++ * 0155: what CoreBrightness's DisplayCreateWithID reads from the backlight service. Without IODisplayParameters
++ * it logged "failed to create DisplayRef" / "failed to create a display module" (k0154-bl2log, oslog of
++ * backboardd): no display module, no brightness, and libEDR's server never started, so Core Animation's
++ * EDRClient waited on it every frame (the 0.2-0.4 fps). IODisplayParameters = { brightness = { min, max, value } }
++ * (0..SWEET_BL_PARAM_MAX, value at the default nits); then the panel description it reads with the same calls
++ * (lMaxProduct, backlight-marketing-table, use-AAP ...): on an iPhone those are the device tree's /backlight node,
++ * here copied from our ADT's (tools/adt-add-backlight.py: the iPhone X's) onto the service.
++ */
++#define SWEET_BL_PARAM_MAX      65536
++
++static void
++sweet_bl_describe(IOService *bl)
++{
++	OSDictionary *dp = OSDictionary::withCapacity(1), *br = OSDictionary::withCapacity(3);
++	OSNumber *mn = OSNumber::withNumber(0ULL, 32), *mx = OSNumber::withNumber((unsigned long long)SWEET_BL_PARAM_MAX, 32);
++	OSNumber *val = OSNumber::withNumber((unsigned long long)SWEET_BL_PARAM_MAX * SWEET_BL_DEFAULT_NITS / SWEET_BL_MAX_NITS, 32);
++	if (dp != NULL && br != NULL && mn != NULL && mx != NULL && val != NULL) {
++		br->setObject("min", mn);
++		br->setObject("max", mx);
++		br->setObject("value", val);
++		dp->setObject("brightness", br);
++		bl->setProperty("IODisplayParameters", dp);
++	}
++	OSSafeReleaseNULL(dp);
++	OSSafeReleaseNULL(br);
++	OSSafeReleaseNULL(mn);
++	OSSafeReleaseNULL(mx);
++	OSSafeReleaseNULL(val);
++
++	uint32_t copied = 0;
++	IORegistryEntry *dt = IORegistryEntry::fromPath("/backlight", gIODTPlane);
++	OSDictionary *props = dt != NULL ? dt->dictionaryWithProperties() : NULL;
++	OSCollectionIterator *it = props != NULL ? OSCollectionIterator::withCollection(props) : NULL;
++	OSSymbol *k;
++	while (it != NULL && (k = OSDynamicCast(OSSymbol, it->getNextObject())) != NULL) {
++		const char *name = k->getCStringNoCopy();
++		if (!strcmp(name, "name") || !strcmp(name, "compatible") || !strcmp(name, "device_type") ||
++		    !strcmp(name, "AAPL,phandle") || bl->getProperty(k) != NULL) {
++			continue;
++		}
++		bl->setProperty(k, props->getObject(k));
++		copied++;
++	}
++	OSSafeReleaseNULL(it);
++	OSSafeReleaseNULL(props);
++	OSSafeReleaseNULL(dt);
++	IOLog("SWEET BL: IODisplayParameters brightness 0..%u, %u properties from the device tree's /backlight%s\n",
++	    SWEET_BL_PARAM_MAX, copied, copied ? "" : " (none: no /backlight node in the ADT)");
++}
++
+ IOReturn
+ AppleARMBacklight::setProperties(OSObject *properties)
+ {
+ 	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
+ 	OSNumber *n = d ? OSDynamicCast(OSNumber, d->getObject("brightness-nits")) : NULL;
+ 	sweet_bl_log("backlight", d);
+-	sweet_bl_store(this, d);
++	/* 0155: IODisplayParameters = { brightness = value } or { brightness = { value = N } } (0..SWEET_BL_PARAM_MAX) */
++	OSDictionary *dp = d ? OSDynamicCast(OSDictionary, d->getObject("IODisplayParameters")) : NULL;
++	OSObject *bo = dp ? dp->getObject("brightness") : NULL;
++	OSNumber *bv = OSDynamicCast(OSNumber, bo);
++	if (bv == NULL && OSDynamicCast(OSDictionary, bo) != NULL) {
++		bv = OSDynamicCast(OSNumber, ((OSDictionary *)bo)->getObject("value"));
++	}
++	if (dp == NULL) {
++		sweet_bl_store(this, d);        /* IODisplayParameters keeps its min/max: only the value changes below */
++	}
++	if (bv != NULL && fFB != NULL) {
++		uint64_t v = bv->unsigned64BitValue();
++		v = v > SWEET_BL_PARAM_MAX ? SWEET_BL_PARAM_MAX : v;
++		fFB->setBrightnessNits(((v * SWEET_BL_MAX_NITS) << 16) / SWEET_BL_PARAM_MAX);
++		OSDictionary *cur = OSDynamicCast(OSDictionary, getProperty("IODisplayParameters"));
++		OSDictionary *copy = cur ? OSDictionary::withDictionary(cur) : NULL;
++		OSDictionary *br = copy ? OSDynamicCast(OSDictionary, copy->getObject("brightness")) : NULL;
++		OSDictionary *brc = br ? OSDictionary::withDictionary(br) : NULL;
++		if (copy != NULL && brc != NULL) {
++			brc->setObject("value", bv);
++			copy->setObject("brightness", brc);
++			setProperty("IODisplayParameters", copy);
++		}
++		OSSafeReleaseNULL(brc);
++		OSSafeReleaseNULL(copy);
++	}
+ 	if (n != NULL && fFB != NULL) {
+ 		uint64_t v = n->unsigned64BitValue();
+ 		fFB->setBrightnessNits(v < 0x10000 ? v << 16 : v);     /* plain nits or 16.16 */

@@ -161,3 +161,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   backlight service the UI fell to 0.2-0.4 fps and no brightness arrived).
 - 0154 `sweetbl=2` publishes AppleARMBacklight; the default 1 only darkens the panel while the display is off
   (0153: CoreBrightness set no key at all, and the service alone still caused the 0.2-0.4 fps).
+- 0155 AppleARMBacklight gets IODisplayParameters {brightness {min 0, max 65536, value}} and the ADT /backlight
+  node's properties: CoreBrightness's DisplayCreateWithID failed without IODisplayParameters ("failed to create
+  DisplayRef"), so libEDR's server never started and CA's EDRClient stalled every frame. A set IODisplayParameters
+  brightness value (0..65536) maps to 0..500 nits. Still only with sweetbl=2.
