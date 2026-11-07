@@ -9,6 +9,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 T=$ROOT/work/turnip
+[ -d "$T/mesa/src/freedreno" ] && [ -x "$T/venv/bin/meson" ] || { echo "no Mesa tree or venv in $T: run tools/setup-metal2-trees.sh first" >&2; exit 1; }
 target=${1:-ios}
 export PATH=$T/venv/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PATH
 opts="-Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=darwin -Dtu-darwin-abi-dir=$ROOT/phone/turnip

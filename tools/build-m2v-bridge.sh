@@ -8,6 +8,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 SRC=$ROOT/work/metal2vulkan
+[ -d "$SRC/crates/metal2vulkan" ] || { echo "no metal2vulkan tree in $SRC: run tools/setup-metal2-trees.sh first" >&2; exit 1; }
 OUT=$ROOT/work/m2v-bridge
 target=${1:-ios}
 mkdir -p "$OUT"
