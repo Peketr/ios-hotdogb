@@ -21,8 +21,14 @@ with the new `tools/hotdogb-metal2-install.py` (file server, no ssh). Kernel 015
   data (`tools/hotdogb-wallpaper-png.py`; originals in /var/local/wallpaper-heic-backup and ../hotdogb/wallpaper/heic;
   the flame's 2026-10-21 workaround). **No GPU fault in 954 s**; lock screen, Settings, Safari chrome drawn by
   Metal; up to 53.8 fps; pool peak 422 MB; backboardd 195-212 submits per 5 s while in use.
-Open: Safari's web content black (com.apple.WebKit.GPU and MobileSafari are not in /var/local/mtl2-clients);
-the fault itself (a 420f/HEIC surface makes the GPU read address 0 - should fail cleanly, not fault); a Metal
+- k0150-metal2-safari-1107: `/var/local/mtl2-clients` = `*`, `-chronod` (the flame's list; installer default,
+  `hotdogb-metal2-install.py --clients-only` writes just the list). com.apple.WebKit.GPU and MobileSafari get
+  devices; **Safari renders pages** (telex.hu: header, text, buttons, photo; panel5-small.png), home screen with
+  blurred dock and widget. Captures during scroll/load show unpainted tiles holding older pixels (wallpaper),
+  gone once painted. One backboardd SIGSEGV at 81.6 s (far 0x308, pc 0x1c1deb0c0 in the shared cache, right
+  after it made a new 1125x2436 surface; restarted with Metal, not repeated) - symbolicate on the Mac
+  (tools/pstack-sym.py needs ipsw + research/dsc). Up to 58.6 fps while scrolling.
+Open: backboardd's 0x308 crash if it repeats; the fault itself (a 420f/HEIC surface makes the GPU read address 0 - should fail cleanly, not fault); a Metal
 device that survives a GPU reset; settings list rows looked torn in one capture mid-scroll.
 
 ### HOTDOGB: double home indicator = stale CPU-copy margins; 0150 clears them (2026-11-07)
