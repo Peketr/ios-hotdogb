@@ -1,0 +1,30 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -290,8 +290,12 @@
+ #if SWEET_BL
+ 	fBlLock = IOLockAlloc();
+ 	fBlLevel = (uint32_t)(((uint64_t)SWEET_BL_DEFAULT_NITS * SWEET_BL_MAX_LEVEL) / SWEET_BL_MAX_NITS);
+-	/* boot-arg sweetbl: 1 = brightness control (default with sweetmtl: CoreBrightness's digital dimming then runs on
+-	 * the GPU; on the CPU renderer it took ios-topaz under 1 fps), 0 = none (the panel keeps ABL's level) */
++	/*
++	 * boot-arg sweetbl: 0 = no panel commands (the panel keeps ABL's level); 1 (default with sweetmtl) = the panel
++	 * goes dark while the display is off and back to its level when on; 2 = also the AppleARMBacklight service.
++	 * 0154: with the service backboardd fell to 0.2-0.4 fps (also with Metal and the iPhone X /backlight node) and
++	 * CoreBrightness never set a brightness on it or the framebuffer (0153's key log stayed empty), so 1 has none.
++	 */
+ 	uint32_t mtl = 0, bl;
+ 	PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
+ 	bl = mtl ? 1 : 0;
+@@ -305,7 +309,11 @@
+ 		    *(volatile uint32_t *)(fDsi + 0x004), *(volatile uint32_t *)(fDsi + 0x084),
+ 		    *(volatile uint32_t *)(fDsi + 0x03c), SWEET_BL_MAX_LEVEL, SWEET_BL_MAX_NITS);
+ 		setProperty("IOMFBBrightnessLevel", (unsigned long long)SWEET_BL_DEFAULT_NITS << 16, 32);
+-		AppleARMBacklight *bls = OSTypeAlloc(AppleARMBacklight);
++		AppleARMBacklight *bls = bl >= 2 ? OSTypeAlloc(AppleARMBacklight) : NULL;
++		if (bls == NULL) {
++			IOLog("SWEET FB: no AppleARMBacklight service (sweetbl=2 publishes it)
++");
++		}
+ 		if (bls != NULL && bls->init()) {
+ 			bls->fFB = this;
+ 			bls->setProperty("backlight-control", true);

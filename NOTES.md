@@ -159,3 +159,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0153 framebuffer and backlight setProperties: every key logged (`SWEET BL: PROC iomfb|backlight set KEY`, first
   4 per key then every 200th), stored and accepted (0152 refused all but IOMFBBrightnessLevel, unlogged; with the
   backlight service the UI fell to 0.2-0.4 fps and no brightness arrived).
+- 0154 `sweetbl=2` publishes AppleARMBacklight; the default 1 only darkens the panel while the display is off
+  (0153: CoreBrightness set no key at all, and the service alone still caused the 0.2-0.4 fps).
