@@ -18,8 +18,8 @@ DHCP on en0: 10.0.0.120, default route 10.0.0.1 (425.98 s, 3.4 s after the link)
   (copy: ../hotdogb/fw/sc-preferences-wifi.plist; original on the phone as preferences.plist.pre-wifi).
 - Open: (1) wifid did not rejoin by itself after a reboot (run k0148-wifi-2/3 needed the manual join; no
   com.apple.wifi.known-networks.plist was written before) - check on the next boot. (2) wlan.conf as the
-  boot-time fallback is not set (the user writes it). (3) sweet-root-tweaks.py should write this
-  preferences.plist for new root images.
+  boot-time fallback is not set (the user writes it). (3) Done: sweet-root-tweaks.py `network()` writes
+  the same preferences.plist into new root images (tested against the phone's file: identical).
 
 ### HOTDOGB: Wi-Fi radio works - wland boots the OnePlus modem, WLFW, scan finds 29 networks (2026-11-07)
 Run k0148-wifi-1 (kernel 0148, root rw, launchd job `wland auto`; wland-hotdogb with MPSS 0x8dc00000+0xa000000):

@@ -26,6 +26,8 @@ screen (image versions v8-v14 in NOTES.md):
   activation      mobileactivationd data ark seeded; the actual Activated state
                   comes from its Hactivation branch, selected by the /chosen
                   security-status properties in tools/mkadt.py
+  network         configd preferences.plist gets a Wi-Fi service for en0 (DHCP):
+                  without one, Wi-Fi joins but no IP traffic goes out
 """
 import glob, os, plistlib, shutil, sys
 
@@ -122,6 +124,48 @@ def audio(root):
         print('StartRecorderServer off', os.path.relpath(conf, root))
 
 
+WIFI_SERVICE = '50417E3E-4672-43CB-B2BE-161F0D03C8D7'
+WIFI_SET = '4CBAAFD6-433E-42CD-B1C6-4AB3E4129705'
+
+
+def network(root):
+    """A Wi-Fi network service for en0 in configd's preferences (hotdogb 2026-11-07, flame 2026-10-22).
+
+    The image's preferences.plist has host names only, so configd never runs DHCP on en0: wifid joins, the link
+    comes up, and no IP traffic goes out. configd only creates default services for interfaces that exist when
+    it starts, and en0 appears later (once wland has the radio up), so the service is written here."""
+    d = os.path.join(root, 'private/var/preferences/SystemConfiguration')
+    path = os.path.join(d, 'preferences.plist')
+    data = load(path) if os.path.exists(path) else {}
+    services = data.get('NetworkServices', {})
+    if any(s.get('Interface', {}).get('DeviceName') == 'en0' for s in services.values()):
+        print('network: en0 already has a service')
+        return
+    if os.path.exists(path) and not os.path.exists(path + '.pre-wifi'):
+        shutil.copy2(path, path + '.pre-wifi')
+    data.setdefault('__VERSION__', 20191120)
+    data['NetworkServices'] = {WIFI_SERVICE: {
+        'DNS': {},
+        'IPv4': {'ConfigMethod': 'DHCP'},
+        'IPv6': {'ConfigMethod': 'Automatic'},
+        'Interface': {'DeviceName': 'en0', 'Hardware': 'AirPort', 'Type': 'Ethernet', 'UserDefinedName': 'Wi-Fi'},
+        'Proxies': {'ExceptionsList': ['*.local', '169.254/16'], 'FTPPassive': 1},
+        'UserDefinedName': 'Wi-Fi',
+    }}
+    data['Sets'] = {WIFI_SET: {
+        'Network': {
+            'Global': {'IPv4': {'ServiceOrder': [WIFI_SERVICE]}},
+            'Interface': {'en0': {'AirPort': {}}},
+            'Service': {WIFI_SERVICE: {'__LINK__': '/NetworkServices/' + WIFI_SERVICE}},
+        },
+        'UserDefinedName': 'Automatic',
+    }}
+    data['CurrentSet'] = '/Sets/' + WIFI_SET
+    os.makedirs(d, exist_ok=True)
+    save(path, data, 0, 0, 0o644)
+    print('network: Wi-Fi service for en0 (DHCP)')
+
+
 def main():
     if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
         sys.exit(__doc__)
@@ -130,6 +174,7 @@ def main():
     containers(root)
     activation(root)
     audio(root)
+    network(root)
     merge_pref(root, 'com.apple.migration', {
         'LastSystemVersion': BUILD,
         'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}})

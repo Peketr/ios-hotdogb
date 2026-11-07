@@ -83,6 +83,12 @@ live_stop() {
 trap live_stop EXIT
 
 if ! in_fastboot; then adb reboot bootloader 2>/dev/null || true; fi
+if ! wait_fastboot 20; then
+	# The 7T's fastboot sometimes stops answering after a reset (on its screen, but `fastboot devices`
+	# empty or "no link"); `fastboot reboot bootloader` waits for it and restarts the bootloader.
+	echo "$(date +%T) not visible in fastboot: fastboot reboot bootloader"
+	timeout 60 fastboot reboot bootloader 2>&1 | tail -1 || true
+fi
 wait_fastboot 90 || { echo "phone not in fastboot" >&2; exit 1; }
 live_start
 t0=$(date +%s)
