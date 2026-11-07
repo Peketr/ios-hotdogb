@@ -5,6 +5,23 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: panel brightness commands work; iOS's brightness slider does not (2026-11-07) - kernels 0152-0154
+- **DSI DCS 0x51 works** (0152): `panel level 0: done` on display off, `0x199: done` (200 nits) on, every time;
+  the user confirmed the panel goes fully dark with the power button (k0154-1107). Packet in ABL's display
+  carve-out (0x9e300000), DSI0 command DMA, software trigger, between autorefresh frames: no glitch seen.
+- **The AppleARMBacklight service stalls backboardd**: with it (0152/0153, sweetbl=2 from 0154) CoreBrightness
+  matches it (`backlight-control -> AppleARMBacklight`) but never sets brightness-nits or IOMFBBrightnessLevel
+  (0153 logs every setProperties key: none at all), and backboardd drops to 0.2-0.4 fps with the GPU idle.
+  Same with the iPhone X /backlight node in the ADT (tools/adt-add-backlight.py; work/boot/hotdogb.adt has it now,
+  the original is hotdogb.adt.pre-backlight). Without the service (k0152-nobl, k0154): 25-31 fps.
+- pstack (phone/tools, job org.iosonpixel.pstack-bb samples PID 58 every 10 s into /var/local/pstack-bb.log;
+  remove with hotdogb-launchd-job.py remove pstack-bb) in k0153-pstack-1107: every backboardd thread parked in
+  the kernel; the **main thread** blocked for 2+ minutes in pthread_cond_wait called from 0x1c7579d20 <- 0x1c75752e0
+  <- 0x1c7574148 (shared cache, slide 0x40718000) <- backboardd 0x104561e40 <- start. Not symbolicated yet: the
+  Mac needs ipsw and research/dsc (`ipsw extract --dyld --remote <20H392 IPSW URL>`), then tools/pstack-sym.py
+  on logs/runs/k0153-pstack-1107/pstack-bb-last.txt.
+- Next for the slider: name that wait (likely CoreBrightness waiting for something our backlight never sends).
+
 ### HOTDOGB: kernel 0151 - full-screen GPU present; a client's first GPU resets forgiven (2026-11-07)
 Run k0151-fill-1107 (`work/boot/kernel-0151` SHA-256 978b9910...7cc0, hotdogb-run-current.sh: -q -G, sweetmtl=2):
 `present: fill (crop the overhang)`; panel captures have content in rows 0 and 2399 and columns 0 and 1079
