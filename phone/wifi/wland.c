@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include "board.h"
 #include "pmem.h"
 #include "smem.h"
 #include "link.h"
@@ -356,8 +357,7 @@ static int qmp_send(const char *msg)
 /* ---- modem boot: TrustZone PAS (Linux qcom_q6v5_pas + qcom_mdt_loader) ---- */
 
 #define PAS_MODEM	4
-#define MPSS_PA		0x8dc00000ull	/* flame modem_region */
-#define MPSS_SIZE	0x0b400000ull
+/* MPSS_PA / MPSS_SIZE: the modem carve-out, board.h */
 #define FW_DIR		"/var/local/fw/modem"
 #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
 
@@ -750,6 +750,8 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IONBF, 0);	/* a stalled bus access must not swallow the output */
+	if (!strcmp(argv[1], "up") || !strcmp(argv[1], "auto") || !strcmp(argv[1], "boot"))
+		printf("wland: board %s (modem %#llx+%#llx, bdf %s)\n", BOARD_NAME, MPSS_PA, MPSS_SIZE, BDF_PATH);
 	pm_init();
 	if (smem_init())
 		return 1;

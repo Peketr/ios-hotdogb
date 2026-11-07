@@ -6,6 +6,7 @@
  * (the copy engine tables from ath10k snoc.c) and mission mode.
  */
 #include <fcntl.h>
+#include "board.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,8 +34,7 @@
 #define CLIENT_ID	0x4b4e454c	/* ath10k's */
 #define MSA_PA		0x8bc00000ull	/* pil_wlan_fw_region */
 #define MSA_SIZE	0x100000u	/* qcom,wlan-msa-memory */
-#define BDF_PATH	"/var/local/fw/modem/bdwlan-flame.bin"
-#define BDF_PATH2	"/var/local/fw/modem/bdwlan-flame-PROTO1.1.bin"
+/* BDF_PATH: the board data file, board.h */
 
 static uint32_t srv_node, srv_port;
 static int srv_up, started;

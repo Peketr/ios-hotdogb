@@ -17,17 +17,18 @@
 # ufsroot=rawdump" keeps the root read-only on rawdump (no userland).
 # -A reads the log through Android + Magisk instead (only with Android data on userdata).
 # -t IMG picks another TWRP image.
+# -q: no kernel text on screen once the GUI presents (sweetfb_noconsole=1).
 # On WSL, put tools/wsl-bin first in PATH (Windows fastboot.exe/adb.exe).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 HD=$ROOT/../hotdogb
 name=$1; shift
-kernel="" secs=600 extra="" rescue=1 android=0
+kernel="" secs=600 extra="" rescue=1 android=0 quiet=0
 twrp=$HD/downloads/twrp/twrp-3.7.0_11-0-hotdog.img
-while getopts "k:s:a:nAt:" o; do
+while getopts "k:s:a:nAt:q" o; do
 	case $o in k) kernel=$OPTARG ;; s) secs=$OPTARG ;; a) extra=$OPTARG ;; n) rescue=0 ;;
-		A) android=1 ;; t) twrp=$OPTARG ;; *) exit 2 ;; esac
+		A) android=1 ;; t) twrp=$OPTARG ;; q) quiet=1 ;; *) exit 2 ;; esac
 done
 [ "$android" = 1 ] || [ -f "$twrp" ] || { echo "no TWRP image $twrp" >&2; exit 2; }
 # -n: no rescue boot, so shim.txt is the kernel boot's own shim log (the probe
@@ -35,8 +36,9 @@ done
 [ -n "$kernel" ] || { echo "-k KERNEL required" >&2; exit 2; }
 base="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress"
 base="$base unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1"
-# On-screen console on (bring-up): no sweetfb_noconsole=1.
+# On-screen console on (bring-up) unless -q.
 base="$base wdt=-1 sweetfb_hz=60 ufslogsecs=2"
+[ "$quiet" = 0 ] || base="$base sweetfb_noconsole=1"
 cmdline="$base flamereboot=$secs $extra"
 out=$ROOT/logs/runs/$name
 mkdir -p "$out" "$ROOT/work/boot/runs"

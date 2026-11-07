@@ -11,7 +11,8 @@
 """
 import os, socket, stat, sys
 
-HOST, PORT = '127.0.0.1', 2223
+# FLAME_FILES_HOST: the phone directly, e.g. 192.168.7.2 from Windows on hotdogb (no FlameBridge)
+HOST, PORT = os.environ.get('FLAME_FILES_HOST', '127.0.0.1'), 2223
 
 
 def conn():

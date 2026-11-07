@@ -159,6 +159,9 @@ Copy the kernel to `work/boot/kernel-NNNN`, then from WSL Ubuntu:
     PATH=$PWD/tools/wsl-bin:$PATH tools/hotdogb-run.sh NAME -k work/boot/kernel-NNNN -s 300 \
         -a "rd=ufsroot0 ufsroot=rawdump sweetusb=2 sweetmtl=2"
 
+`tools/hotdogb-run-current.sh [NAME]` runs the currently recommended kernel and boot-args (updated
+with every new test).
+
 `tools/wsl-bin` runs Windows' fastboot.exe/adb.exe (WSL has no USB). Only `fastboot boot`; the
 console log reaches rawdump only with `rd=ufsroot0` (`ufsroot=rawdump`: read-only root on rawdump,
 no userland; `rd=ufsroot0 ufsrw=1 rootrw=1` without `ufsroot=` mounts the iOS root on userdata).
