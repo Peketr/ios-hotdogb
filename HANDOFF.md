@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Metal on the Adreno 640 - backboardd + SpringBoard draw through SweetMetal2 (2026-11-07)
+SweetMetal2.bundle built on the Mac (tools/setup-metal2-trees.sh: work/turnip, work/metal2vulkan, work/UniXNU;
+then build-turnip-ios.sh, build-m2v-bridge.sh, phone/metal2/build.sh; tgz SHA-256 569d91f0...72b6), installed
+with the new `tools/hotdogb-metal2-install.py` (file server, no ssh). Kernel 0150, `hotdogb-run-current.sh`
+(-q -G, sweetmtl=2). Three runs:
+- k0150-metal2-1107-1427: both refused the device: `ShaderCache ... /var/local/m2v-cache/<proc>: Permission
+  denied` (they run as mobile, the folder did not exist). The installer now makes /var/local/m2v-cache/<proc> 777.
+- k0150-metal2-1107-1429: `device Turnip Adreno (TM) 640` in backboardd (1.4 s) and SpringBoard (1.9 s), 47
+  render pipelines compiled, lock screen drawn - then at 57.5 s `GPU hang or fault (fence 44, done 35, smmu fsr 2
+  far 0 fsynr0 70002)`, 1.7 s after CollectionsPoster made the wallpaper's surfaces (1105x1160 420f = the Head
+  layer). Recovery works, but the lost fences raise the client's `faults` count, Turnip calls the device lost,
+  backboardd never submits again: the panel kept the first fade-in frame (max pixel value 1 - looked black).
+- k0150-metal2png-1107-1505: the default wallpaper's 5 HEIC layers (WWDC 2022, 375w-812h) replaced with PNG
+  data (`tools/hotdogb-wallpaper-png.py`; originals in /var/local/wallpaper-heic-backup and ../hotdogb/wallpaper/heic;
+  the flame's 2026-10-21 workaround). **No GPU fault in 954 s**; lock screen, Settings, Safari chrome drawn by
+  Metal; up to 53.8 fps; pool peak 422 MB; backboardd 195-212 submits per 5 s while in use.
+Open: Safari's web content black (com.apple.WebKit.GPU and MobileSafari are not in /var/local/mtl2-clients);
+the fault itself (a 420f/HEIC surface makes the GPU read address 0 - should fail cleanly, not fault); a Metal
+device that survives a GPU reset; settings list rows looked torn in one capture mid-scroll.
+
 ### HOTDOGB: double home indicator = stale CPU-copy margins; 0150 clears them (2026-11-07)
 User saw edges cut and a double navbar in run k0149-gpu-1107-1336. Panel memory read over the file server
 (`flame-files.py read /dev/pmem 0x9c000000 4352*2400`, logs/runs/k0149-gpu-1107-1336/panel-*.png): the GPU

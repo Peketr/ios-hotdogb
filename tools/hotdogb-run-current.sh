@@ -13,11 +13,13 @@
 # ../hotdogb/fw/gpu; 0149 = the 7T's zap shader region, 0150 = margins cleared after CPU-copy frames). iOS root on userdata read-write, with wland
 # (Wi-Fi at boot, log /var/local/wland.log) and oslog-wifid (/var/local/oslog-wifid.log) launchd jobs.
 # No kernel text on screen once the GUI presents (-q), 900 s, live log only. Wi-Fi off: sweetwifi=0.
+# Metal: sweetmtl=2 with SweetMetal2.bundle (metal2vulkan + Turnip) in /System/Library/Extensions, installed by
+# tools/hotdogb-metal2-install.py; its log is /var/local/mtl2.log. Without the bundle: drop sweetmtl=2.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KERNEL=work/boot/kernel-0150
-TAG=k0150-gpu
+TAG=k0150-metal2
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"
