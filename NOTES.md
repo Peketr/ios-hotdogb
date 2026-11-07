@@ -148,3 +148,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0149 hotdogb: zap shader region 0x99515000 (dtbo overlay 3); `zap: region` logged.
 - 0150 GPU present: after a CPU-copy frame (multi-layer), the next GPU frame clears the panel outside its
   fitted rectangle (stale status bar/home indicator in the margins); CPU fallbacks counted per 5 s.
+- 0151 GPU present fills the panel (`sweetfb_fill`, default 1; 0 = fit with bars): scaled by the larger factor,
+  overhang cropped (hotdogb: source columns 14..1109 -> 1080x2400), touch mapped through the whole frame's
+  rectangle (-14,0 1109x2400). v2 clients: the first `sweetgpuforgive` (default 3) GPU resets that lost their
+  work are not reported as faults (Turnip's DeviceLost froze backboardd for good).

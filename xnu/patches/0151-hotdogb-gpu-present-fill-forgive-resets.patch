@@ -1,0 +1,196 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -49,7 +49,7 @@
+ int sweet_gpu_surface_slot(uint64_t key);
+ int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+-	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
++	uint32_t fb_pitch, uint32_t corner_radius, int32_t *out_dx, int32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh);
+ void sweet_gpu_panel_stride(uint32_t stride);
+ int sweet_gpu_map_user(uint64_t *iova_out, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+@@ -581,7 +581,7 @@
+ }
+ 
+ /*
+- * Blit a mapped surface, scaled to fit and centred, into the panel memory
++ * Blit a mapped surface, scaled to fill (or fit) and centred, into the panel memory
+  * (rows of fb_pitch bytes). With corner_radius, the image gets continuous
+  * corners: the rows they cover go to a staging image in the pool first (same
+  * blit, scissored), get the mattes blended over, and only then reach the
+@@ -591,7 +591,7 @@
+  */
+ int
+ sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+-	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
++	uint32_t fb_pitch, uint32_t corner_radius, int32_t *out_dx, int32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh)
+ {
+ 	if (!gpu_ready || s < 0 || s >= SLOTS || !slot[s].npages || w == 0 || h == 0 ||
+@@ -609,16 +609,56 @@
+ 		.src_iova = SLOT_IOVA(s) + offset, .src_w = w, .src_h = h, .src_pitch = pitch,
+ 		.sw = w, .sh = h, .dst_iova = A6_GVA_FB, .dst_pitch = fb_pitch, .filter = true,
+ 	};
+-	/* Fit: full height unless the frame is relatively wider than the panel. */
+-	if ((uint64_t)w * PANEL_H <= (uint64_t)PANEL_W * h) {
++	/*
++	 * 0151 fill (boot-arg sweetfb_fill, default 1): the frame covers the whole panel like the CPU copy, scaled
++	 * by the larger factor and its overhang cropped evenly (hotdogb: 1125x2436 -> source columns 14..1109 onto
++	 * 1080x2400, 0.985; the CPU copy crops 22 columns and 18 rows each side 1:1). The rectangle handed back is
++	 * where the whole frame lies (past the panel's edges), so touch maps 1:1 to iOS's coordinates.
++	 * Fit (sweetfb_fill=0): full height unless the frame is relatively wider than the panel, centred, bars.
++	 */
++	static int fill = -1;
++	if (fill < 0) {
++		uint32_t v = 1;
++		PE_parse_boot_argn("sweetfb_fill", &v, sizeof(v));
++		fill = v != 0;
++		a6_log("present: %s\n", fill ? "fill (crop the overhang)" : "fit (bars)");
++	}
++	int32_t vx, vy;
++	uint32_t vw, vh;
++	if (fill) {
++		frame.dx = frame.dy = 0;
++		frame.dw = PANEL_W;
+ 		frame.dh = PANEL_H;
+-		frame.dw = (uint32_t)(((uint64_t)w * PANEL_H + h / 2) / h);
++		if ((uint64_t)w * PANEL_H <= (uint64_t)PANEL_W * h) {
++			/* relatively taller: full width, rows cropped */
++			frame.sh = (uint32_t)(((uint64_t)PANEL_H * w + PANEL_W / 2) / PANEL_W);
++			frame.sh = frame.sh > h ? h : (frame.sh ? frame.sh : 1);
++			frame.sy = (h - frame.sh) / 2;
++		} else {
++			/* relatively wider: full height, columns cropped */
++			frame.sw = (uint32_t)(((uint64_t)PANEL_W * h + PANEL_H / 2) / PANEL_H);
++			frame.sw = frame.sw > w ? w : (frame.sw ? frame.sw : 1);
++			frame.sx = (w - frame.sw) / 2;
++		}
++		vw = (uint32_t)(((uint64_t)w * PANEL_W + frame.sw / 2) / frame.sw);
++		vh = (uint32_t)(((uint64_t)h * PANEL_H + frame.sh / 2) / frame.sh);
++		vx = -(int32_t)(((uint64_t)frame.sx * PANEL_W + frame.sw / 2) / frame.sw);
++		vy = -(int32_t)(((uint64_t)frame.sy * PANEL_H + frame.sh / 2) / frame.sh);
+ 	} else {
+-		frame.dw = PANEL_W;
+-		frame.dh = (uint32_t)(((uint64_t)h * PANEL_W + w / 2) / w);
++		if ((uint64_t)w * PANEL_H <= (uint64_t)PANEL_W * h) {
++			frame.dh = PANEL_H;
++			frame.dw = (uint32_t)(((uint64_t)w * PANEL_H + h / 2) / h);
++		} else {
++			frame.dw = PANEL_W;
++			frame.dh = (uint32_t)(((uint64_t)h * PANEL_W + w / 2) / w);
++		}
++		frame.dx = (PANEL_W - frame.dw) / 2;
++		frame.dy = (PANEL_H - frame.dh) / 2;
++		vx = (int32_t)frame.dx;
++		vy = (int32_t)frame.dy;
++		vw = frame.dw;
++		vh = frame.dh;
+ 	}
+-	frame.dx = (PANEL_W - frame.dw) / 2;
+-	frame.dy = (PANEL_H - frame.dh) / 2;
+ 	uint32_t ext = corner_radius ? sweet_display_corner_extent(corner_radius) : 0;
+ 	if (ext > DISPLAY_MASK_SIDE || 2 * ext >= frame.dw || 2 * ext >= frame.dh) {
+ 		ext = 0;
+@@ -704,10 +744,10 @@
+ 		    c / 1000 / 300, g / 1000 / 300);
+ 		stat_clean_abs = stat_gpu_abs = 0;
+ 	}
+-	*out_dx = frame.dx;
+-	*out_dy = frame.dy;
+-	*out_dw = frame.dw;
+-	*out_dh = frame.dh;
++	*out_dx = vx;
++	*out_dy = vy;
++	*out_dw = vw;
++	*out_dh = vh;
+ 	return rc;
+ }
+ 
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -148,6 +148,7 @@
+ 	uint32_t fBOCap;
+ 	uint64_t *fPageBuf;
+ 	uint64_t fEpoch, fFaults;       /* GPU resets seen; those that lost this client's work */
++	uint32_t fLosses;               /* 0151: resets that lost its work, forgiven or not */
+ 	uint64_t fPoolBytes, fPoolPeak; /* GPU pool memory this client holds */
+ 	char fName[32];
+ 	bool fSystem;                   /* backboardd / SpringBoard: no pool cap, and the reserve is theirs */
+@@ -863,7 +864,26 @@
+ 	case NativeAdrenoMethodGetStatus: {
+ 		V2_OUT(NativeAdrenoAbiStatus);
+ 		if (sweet_gpu_lost(&fEpoch, fLastFence)) {
+-			fFaults++;
++			/*
++			 * 0151: a changed fault count is VK_ERROR_DEVICE_LOST in Turnip, for good: backboardd then draws
++			 * nothing until it restarts (the panel keeps its last frame). The reset already completed the lost
++			 * fences, so the client can go on (that work's output is stale for a frame): the first
++			 * sweetgpuforgive (default 3) losses per client are not reported, later ones are.
++			 */
++			static uint32_t forgive = 0xffffffffu;
++			if (forgive == 0xffffffffu) {
++				uint32_t v = 3;
++				PE_parse_boot_argn("sweetgpuforgive", &v, sizeof(v));
++				forgive = v == 0xffffffffu ? v - 1 : v;
++			}
++			fLosses++;
++			if (fLosses > forgive) {
++				fFaults++;
++				IOLog("SWEET MTL: v2 %s: a GPU reset lost its work (%u times): device lost\n", fName, fLosses);
++			} else {
++				IOLog("SWEET MTL: v2 %s: a GPU reset lost its work (%u of %u forgiven, device kept)\n", fName,
++				    fLosses, forgive);
++			}
+ 		}
+ 		rp->faults = fFaults;
+ 		return kIOReturnSuccess;
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -45,7 +45,7 @@
+ int sweet_gpu_surface_slot(uint64_t key);
+ int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+-	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
++	uint32_t fb_pitch, uint32_t corner_radius, int32_t *out_dx, int32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh);
+ void sweet_gpu_panel_stride(uint32_t stride);
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+@@ -475,11 +475,12 @@
+ }
+ 
+ /*
+- * One full-frame BGRA layer (what backboardd swaps): the GPU scales the whole
+- * iOS frame (1125x2436) to fit the panel (flame: 1053x2280 at x 13; hotdogb: 1080x2338 at y 31), instead of the
+- * CPU copying its centre (cropping the status bar and home indicator). The
+- * first time, the panel switches to the GPU's row stride and is cleared, so
+- * the bars stay black. False: use the CPU copy.
++ * One full-frame BGRA layer (what backboardd swaps): the GPU scales the iOS
++ * frame (1125x2436) to fill the panel, cropping the overhang (0151, default;
++ * hotdogb: 14 source columns each side); sweetfb_fill=0 fits it with bars
++ * instead (flame: 1053x2280 at x 13; hotdogb: 1080x2338 at y 31).
++ * The first time, the panel switches to the GPU's row stride and is cleared,
++ * so bars stay black. False: use the CPU copy.
+  */
+ bool
+ AppleCLCD::presentGPU(const uint8_t *rec)
+@@ -543,7 +544,8 @@
+ 		IOLockUnlock(fLock);
+ 		IOLog("SWEET FB: frames now scaled to fit by the GPU (panel stride %u)\n", fRowBytes);
+ 	}
+-	uint32_t dx = 0, dy = 0, dw = 0, dh = 0;
++	int32_t dx = 0, dy = 0;         /* 0151: negative when filling (the frame reaches past the panel) */
++	uint32_t dw = 0, dh = 0;
+ 	int rc = sweet_gpu_present(slot, s->kernelAddress(), s->offset, s->width, s->height, s->bytesPerRow,
+ 	    fRowBytes, fCornerRadius, &dx, &dy, &dw, &dh);
+ 	s->release();
+@@ -552,7 +554,9 @@
+ 	}
+ 	if (sweet_fb_margins_dirty) {
+ 		sweet_fb_margins_dirty = false;
+-		sweet_fb_clear_outside(fPixels, fRowBytes, fWidth, fHeight, dx, dy, dw, dh);
++		if (dx >= 0 && dy >= 0) {       /* filling leaves no margins */
++			sweet_fb_clear_outside(fPixels, fRowBytes, fWidth, fHeight, (uint32_t)dx, (uint32_t)dy, dw, dh);
++		}
+ 	}
+ 	sweet_display_fit_x = (int)dx;
+ 	sweet_display_fit_y = (int)dy;
