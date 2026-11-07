@@ -5,6 +5,25 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: double home indicator = stale CPU-copy margins; 0150 clears them (2026-11-07)
+User saw edges cut and a double navbar in run k0149-gpu-1107-1336. Panel memory read over the file server
+(`flame-files.py read /dev/pmem 0x9c000000 4352*2400`, logs/runs/k0149-gpu-1107-1336/panel-*.png): the GPU
+frames are right (1080x2339 at y 31, full width, corners), but a second home indicator sits at row ~2384
+(and status-bar icons in the top band) - outside the GPU rectangle. Log: `GPU present not used: not exactly
+one layer` (46.9 s): multi-layer frames (transitions) take the CPU copy, which crops 1125x2436 to the panel
+(the cut edges while it shows) and writes the bands the GPU frames never repaint. 0150: the next GPU frame
+clears outside its rectangle; `CPU fallbacks` per 5 s in the SWEET FB stats line. Not built yet. The real fix
+for the cropped frames themselves: multi-layer frames on the GPU (later).
+
+### HOTDOGB: kernel 0149 - the Adreno 640 runs and presents every frame (2026-11-07)
+Run k0149-gpu-1107-1336 (`work/boot/kernel-0149` SHA-256 3fc5bbde...ea48, `hotdogb-run-current.sh`: -q -G,
+900 s, root rw). GPU firmware from the 7T's vendor_a (/firmware: a640_gmu.bin 37680, a630_sqe.fw 32304,
+a640_zap.mdt 6860 + b00/b01/b02; zap code segment relocatable, 0x7b0 bytes) in ../hotdogb/fw/gpu.
+Observed: `panel stride 4352`, iOS's surfaces mapped (slots 0/1), 300 frames presented by GPU blit
+(17 us blit, 622 us cache clean), 35-106 submits per 5 s, 0 missed, no panic. The bring-up itself (GMU,
+zap) runs before the USB log starts. Not yet: Metal on the GPU - SweetMetal2.bundle (phone/metal2 +
+tools/build-turnip-ios.sh, Mac) is not on this root; no Metal client opened the accelerator.
+
 ### HOTDOGB: why wifid does not auto-join; GPU bring-up started (2026-11-07)
 - **Auto-join**: run k0148-oslog-wifid with `oslog -l wifid` as a launchd job (tools/hotdogb-launchd-job.py,
   oslog from phone/tools; log /var/local/oslog-wifid.log). wifid has the network in "List of known networks",

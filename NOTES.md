@@ -145,3 +145,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   milestones (`####`). Kernel 0146: touchscreen works over GPI DMA, 443 reports, HID events sent.
 - 0148 hotdogb: read-only raw partition reads over the file server (`PARTS`, `PART name off len`; any
   GPT partition on LUN 0-7), writes refused off the home LUN. For firmware without Android/TWRP.
+- 0149 hotdogb: zap shader region 0x99515000 (dtbo overlay 3); `zap: region` logged.
+- 0150 GPU present: after a CPU-copy frame (multi-layer), the next GPU frame clears the panel outside its
+  fitted rectangle (stale status bar/home indicator in the margins); CPU fallbacks counted per 5 s.

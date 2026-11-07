@@ -123,6 +123,11 @@ after 0125; set 0, or build with `-DSWEET_HOTDOGB=0`, for flame).
   name offset len` streams one read-only (`flame-files.py parts` / `part NAME LOCAL`). sweet_ufs.c moves
   su.lun only inside these reads, under its lock; writes are refused unless su.lun is the home LUN 0, and
   the panic flush resets it. `tools/hotdogb-fw-pull.py` uses it for the modem firmware and EFS partitions.
+- **0149 GPU zap region**: 0x99515000 on hotdogb (dtbo overlay 3 moved pil_gpu_region); with `hotdogb-run.sh -G`
+  (sweetgpu=1 + the 7T's own GPU firmware from vendor_a) the A640 presents every frame (run k0149-gpu-1107-1336).
+- **0150 GPU present margins**: multi-layer frames fall back to the CPU copy, which crops 1125x2436 to the
+  panel and writes the bands outside the GPU's fitted 1080x2339 (status bar, home indicator); GPU frames never
+  repainted them (double home indicator, seen in a panel capture). Now the next GPU frame clears them.
 
 Reference sources for the touch path (read-only, not vendored):
 - OnePlusOSS/android_kernel_oneplus_sm8150 `oneplus/SM8150_R_10.0`: arch/arm64/boot/dts/qcom/sm8150-qupv3.dtsi

@@ -1,0 +1,88 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -252,6 +252,15 @@
+ }
+ 
+ static uint64_t sweet_fb_swap_count;
++/*
++ * 0150: frames the CPU copy took while the panel is in GPU mode (multi-layer
++ * frames during transitions). That copy crops the iOS frame to the panel and
++ * writes the bands outside the GPU's fitted rectangle (status bar, home
++ * indicator), which the GPU frames never repaint: the next GPU frame clears
++ * them. Counted per 5 s in the stats line.
++ */
++static uint32_t sweet_fb_gpu_fallbacks, sweet_fb_gpu_fallbacks_logged;
++static bool sweet_fb_margins_dirty;
+ 
+ void
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -278,9 +287,11 @@
+ 		uint64_t swaps = sweet_fb_swap_count - fb->fStatSwaps, ns = 0;
+ 		absolutetime_to_nanoseconds(fb->fStatPresentAbs, &ns);
+ 		if (swaps || fb->fStatPresents) {
+-			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us\n",
++			uint32_t fallbacks = sweet_fb_gpu_fallbacks - sweet_fb_gpu_fallbacks_logged;
++			sweet_fb_gpu_fallbacks_logged = sweet_fb_gpu_fallbacks;
++			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us, %u CPU fallbacks\n",
+ 			    swaps, swaps / 5, (swaps * 2) % 10, fb->fStatPresents,
+-			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0);
++			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0, fallbacks);
+ 		}
+ 		fb->fStatSwaps = sweet_fb_swap_count;
+ 		fb->fStatPresents = 0;
+@@ -390,6 +401,33 @@
+ 
+ static uint32_t sweet_fb_gpu_why_logged;
+ 
++/* Black everywhere outside the rectangle (x, y, w, h) of a W x H panel with rb-byte rows. */
++static void
++sweet_fb_clear_outside(uintptr_t pix, uint32_t rb, uint32_t W, uint32_t H, uint32_t x, uint32_t y, uint32_t w,
++    uint32_t h)
++{
++	if (w == 0 || h == 0 || x > W || y > H || w > W - x || h > H - y) {
++		return;
++	}
++	if (y) {
++		bzero((void *)pix, (size_t)y * rb);
++	}
++	if (y + h < H) {
++		bzero((void *)(pix + (uint64_t)(y + h) * rb), (size_t)(H - y - h) * rb);
++	}
++	if (x || x + w < W) {
++		for (uint32_t row = y; row < y + h; row++) {
++			uint32_t *line = (uint32_t *)(pix + (uint64_t)row * rb);
++			if (x) {
++				bzero(line, (size_t)x * 4);
++			}
++			if (x + w < W) {
++				bzero(line + x + w, (size_t)(W - x - w) * 4);
++			}
++		}
++	}
++}
++
+ /* Why presentGPU fell back to the CPU copy, logged once per reason. */
+ static bool
+ gpu_fallback(uint32_t why, const char *what)
+@@ -512,6 +550,10 @@
+ 	if (rc) {
+ 		return gpu_fallback(7, "GPU blit failed");
+ 	}
++	if (sweet_fb_margins_dirty) {
++		sweet_fb_margins_dirty = false;
++		sweet_fb_clear_outside(fPixels, fRowBytes, fWidth, fHeight, dx, dy, dw, dh);
++	}
+ 	sweet_display_fit_x = (int)dx;
+ 	sweet_display_fit_y = (int)dy;
+ 	sweet_display_fit_w = (int)dw;
+@@ -538,6 +580,10 @@
+ 	if (sweet_gpu_ready() && presentGPU(rec)) {
+ 		return;
+ 	}
++	if (fGPU) {
++		sweet_fb_margins_dirty = true;  /* 0150: the CPU copy below writes the GPU frame's margins */
++		sweet_fb_gpu_fallbacks++;
++	}
+ 	if (sweet_display_fit_w) {
+ 		sweet_display_fit_w = 0;        /* touch back to the crop mapping */
+ 		sweet_display_fit_x = sweet_display_fit_y = sweet_display_fit_h = 0;

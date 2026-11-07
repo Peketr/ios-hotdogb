@@ -18,3 +18,4 @@
 0147 FINGERS DOWN AT ONCE
 0148 SWEET FILES: PARTS
 0149 zap: region %#llx
+0150 CPU fallbacks
