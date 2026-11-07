@@ -17,7 +17,14 @@ T=$W/turnip
 MESA_COMMIT=85fda3b36405bcaea8bffc64aa4f2651dc90770d
 M2V_COMMIT=720ef1ce
 UNIXNU_DATE=2026-10-22T04:00
-mkdir -p "$W" "$T"
+echo "== tree $ROOT"
+ls -ld "$W" 2>&1 | sed 's/^/   /'
+if [ -L "$W" ] && [ ! -d "$W" ]; then
+	echo "work is a symlink to $(readlink "$W"), which is not there: create that folder or remove the link" >&2
+	exit 1
+fi
+[ ! -e "$W" ] || [ -d "$W" ] || { echo "$W exists but is not a folder" >&2; exit 1; }
+mkdir -p "$T" || { echo "cannot create $T (see the work line above)" >&2; exit 1; }
 
 echo "== host tools"
 missing=()
