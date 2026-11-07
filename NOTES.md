@@ -156,3 +156,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   DSI0's command DMA (0xae94000), packet in ABL's display carve-out (0x9e300000; kernel RAM is above 4 GiB);
   AppleARMBacklight (backlight-control) for CoreBrightness; IOMFBBrightnessLevel nits 16.16 -> 1..0x3ff at
   500 nits; level 0 while the display is off. Boot-arg `sweetbl` (default 1 with sweetmtl, else 0).
+- 0153 framebuffer and backlight setProperties: every key logged (`SWEET BL: PROC iomfb|backlight set KEY`, first
+  4 per key then every 200th), stored and accepted (0152 refused all but IOMFBBrightnessLevel, unlogged; with the
+  backlight service the UI fell to 0.2-0.4 fps and no brightness arrived).
