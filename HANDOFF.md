@@ -12,8 +12,11 @@ frames are right (1080x2339 at y 31, full width, corners), but a second home ind
 (and status-bar icons in the top band) - outside the GPU rectangle. Log: `GPU present not used: not exactly
 one layer` (46.9 s): multi-layer frames (transitions) take the CPU copy, which crops 1125x2436 to the panel
 (the cut edges while it shows) and writes the bands the GPU frames never repaint. 0150: the next GPU frame
-clears outside its rectangle; `CPU fallbacks` per 5 s in the SWEET FB stats line. Not built yet. The real fix
-for the cropped frames themselves: multi-layer frames on the GPU (later).
+clears outside its rectangle; `CPU fallbacks` per 5 s in the SWEET FB stats line. The real fix for the cropped
+frames themselves: multi-layer frames on the GPU (later).
+Kernel 0150 (`work/boot/kernel-0150` SHA-256 a94174de...0b61), run k0150-gpu-1107-1346: 4 CPU fallbacks in
+the first minute (start-up), then GPU only; panel capture: rows 0-29 and 2369-2399 all black (the frame is
+rows 30-2368), one home indicator.
 
 ### HOTDOGB: kernel 0149 - the Adreno 640 runs and presents every frame (2026-11-07)
 Run k0149-gpu-1107-1336 (`work/boot/kernel-0149` SHA-256 3fc5bbde...ea48, `hotdogb-run-current.sh`: -q -G,
