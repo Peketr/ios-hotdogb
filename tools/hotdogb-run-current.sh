@@ -9,14 +9,15 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-07): kernel 0148 (raw partition reads for the Wi-Fi firmware) with the iOS root
-# on userdata mounted read-write, no kernel text on screen once the GUI presents (-q), 900 s (time
-# for python tools\hotdogb-fw-pull.py during the run), live log only (no TWRP).
+# Current (2026-11-07): kernel 0148 with the iOS root on userdata mounted read-write; the root now has
+# wland + the OnePlus modem/WLAN firmware and the launchd job org.iosonpixel.wland (`wland auto` at boot:
+# modem boot, WLFW, scan; log /var/local/wland.log - flame-files.py get). No kernel text on screen once
+# the GUI presents (-q), 900 s, live log only (no TWRP). Wi-Fi off for a run: boot-arg sweetwifi=0.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KERNEL=work/boot/kernel-0148
-TAG=k0148-root
+TAG=k0148-wifi
 SECS=900
 OPTS=(-q)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2"

@@ -233,6 +233,10 @@ modemr.jsn + modemuw.jsn (the adsp/cdsp/slpi .jsn are left out, as on flame), bd
 data; 34 board-specific bdwlan.bNN also there); modemst1/modemst2/fsg/fsc from LUN 5. Installed on the
 iOS root with `python tools/hotdogb-wifi-install.py --no-job` (read back and compared).
 
+Working (run k0148-wifi-3): the launchd job starts `wland auto` (~33 s), the radio scans ~24 s later; join from
+Settings, configd's DHCP on en0 (needs a Wi-Fi network service in configd's preferences.plist: the root image
+has none - HANDOFF "Wi-Fi works end to end"). Network names show up in wland.log/live.txt: keep logs out of git.
+
 ## Next
 
 1. Build 0126 on macOS (darwin-xnu-build once, then `tools/build-xnu.sh`), boot with

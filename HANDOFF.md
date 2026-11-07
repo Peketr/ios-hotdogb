@@ -5,6 +5,33 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Wi-Fi works end to end - joined from Settings, DHCP, real traffic (2026-11-07)
+Run k0148-wifi-3 (kernel 0148, wland job, root rw): the user picked the network in Settings, typed the
+password and pressed Join; wifid ASSOCIATE -> wland WPA2 4-way handshake -> link up (422.6 s) -> configd's
+DHCP on en0: 10.0.0.120, default route 10.0.0.1 (425.98 s, 3.4 s after the link); 90 s later en0 had sent
+25303 frames (2.2 MB) and received 36882 (52 MB), nothing dropped.
+- The fix that made DHCP happen: the root image's /var/preferences/SystemConfiguration/preferences.plist had
+  host names only and no network services (as on flame, HANDOFF "WiFi IN SETTINGS"), so configd never ran
+  DHCP on en0 (run k0148-wifi-1: joined, 0 frames sent). Removing it is not enough on hotdogb: configd starts
+  at ~29 s, en0 only appears at ~69 s (after wland), and configd recreated host names only. Now: a hand-made
+  preferences.plist with one Wi-Fi service (en0, AirPort, DHCP, IPv6 automatic) in an "Automatic" set
+  (copy: ../hotdogb/fw/sc-preferences-wifi.plist; original on the phone as preferences.plist.pre-wifi).
+- Open: (1) wifid did not rejoin by itself after a reboot (run k0148-wifi-2/3 needed the manual join; no
+  com.apple.wifi.known-networks.plist was written before) - check on the next boot. (2) wlan.conf as the
+  boot-time fallback is not set (the user writes it). (3) sweet-root-tweaks.py should write this
+  preferences.plist for new root images.
+
+### HOTDOGB: Wi-Fi radio works - wland boots the OnePlus modem, WLFW, scan finds 29 networks (2026-11-07)
+Run k0148-wifi-1 (kernel 0148, root rw, launchd job `wland auto`; wland-hotdogb with MPSS 0x8dc00000+0xa000000):
+wland starts at 32.8 s; SMMU 0x640 -> CB5 via SMR4; WLAN regulators + rfclka2 + QDSS; PAS init/mem setup/
+auth-and-reset all 0; modem ready at once; GLINK + QRTR + rmtfs (modemst1/2, fsg) + pd-mapper + TFTP;
+wlanmdsp.mbn over TFTP (~7 s); WLFW: chip 0x30224, fw WLAN.HL.3.0.c8-00232, board 0 -> bdwlan.bin (26328
+bytes) accepted, FW READY, mission mode; CE rings at 0xe0000000, HTC/WMI/HTT ready, passive scan: 29
+networks (2.4 + 5 GHz) about 24 s after wland started. `bridge: hello: the kernel makes en0`. Not served
+(harmless so far): rmtfs `/oem/nvbk/static`, `/oem/nvbk/dynamic`, `/oppo/oem_partion` (OnePlus NV backups,
+LUN 0 oem_stanvbk/oem_dycnvbk), TFTP mcfg mbn_hw.dig/mbn_sw.dig. Next: join (/var/local/wlan.conf, written
+by the user) and DHCP; then whether wifid/Settings shows the scan list.
+
 ### HOTDOGB: kernel 0148 works; Wi-Fi firmware pulled and installed (2026-11-07)
 Run k0148-root-1107-1211 (kernel-0148 SHA-256 6ddd1584...0ec6, 900 s, root rw, -q): PARTS lists 118 partitions
 on LUN 0-5; PART read modem_a (LUN 4, 300 MB in ~4 min) and modemst1/modemst2/fsg/fsc (LUN 5), plus dtbo_a.
