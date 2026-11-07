@@ -165,3 +165,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   node's properties: CoreBrightness's DisplayCreateWithID failed without IODisplayParameters ("failed to create
   DisplayRef"), so libEDR's server never started and CA's EDRClient stalled every frame. A set IODisplayParameters
   brightness value (0..65536) maps to 0..500 nits. Still only with sweetbl=2.
+- 0156 brightness slider: CoreBrightness sets "backlight-level" (= "brightness") 0..65536 of its hardware maximum
+  per slider step (slider 0.505 -> 10709): mapped linearly to panel level 1..0x3ff; the framebuffer's
+  IOMFBBrightnessLevel (it sets 0 there) is ignored while the service exists. The service is now the default
+  with sweetmtl (sweetbl default 2; 1 = panel off/on only, 0 = nothing).

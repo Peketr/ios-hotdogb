@@ -1,0 +1,70 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -169,6 +169,7 @@
+ 	volatile uint32_t *fDsiCmd;             /* the command packet (device memory) */
+ 	IOLock       *fBlLock;                  /* one DCS command at a time */
+ 	uint32_t      fBlLevel;                 /* panel level 1..SWEET_BL_MAX_LEVEL, kept while the display is off */
++	bool          fBlService;               /* 0156: AppleARMBacklight published: it alone sets the level */
+ 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ 	bool          dsiDcsWrite(const uint8_t *payload, uint32_t len);
+ 	void          setPanelLevel(uint32_t level);
+@@ -302,7 +303,7 @@
+ 	 */
+ 	uint32_t mtl = 0, bl;
+ 	PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
+-	bl = mtl ? 1 : 0;
++	bl = mtl ? 2 : 0;       /* 0156: the service by default with Metal (0155 fixed its stall, 0156 the levels) */
+ 	PE_parse_boot_argn("sweetbl", &bl, sizeof(bl));
+ 	if (bl && fBlLock != NULL) {
+ 		fDsi = (volatile uint8_t *)ml_io_map((vm_offset_t)SWEET_DSI0_PA, 0x1000);
+@@ -326,6 +327,7 @@
+ 			if (bls->attach(this)) {
+ 				bls->registerService();
+ 				IOLog("#### BRIGHTNESS CONTROL PUBLISHED (AppleARMBacklight)\n");
++				fBlService = true;
+ 			}
+ 		}
+ 		OSSafeReleaseNULL(bls);
+@@ -756,7 +758,7 @@
+ 	}
+ 	OSNumber *n = OSDynamicCast(OSNumber, d->getObject("IOMFBBrightnessLevel"));
+ 	sweet_bl_store(this, d);
+-	if (n != NULL && fDsi != NULL) {
++	if (n != NULL && fDsi != NULL && !fBlService) {  /* 0156: with the service, CoreBrightness sets 0 here */
+ 		setBrightnessNits(n->unsigned64BitValue());
+ 	}
+ 	return kIOReturnSuccess;
+@@ -845,9 +847,31 @@
+ 		OSSafeReleaseNULL(brc);
+ 		OSSafeReleaseNULL(copy);
+ 	}
+-	if (n != NULL && fFB != NULL) {
++	/*
++	 * 0156: what CoreBrightness actually drives, per slider step (k0155-bl2-1107): "backlight-level" and
++	 * "brightness", equal, 0..65536 of the hardware maximum (light, not slider position: slider 0.505 sent 10709).
++	 * Its brightness-nits is in the same 16.16 unit of a 1.0 hardware maximum (it reads no calibration from us),
++	 * so it is used only when no backlight-level comes with it.
++	 */
++	OSNumber *lv = d ? OSDynamicCast(OSNumber, d->getObject("backlight-level")) : NULL;
++	if (lv == NULL && d != NULL) {
++		lv = OSDynamicCast(OSNumber, d->getObject("brightness"));
++	}
++	if (lv != NULL && fFB != NULL) {
++		uint64_t v = lv->unsigned64BitValue();
++		v = v > 65536 ? 65536 : v;
++		static bool first = true;
++		if (first) {
++			first = false;
++			IOLog("#### BRIGHTNESS FROM IOS: backlight-level %llu of 65536\n", v);
++		}
++		fFB->setBrightnessNits(v * SWEET_BL_MAX_NITS);         /* (v / 65536 * max nits) in 16.16 */
++	} else if (n != NULL && fFB != NULL) {
+ 		uint64_t v = n->unsigned64BitValue();
+-		fFB->setBrightnessNits(v < 0x10000 ? v << 16 : v);     /* plain nits or 16.16 */
++		v = v > 65536 ? 65536 : v;
++		fFB->setBrightnessNits(v * SWEET_BL_MAX_NITS);
++	}
++	if (n != NULL) {
+ 		setProperty("brightness-nits", n);
+ 	}
+ 	return kIOReturnSuccess;

@@ -24,3 +24,4 @@
 0153 SWEET BL: %s %s set %s
 0154 sweetbl=2 publishes it
 0155 properties from the device tree's /backlight
+0156 BRIGHTNESS FROM IOS: backlight-level
