@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: 0147 - fast touch start-up, multi-touch and HID milestones (2026-11-07)
+- Input path already exists: s3_report -> sweet_hid_touch -> SweetHIDTouch (SweetHID.cpp), panel pixels;
+  the S3706 reports panel pixels too (DT touchpanel,panel-coords 1079x2399). In k0146-first SweetHID
+  logged 24 touch down/up events; no userland was running (no root), so no HID client yet.
+- **0147** (written, syntax-checked, NOT built/run): the 2.5 s pauses after GPI debug lines only with
+  `hdgpidbg=1` (touch up ~22 s after boot instead of ~132 s; `hdtouchlog=1` still logs); milestones
+  `#### FIRST TOUCH`, `#### MULTI-TOUCH: N FINGERS DOWN AT ONCE`, `#### HID ... OPENED BY ... (IOS IS
+  LISTENING)`, `#### FIRST TOUCH EVENT SENT TO IOS HID (N CLIENTS)`.
+- Proving iOS receives touches needs a userland root (backboardd opening SweetHIDTouch); the rawdump
+  log setup has none.
+
+### HOTDOGB: kernel 0146 - TOUCHSCREEN WORKS over GPI DMA (2026-11-07)
+Kernel 0146 (`work/boot/kernel-0146`, SHA-256 afd2d225...72e7, logs/runs/k0146-first, normal path with
+`hdtouchlog=1`): mapping the QUP wrapper 2 data stream 0x7a3 fixed the reset. Transfers 0-2 complete with
+events, PDT scan finds F34/F01/F12 on page 0 and F54 on page 1, F01 status 0x81 (post-reset, then
+configured: ctrl0 0 -> 0x84), irq enable 0x7f, F12 10 objects, `#### TOUCHSCREEN RUNNING` at 132 s.
+443 touch reports between 193 s and 214 s (one finger, x 60-1066, y 867-2092), no read errors, ran 300 s.
+- Next: drop the 2.5 s GPIDBG waits on the normal path (start-up takes ~100 s with hdtouchlog=1), check
+  multi-touch, and feed the reports into the HID/input side.
+
 ### HOTDOGB: kernel 0145 - probe 5 works, probe 4 resets: unmapped QUP2 data stream 0x7a3; 0146 (2026-11-07)
 Kernel 0145 (`work/boot/kernel-0145`, SHA-256 abba2ec7...6d27; logs/runs/k0145-probe4, k0145-probe5):
 - probe 4 (CONFIG0 + GO + DMA): reset right after the synced "ringing" line (73 s), no dump made it.

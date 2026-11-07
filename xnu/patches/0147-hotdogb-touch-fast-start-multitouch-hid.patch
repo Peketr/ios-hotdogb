@@ -1,0 +1,126 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -16,6 +16,8 @@
+  *
+  * Boot-args: hdtouch=0 off, hdtouchdelay=N start after N s,
+  * hdtouchlog=1 log every object, hdtouchgpi=0 refuse GPI (stop as before),
++ * hdgpidbg=1 pause 2.5 s after each GPI debug line so it reaches the disk
++ * before a possible reset (0147: off by default, start-up ~100 s faster),
+  * hdgpismmu=3 SMR via sweet_usb.c onto its bank (default), 1 same via our own
+  * mapping, 2 own bank, 0 no SMMU.
+  */
+@@ -235,6 +237,8 @@
+ 	unsigned irq_count, f12_irq_pos, f12_irq_n;
+ 	unsigned data1_off, data1_size, fingers;
+ 	uint32_t active;
++	unsigned max_down;              /* most fingers seen down at once */
++	int gpidbg;                     /* hdgpidbg: pause after GPI debug lines */
+ 	int x[S3_MAX], y[S3_MAX];
+ 	/* GPI DMA (GSI mode) */
+ 	bool gpi;                       /* I2C goes over GPI, not the FIFO */
+@@ -526,7 +530,16 @@
+  * the phone. Off (default) it costs nothing.
+  */
+ /* Kick the log thread (it may be mid-flush, so still wait past one 2 s period). */
+-#define GPIDBG(msg) do { if (s3.log) { printf("SWEET S3706: GPIDBG %s\n", (msg)); sweet_log_kick(); s3_wait(2500); } } while (0)
++/* 0147: the pause only with hdgpidbg=1 (bring-up of a reset-prone step). */
++static void
++s3_dbg_pause(void)
++{
++	sweet_log_kick();
++	if (s3.gpidbg) {
++		s3_wait(2500);
++	}
++}
++#define GPIDBG(msg) do { if (s3.log) { printf("SWEET S3706: GPIDBG %s\n", (msg)); s3_dbg_pause(); } } while (0)
+ 
+ /*
+  * apps SMMU (0x15000000) stage-1 bypass bank for the GPI's stream 0x7b6, so
+@@ -590,8 +603,7 @@
+ 	for (unsigned i = 0; i < nsmr; i++) {
+ 		if (s3.log && (i % 16) == 0) {
+ 			printf("SWEET S3706: GPIDBG smr read %u\n", i);
+-			sweet_log_kick();
+-			s3_wait(2500);
++			s3_dbg_pause();
+ 		}
+ 		uint32_t m = s3_rd(as, 0x800 + 4 * i), c = s3_rd(as, 0xc00 + 4 * i);
+ 		if (!(m >> 31)) {
+@@ -670,8 +682,7 @@
+ 	    s3_rd(s3.gpi_regs, 0x23100u + 0x4000u * GPII),
+ 	    s3_rd(s3.gpi_regs, 0x23118u + 0x4000u * GPII),
+ 	    s3_rd(s3.gpi_regs, 0x23200u + 0x4000u * GPII));
+-	sweet_log_kick();
+-	s3_wait(2500);
++	s3_dbg_pause();
+ }
+ 
+ /* Issue a channel/event command and wait for the expected CNTXT_0 state. */
+@@ -780,8 +791,7 @@
+ 	 * block never straddles a 4 GiB boundary (low-32 doorbell math stays valid). */
+ 	if (s3.log) {
+ 		printf("SWEET S3706: GPIDBG dma_pa %#llx regs %#lx\n", s3.dma_pa, (unsigned long)s3.gpi_regs);
+-		sweet_log_kick();
+-		s3_wait(2500);
++		s3_dbg_pause();
+ 	}
+ 	if (s3_gpi_smmu() != 0) {
+ 		return false;
+@@ -900,8 +910,7 @@
+ 		if (dbg && i == 0) {
+ 			printf("SWEET S3706: GPIDBG wait ch %u: hw rp %#x (off %#x) ev_rp %#x ev_wp %#x\n",
+ 			    chid, hw, hw_off, s3.ev_rp, s3.ev_wp);
+-			sweet_log_kick();
+-			s3_wait(2500);
++			s3_dbg_pause();
+ 		}
+ 		int found = -1;
+ 		unsigned consumed = 0;
+@@ -1348,6 +1357,15 @@
+ 		s3.active |= 1u << id;
+ 		s3.x[id] = x;
+ 		s3.y[id] = y;
++		unsigned n = (unsigned)__builtin_popcount(s3.active);
++		if (n > s3.max_down) {
++			s3.max_down = n;
++			if (n == 1) {
++				printf("#### FIRST TOUCH: FINGER %u AT %d,%d\n", id, x, y);
++			} else {
++				printf("#### MULTI-TOUCH: %u FINGERS DOWN AT ONCE\n", n);
++			}
++		}
+ 		sweet_hid_touch((int)id, 1, x, y);
+ 	} else if (s3.active & (1u << id)) {
+ 		s3.active &= ~(1u << id);
+@@ -1523,6 +1541,7 @@
+ 	s3.started = true;
+ 	(void)PE_parse_boot_argn("hdtouch", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("hdtouchlog", &s3.log, sizeof(s3.log));
++	(void)PE_parse_boot_argn("hdgpidbg", &s3.gpidbg, sizeof(s3.gpidbg));
+ 	if (!enabled) {
+ 		printf("SWEET S3706: disabled (hdtouch=0)\n");
+ 		return;
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -130,6 +130,9 @@
+ 	}
+ 	OSSafeReleaseNULL(data);
+ 	IOLog("SWEET HID: %s open by %s -> %d\n", getName(), client ? client->getName() : "?", ok);
++	if (ok) {
++		IOLog("#### HID %s OPENED BY %s (IOS IS LISTENING)\n", getName(), client ? client->getName() : "?");
++	}
+ 	return ok;
+ }
+ 
+@@ -575,6 +578,11 @@
+ 		IOLog("SWEET HID: touch %d %s at %d,%d%s\n", finger, down ? "down" : "up", x, y,
+ 		    fEdge[finger] ? " edge" : "");
+ 	}
++	static bool sFirstSent;
++	if (down && !sFirstSent) {
++		sFirstSent = true;
++		IOLog("#### FIRST TOUCH EVENT SENT TO IOS HID (%u CLIENTS)\n", _clients ? _clients->getCount() : 0);
++	}
+ 	dispatchEvent(collection);
+ 	collection->release();
+ }
