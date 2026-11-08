@@ -5,6 +5,27 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Bluetooth stage 2 - the pipe to bluetoothd is up, bluetoothd not connected yet (k0163-bt-*, 2026-11-09)
+- How iOS 16 bluetoothd finds its controller (usr/sbin/bluetoothd disassembly): it exits at start unless an
+  IOService named "bluetooth" (or marconi-bt) exists; transport from that node: transport-encoding (0 USB, 1 H4,
+  2 H4DS, 3 H4BC = iPhone X, 4 H5, 6 APPLEBT, 7 PCIe), transport-speed. H4 is NOT a tty on iOS 16: a
+  SYSPROTO_CONTROL socket to "com.apple.uart.sk.bluetooth", setsockopt 0x800c5414 (channel spec {1024, 63, 63}),
+  getsockopt 0x40105412 (channel UUID), termios as sockopts 0x40487413/0x80487414, then os_channel_create(uuid, 0)
+  and H4 bytes in slots. AppleBluetoothModule is only an interest notification on that path (PCIe uses more).
+- Done: ADT /arm-io/bluetooth (tools/adt-add-bluetooth.py, applied to work/boot/hotdogb.adt; original
+  hotdogb.adt.pre-bluetooth) - bluetoothd now stays up and SpringBoard/backboardd find the node. Kernel 0163
+  control; btd `serve` registers an anonymous Skywalk user pipe (the kernel cannot create user pipes) and hands
+  over its UUID: k0163-bt-4 `#### BTUART PIPE 7394...`, firmware + reset OK, then idle (0 packets).
+- Pitfalls hit: (1) k0163-bt-2 panic `nxctl->nxctl_cred != proc_ucred(kernproc)` (nexus.c:1453, DEVELOPMENT
+  assert): launchd's root jobs share the kernel's interned credential; btd now setgroups({0,1}) first.
+  (2) k0163-bt-3 launchd panic "unexpected exec of non-platform binary: /var/local/bin/btd": never replace a
+  KeepAlive job's binary during the boot that runs it; install, then reboot. (3) One serve bring-up stalled
+  mid-rampatch (UART TX held off 10 s); serve now retries once.
+- bluetoothd never connected in k0163-bt-4: "SWEET Sandbox: bluetoothd privilege 12000 denied" =
+  PRIV_SKYWALK_REGISTER_USER_PIPE (its entitlement). 0164 grants it. Next: kernel 0164 run; expect bluetoothd's
+  connect / channel UUID lines in the kernel log and its HCI commands in /var/local/btd.log, then stage 3
+  (it knows only Broadcom chipsets; this one is manufacturer 29).
+
 ### HOTDOGB: BLUETOOTH RADIO WORKS - btd scans 23 LE + 1 classic device (k0162-bt-3, 2026-11-08)
 Stage 1 of Bluetooth (no iOS stack yet): phone/bt/btd (build: phone/bt/build.sh), installed with
 `python tools/hotdogb-bt-install.py` (btd -> /var/local/bin, firmware -> /var/local/fw/bt from the bluetooth_a

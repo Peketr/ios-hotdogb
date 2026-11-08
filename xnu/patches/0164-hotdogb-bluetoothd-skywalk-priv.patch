@@ -1,0 +1,23 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index ff2c725..c49f2c8 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -378,6 +378,18 @@ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
+ 	}
+ 	char name[20];
+ 	proc_selfname(name, sizeof(name));
++	/*
++	 * bluetoothd (entitlement com.apple.private.skywalk.register-user-pipe) opens a Skywalk nexus
++	 * controller at start; denied, its init stops before the H4 transport (kernel 0163, k0163-bt-4).
++	 * This policy has no entitlement data (sweet AMFI keeps none), so the grant goes by name.
++	 */
++	if (priv == PRIV_SKYWALK_REGISTER_USER_PIPE && strncmp(name, "bluetoothd", sizeof(name)) == 0) {
++		static int granted;
++		if (!granted++) {
++			printf("SWEET Sandbox: bluetoothd skywalk user pipe privilege granted\n");
++		}
++		return 0;
++	}
+ 	for (int i = 0; i < sweet_priv_logged_count; i++) {
+ 		if (sweet_priv_logged[i].priv == priv &&
+ 		    strncmp(sweet_priv_logged[i].name, name, sizeof(name)) == 0) {

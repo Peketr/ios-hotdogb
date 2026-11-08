@@ -197,3 +197,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   socket options). btd (phone/bt) registers an anonymous Skywalk user pipe and hands its UUID over
   (BTUART_SET_UUID, root only); bluetoothd opens the pipe's client port. Needs /arm-io/bluetooth in the ADT
   (tools/adt-add-bluetooth.py: transport-encoding 1 = H4, transport-speed 3000000).
+- 0164 bluetoothd is granted PRIV_SKYWALK_REGISTER_USER_PIPE (its entitlement; by name, the sweet AMFI keeps no
+  entitlements): denied, it never opened the H4 transport (k0163-bt-4).
