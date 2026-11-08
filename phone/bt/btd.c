@@ -357,7 +357,12 @@ static int bt_up(void)
 	uint32_t product = v[2] | v[3] << 8 | v[4] << 16 | (uint32_t)v[5] << 24;
 	unsigned patch = v[6] | v[7] << 8, rom = v[8] | v[9] << 8;
 	uint32_t soc = v[10] | v[11] << 8 | v[12] << 16 | (uint32_t)v[13] << 24;
-	unsigned romv = ((rom & 0xf00) >> 4) | (rom & 0xf);
+	/*
+	 * File suffix: by SoC id for the WCN399x ("cherokee") versions on the 7T's bluetooth_a (Android's
+	 * CHEROKEE_VER_2_0 / 2_1); otherwise btqca's rom formula. k0162-bt-2: soc 0x40010224 reports rom 0x1001,
+	 * which the formula makes "01" - no such file; crbtfw21.tlv's header says rom 0x201.
+	 */
+	unsigned romv = soc == 0x40010224 ? 0x21 : soc == 0x40010214 ? 0x20 : (((rom & 0xf00) >> 4) | (rom & 0xf));
 	LOG("#### BLUETOOTH CONTROLLER ANSWERS: product %#x soc %#x rom %#x patch %#x (files %02x)\n",
 	    product, soc, rom, patch, romv);
 
