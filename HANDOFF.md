@@ -5,6 +5,25 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Turnip trace of backboardd - where a frame's GPU time goes (k0161-1108-trace2, 2026-11-08)
+How (one run; undo afterwards): empty /var/local/gputrace-bb.csv and /var/local/turnip-backboardd.log with mode 666
+(backboardd's sandbox cannot create files there), /var/local/mtl2-env = `MESA_GPU_TRACES=print_csv` +
+`MESA_GPU_TRACEFILE=/var/local/gputrace-bb.csv`, /var/local/mtl2-tu-debug = `perf`, /var/local/mtl2-clients =
+`backboardd` (Mesa opens the trace "w": other clients would overwrite it; the normal list is `*` / `-chronod`).
+Reboot, swipebench, fetch the CSV, `python tools/hotdogb-gputrace.py CSV 25`. (Tracing + CPU-drawn SpringBoard:
+17 fps, GPU 61%.) All three settings were removed and the client list restored afterwards.
+- **Render passes 6.1 s of 20 s**: almost all full-screen 1125x2436 (iPhone X size; 22 GMEM bins of 576x224,
+  tiled, no depth, LRZ off), ~2 per frame: 304 x 10.7 ms (~40+ draws), 345 x 3.3 ms (<10 draws), 181 x 5.5 ms.
+  Inside them **draw_ib_gmem is ~95%**; GMEM loads/stores/binning are small. So the draws themselves are slow:
+  ~0.25-1 ms per draw for UI quads.
+- **Turnip perf log: `single_prim_mode due to pipeline settings` for every pipeline (122)**. That is Turnip's
+  per-primitive flush mode for raster-order attachment access / feedback loops (programmable blending, which CA
+  uses and metal2vulkan emulates). Prime suspect for the slow draws; to check in metal2vulkan/Turnip source
+  (which pipelines ask for it, and whether CA's shaders really read the framebuffer).
+- **Copies 3.5 s of 20 s**: copy_buffer_to_image 2.8 s (13201 = ~660 per second: texture uploads / shadow
+  copies of buffer- or IOSurface-backed textures), copy_image_to_buffer 0.67 s (917 = ~45/s: the frame copied out
+  to the IOSurface, see "Tried, reverted" requiresDedicatedAllocation above).
+
 ### HOTDOGB: graphics profiling - the home screen is GPU-bound, 24 ms per frame (kernels 0159-0161, 2026-11-08)
 - **Correction**: the first swipebench (k0158: "23 fps, GPU 6%") measured the wrong screen. The unlock swipe does
   not always work; check with `tools/flame-shot X.png --h 1200 --stride 4352` (home screen centre pixel 72b2d2ff)
