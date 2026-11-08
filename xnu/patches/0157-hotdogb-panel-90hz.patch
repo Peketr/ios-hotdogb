@@ -1,0 +1,69 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -137,6 +137,8 @@
+ 	uint64_t            fVsyncCount;
+ 	uint64_t            fNextVsync;     /* absolute deadline of the next tick */
+ 	uint64_t            fVsyncAbs;      /* tick period in absolute time units */
++	uint32_t            fVsyncUS;       /* 0157: SWEET_FB_VSYNC_US, or 11111 with the panel at 90 Hz (sweet90=1) */
++	uint32_t            fStatTicks;     /* 0157: vsync ticks in 5 s */
+ 	uint64_t            fStatSwaps, fStatPresents, fStatPresentAbs;
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+@@ -287,10 +289,14 @@
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
+-	uint32_t hz = 10;
++	uint32_t hz = 10, hz90 = 0;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+-	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++	/* 0157: boot-arg sweet90=1: the panel at 90 Hz (below, once DSI0 is mapped) and vsync at 90 Hz */
++	PE_parse_boot_argn("sweet90", &hz90, sizeof(hz90));
++	fVsyncUS = hz90 ? 11111 : SWEET_FB_VSYNC_US;
++	fStatTicks = 5000000 / fVsyncUS;
++	fVsync->setTimeoutUS(fVsyncUS);
+ 
+ #if SWEET_BL
+ 	fBlLock = IOLockAlloc();
+@@ -309,6 +315,22 @@
+ 		fDsi = (volatile uint8_t *)ml_io_map((vm_offset_t)SWEET_DSI0_PA, 0x1000);
+ 		fDsiCmd = (volatile uint32_t *)ml_io_map((vm_offset_t)SWEET_DSI_CMD_PA, 0x1000);
+ 	}
++	if (hz90 && fDsi != NULL && fDsiCmd != NULL && fBlLock != NULL) {
++		/*
++		 * 0157: the 7T's panel (dtbo overlay 3: "samsung sofef03f_m fhd cmd mode dsc dsi panel") has a 60 and a
++		 * 90 Hz timing at the same DSI clock (0x4190ab00); its qcom,mdss-dsi-timing-switch-command, in high
++		 * speed: F0 5A 5A (level 2 key on), 60 10 (90 Hz; 60 00 = 60 Hz), F0 A5 A5 (key off).
++		 */
++		static const uint8_t key_on[] = { 0xf0, 0x5a, 0x5a }, fps90[] = { 0x60, 0x10 }, key_off[] = { 0xf0, 0xa5, 0xa5 };
++		IOLockLock(fBlLock);
++		bool a = dsiDcsWrite(key_on, sizeof(key_on)), b = dsiDcsWrite(fps90, sizeof(fps90)),
++		    c = dsiDcsWrite(key_off, sizeof(key_off));
++		IOLockUnlock(fBlLock);
++		IOLog("#### PANEL 90 HZ: timing switch %s%s%s, vsync every %u us\n", a ? "sent" : "KEY FAILED",
++		    b ? "" : ", 60 10 FAILED", c ? "" : ", KEY OFF FAILED", fVsyncUS);
++	} else if (hz90) {
++		IOLog("SWEET FB: sweet90 needs DSI0 (sweetbl >= 1): vsync at 90 Hz, the panel left at 60 Hz\n");
++	}
+ 	if (fDsi != NULL && fDsiCmd != NULL) {
+ 		IOLog("SWEET FB: DSI0 ctrl %#x trig %#x dma %#x, brightness via DCS 0x51 (1..%#x, %u nits)\n",
+ 		    *(volatile uint32_t *)(fDsi + 0x004), *(volatile uint32_t *)(fDsi + 0x084),
+@@ -367,7 +389,7 @@
+ 	 * ~40 Hz with jitter, and backboardd paces its frames on it.
+ 	 */
+ 	if (fb->fVsyncAbs == 0) {
+-		nanoseconds_to_absolutetime(SWEET_FB_VSYNC_US * 1000ULL, &fb->fVsyncAbs);
++		nanoseconds_to_absolutetime(fb->fVsyncUS * 1000ULL, &fb->fVsyncAbs);
+ 		fb->fNextVsync = now;
+ 	}
+ 	fb->fNextVsync += fb->fVsyncAbs;
+@@ -375,7 +397,7 @@
+ 		fb->fNextVsync = now + fb->fVsyncAbs;
+ 	}
+ 	sender->wakeAtTime(fb->fNextVsync);
+-	if ((count % 300) == 0) {
++	if ((count % fb->fStatTicks) == 0) {
+ 		/* Every 5 s: frames backboardd swapped, frames copied to the panel. */
+ 		uint64_t swaps = sweet_fb_swap_count - fb->fStatSwaps, ns = 0;
+ 		absolutetime_to_nanoseconds(fb->fStatPresentAbs, &ns);

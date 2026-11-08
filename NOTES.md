@@ -171,3 +171,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   with sweetmtl (sweetbl default 2; 1 = panel off/on only, 0 = nothing).
 - (0157/0158 dropped: 0157 swapped the hotdogb volume keys on a misread, 0158 swapped them back; both patches were
   removed. 0156 is right: GPIO6 = up, GPIO7 = down; iOS screenshot = side + volume UP.)
+- 0157 (panel-90hz; reuses the number) 90 Hz: boot-arg sweet90=1 sends the 7T panel's timing switch over DSI0 DCS
+  (F0 5A 5A, 60 10, F0 A5 A5: dtbo sofef03f_m 90 Hz timing, same DSI clock) and runs vsync every 11111 us; the
+  5 s stats follow the rate. Needs DSI0 mapped (sweetbl >= 1, the default with sweetmtl).
