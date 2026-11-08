@@ -169,3 +169,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   per slider step (slider 0.505 -> 10709): mapped linearly to panel level 1..0x3ff; the framebuffer's
   IOMFBBrightnessLevel (it sets 0 there) is ignored while the service exists. The service is now the default
   with sweetmtl (sweetbl default 2; 1 = panel off/on only, 0 = nothing).
+- 0157 hotdogb volume keys swapped: GPIO7 = volume up, GPIO6 = volume down (the upper button reported 0xea =
+  volume down, so side + volume up never reached iOS as a screenshot combination).
