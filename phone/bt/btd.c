@@ -10,7 +10,7 @@
  *   btd regs           read-only register dump
  *   btd scan [SECS]    bring up, scan SECS each (default 10), power off
  *   btd auto           boot job: skip if /var/local/btd.off, wait 40 s, scan
- *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait 20 s, bring up, then
+ *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait 40 s, bring up (one retry), then
  *                      serve bluetoothd through the Skywalk user pipe (pipe.c, kernel 0163) and log its HCI
  */
 #include <stdio.h>
@@ -568,8 +568,8 @@ int main(int argc, char **argv)
 			printf("btd: /var/local/btd.off exists, idle\n");
 			sleep(600);
 		}
-		printf("btd: serve: waiting 20 s\n");
-		sleep(20);
+		printf("btd: serve: waiting 40 s\n");
+		sleep(40);
 		t0 = ms_now();
 	} else if (!strcmp(argv[1], "auto")) {
 		struct stat sb;
@@ -591,7 +591,16 @@ int main(int argc, char **argv)
 	}
 	LOG("#### BLUETOOTH BRING-UP (btd, pid %d)\n", getpid());
 	pm_init();
-	if (bt_up()) {
+	int up = bt_up();
+	if (up && serve) {
+		/* k0163-bt-2: the first bring-up stalled mid-rampatch (TX held off); the next one worked */
+		LOG("bring-up failed: power off, retry once\n");
+		bt_off();
+		sleep(2);
+		rxn = 0;
+		up = bt_up();
+	}
+	if (up) {
 		LOG("#### BLUETOOTH FAILED\n");
 		bt_off();
 		if (serve)

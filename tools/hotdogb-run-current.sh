@@ -22,7 +22,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=work/boot/kernel-0162
+KERNEL=work/boot/kernel-0163
 TAG=k0162
 SECS=900
 OPTS=(-q -G)

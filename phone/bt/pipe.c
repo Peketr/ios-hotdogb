@@ -4,6 +4,7 @@
  * SDK has no headers for them. Slot mode, as bluetoothd uses it: one TX and one RX ring, 1 KB per slot.
  */
 #include <errno.h>
+#include <grp.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -127,6 +128,14 @@ int pipe_open(void)
 	char s[37];
 	if ((ctl = ctl_open()) < 0)
 		return -1;
+	/*
+	 * k0163-bt-2 panicked here: nxprov_create ASSERTs nxctl_cred != proc_ucred(kernproc) (DEVELOPMENT
+	 * kernel). Without sandbox/AMFI labels, launchd's root jobs get the kernel's own interned credential.
+	 * An extra supplementary group gives btd a credential of its own; uid 0 still passes the privilege check.
+	 */
+	gid_t groups[2] = { 0, 1 };
+	if (setgroups(2, groups))
+		printf("pipe: setgroups: %s (the nexus registration may panic a DEVELOPMENT kernel)\n", strerror(errno));
 	if (!(nxctl = os_nexus_controller_create())) {
 		printf("pipe: os_nexus_controller_create: %s\n", strerror(errno));
 		return -1;
