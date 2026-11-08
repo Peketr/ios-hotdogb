@@ -189,3 +189,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   job (owner, IBs, dwords, per-IB us: CP_WAIT_FOR_IDLE + counter stamp between IBs, boot-arg sweetgpuibts=0 off),
   ring max fill, submit busy returns, v2 waits/timeouts, sleep avg/max. v2 calls returning anything but
   success/timeout/busy (Turnip: device lost) log "SWEET MTL: v2 NAME method M -> rc" (first 40).
+- 0162 the backboardd freezes (k0160 x2, k0161-gt-freq1): a v2 Submit refused with kIOReturnBadArgument
+  (method 5 -> 0xe00002c2) = Turnip device lost. Empty IBs are skipped now (all empty: success with the last
+  fence); other refusals log which check failed (count/reserved, not dwords, over 1M dwords, outside the window).

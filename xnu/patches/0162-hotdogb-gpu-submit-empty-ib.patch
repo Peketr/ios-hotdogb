@@ -1,0 +1,66 @@
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -834,25 +834,59 @@
+ 	case NativeAdrenoMethodSubmit: {
+ 		V2_IN(NativeAdrenoAbiSubmit);
+ 		V2_OUT(NativeAdrenoAbiSubmitReply);
++		/*
++		 * 0162: Turnip calls the device lost on a refused submit; k0161-gt-freq1 froze on one (method 5 ->
++		 * kIOReturnBadArgument, backboardd, 52 s after boot; likely also both k0160 freezes). Empty IBs are
++		 * skipped now (Linux's msm takes them); any other refusal says which check failed (first 20).
++		 */
++		static uint32_t submit_refusals;
+ 		if (rq->buffer_count == 0 || rq->buffer_count > NativeAdrenoAbiMaxBuffers || rq->reserved) {
++			if (submit_refusals++ < 20) {
++				IOLog("SWEET MTL: v2 %s submit refused: buffer_count %u reserved %u\n", fName, rq->buffer_count,
++				    rq->reserved);
++			}
+ 			return kIOReturnBadArgument;
+ 		}
+ 		uint64_t iova[NativeAdrenoAbiMaxBuffers];
+ 		uint32_t dw[NativeAdrenoAbiMaxBuffers];
++		uint32_t nib = 0;
+ 		for (uint32_t i = 0; i < rq->buffer_count; i++) {
+ 			const NativeAdrenoAbiSubmitBuffer *b = &rq->buffers[i];
+-			if ((b->bytes & 3) || b->bytes == 0 || b->bytes / 4 > 0xfffff || b->iova < fWinBase ||
++			if (b->bytes == 0) {
++				static uint32_t empties;
++				if (empties++ < 5) {
++					IOLog("SWEET MTL: v2 %s submit: IB %u of %u is empty (iova %#llx), skipped\n", fName, i,
++					    rq->buffer_count, b->iova);
++				}
++				continue;
++			}
++			if ((b->bytes & 3) || b->bytes / 4 > 0xfffff || b->iova < fWinBase ||
+ 			    b->iova + b->bytes > fWinBase + fWinSize) {
++				if (submit_refusals++ < 20) {
++					IOLog("SWEET MTL: v2 %s submit refused: IB %u of %u iova %#llx bytes %#llx (%s), window %#llx + %#llx\n",
++					    fName, i, rq->buffer_count, b->iova, b->bytes,
++					    (b->bytes & 3) ? "not dwords" : b->bytes / 4 > 0xfffff ? "over 1M dwords" : "outside the window",
++					    (uint64_t)fWinBase, (uint64_t)fWinSize);
++				}
+ 				return kIOReturnBadArgument;
+ 			}
+-			iova[i] = b->iova;
+-			dw[i] = (uint32_t)(b->bytes / 4);
++			iova[nib] = b->iova;
++			dw[nib] = (uint32_t)(b->bytes / 4);
++			nib++;
++		}
++		if (nib == 0) {
++			/* nothing to run: the client's last fence (or the wait below) stands for it */
++			if (rq->wait_fence != 0 && sweet_gpu_wait_fence_ns((uint32_t)rq->wait_fence, rq->wait_timeout_ns)) {
++				return kIOReturnTimeout;
++			}
++			rp->fence = fLastFence ? fLastFence : 1;
++			return kIOReturnSuccess;
+ 		}
+ 		if (rq->wait_fence != 0 && sweet_gpu_wait_fence_ns((uint32_t)rq->wait_fence, rq->wait_timeout_ns)) {
+ 			return kIOReturnTimeout;
+ 		}
+ 		bool busy = false;
+-		uint32_t fence = sweet_gpu_submit_v2(iova, dw, rq->buffer_count, &busy);
++		uint32_t fence = sweet_gpu_submit_v2(iova, dw, nib, &busy);
+ 		if (fence == 0) {
+ 			return busy ? kIOReturnBusy : kIOReturnNotReady;
+ 		}
