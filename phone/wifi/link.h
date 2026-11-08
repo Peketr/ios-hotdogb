@@ -4,6 +4,10 @@
 
 #define QRTR_NODE_APPS		1
 #define QRTR_NODE_MODEM		0
+#define QRTR_NODE_ADSP		5
+#ifndef QRTR_NODE_REMOTE
+#define QRTR_NODE_REMOTE	QRTR_NODE_MODEM	/* phone/audio: QRTR_NODE_ADSP */
+#endif
 #define QRTR_NODE_BCAST		0xffffffffu
 #define QRTR_PORT_CTRL		0xfffffffeu
 
@@ -27,6 +31,7 @@ int link_up(qrtr_cb_t cb, unsigned timeout_ms);
 int link_poll(unsigned ms);		/* handle what arrived; for ms (0 = just once) */
 int link_send(const void *data, uint32_t len);
 void link_raw(const uint8_t *data, uint32_t len);	/* LINK_RAW builds: each packet on LINK_CHAN */
+int link_qrtr_open(void);	/* the QRTR channel (IPCRTR) is open both ways */
 int qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node, uint32_t dst_port,
 	      const void *payload, uint32_t len);
 int qrtr_new_server(uint32_t service, uint32_t version, uint32_t instance, uint32_t port);

@@ -24,6 +24,7 @@
 #include "../wifi/smem.h"
 #include "../wifi/link.h"
 #include "i2c.h"
+#include "../wifi/pdmapper.h"
 
 #define SMEM_HOST_ADSP	2
 #define ADSP_PA		0x8be00000ull	/* dtbo overlay 3: adsp region <0x8be00000 0x1e00000> = adsp.mdt's span */
@@ -591,6 +592,40 @@ static void mi2s_pins(void)
 	}
 }
 
+/* ---- QRTR on IPCRTR: the ADSP (node 5) asks our pd-mapper where avs/audio runs before its audio PD serves ---- */
+
+static volatile int qrtr_hello, pdm_served;
+
+static void qrtr_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
+{
+	uint32_t w[5] = { 0 };
+	memcpy(w, d, n < sizeof(w) ? n : sizeof(w));
+	if (h->type == QRTR_TYPE_DATA) {
+		if (h->confirm_rx)
+			qrtr_resume_tx(h);
+		if (h->dst_port == PDMAPPER_PORT) {
+			pdmapper_handle(h, d, n);
+			pdm_served++;
+			return;
+		}
+		printf("[%6llu] qrtr: < DATA %u:%x -> %u:%x, %u bytes\n", (unsigned long long)link_ms(), h->src_node, h->src_port,
+		       h->dst_node, h->dst_port, n);
+		return;
+	}
+	printf("[%6llu] qrtr: < ctrl type %u (cmd %u) from %u:%x: %x %x %x %x\n", (unsigned long long)link_ms(), h->type, w[0],
+	       h->src_node, h->src_port, w[1], w[2], w[3], w[4]);
+	if (w[0] == QRTR_TYPE_HELLO) {
+		uint32_t hello[5] = { QRTR_TYPE_HELLO };	/* struct qrtr_ctrl_pkt: always 20 bytes */
+		qrtr_send(QRTR_TYPE_HELLO, QRTR_PORT_CTRL, h->src_node, QRTR_PORT_CTRL, hello, sizeof(hello));
+		if (!qrtr_hello) {
+			qrtr_hello = 1;
+			pdmapper_init();
+		}
+	} else if (w[0] == QRTR_TYPE_NEW_SERVER) {
+		printf("qrtr:   server service %#x instance %#x at %u:%x\n", w[1], w[2], w[3], w[4]);
+	}
+}
+
 static int up(unsigned delay)
 {
 	tfa_probe();
@@ -606,7 +641,7 @@ static int up(unsigned delay)
 	link_idle = smp2p_service;
 	int rc = -1;
 	for (int t = 0; t < 10 && rc; t++) {	/* the ADSP's GLINK FIFO appears a little after "ready" */
-		rc = link_up(NULL, 2000);
+		rc = link_up(qrtr_cb, 2000);
 	}
 	if (rc)
 		return 1;
@@ -622,9 +657,20 @@ static int up(unsigned delay)
 	apr_send(APR_SVC_ADSP_CORE, AVCS_GET_VERSIONS, NULL, 0);
 	for (int t = 0; t < 30 && !versions_done; t++)
 		link_poll(100);
+	/* QRTR: HELLO both ways, then our pd-mapper; the audio PD (AFE/ASM/ADM) starts after the ADSP asked it */
+	for (int t = 0; t < 100 && !pdm_served; t++)
+		link_poll(100);
+	printf("qrtr: IPCRTR %s, hello %s, pd-mapper answered %d request(s)\n", link_qrtr_open() ? "open" : "NOT open",
+	       qrtr_hello ? "yes" : "no", pdm_served);
 	if (access("/var/local/audiod.noport", F_OK) != 0) {
 		mi2s_pins();
-		if (afe_clock(LPASS_CLK_QUAD_MI2S_IBIT, BCLK, 1) == 0 && afe_i2s_config() == 0 && afe_start() == 0)
+		int ok = 0;
+		for (int t = 0; t < 6 && !ok; t++) {	/* the audio PD may need a few seconds after the lookup */
+			ok = afe_clock(LPASS_CLK_QUAD_MI2S_IBIT, BCLK, 1) == 0;
+			if (!ok)
+				link_poll(3000);
+		}
+		if (ok && afe_i2s_config() == 0 && afe_start() == 0)
 			printf("[%6llu] #### QUAT MI2S RUNNING (%u Hz bit clock)\n", (unsigned long long)link_ms(), BCLK);
 		link_poll(500);
 		printf("amps with the bit clock running:\n");

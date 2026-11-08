@@ -26,6 +26,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   are still GPIOs (function 1 = qua_mi2s).
 - No tfa98xx.cnt in vendor_a (only "audio_tfa9894" / oplus_audio_check_tfa98xx_driver_ready strings): looking in
   odm_a (super + 0x100000, ext4, 51740 x 4 KB; read with `flame-files.py part super`), kept in ../hotdogb/fw/odm.
+- tfa98xx.cnt found in odm_a /firmware (3575 bytes, ../hotdogb/fw/odm, not in git): "PM3_01" container, "stereo"
+  9871N1C, devices 0x34/0x35, 9874_dummy.patch (DSP code in ROM), profiles receiver / speaker / calibrate.cal,
+  SetExcursionFilters.msg, SetAlgoParams vstep, SetChipTempSelector.
+- k0156-afe-1108: MI2S pins muxed (0x1 -> 0xc4), but the AFE never answered AFE_SVC_CMD_SET_PARAM (clock 0x106):
+  no reply, no error, no crash. Core (AVCS, root PD) answers; AFE/ASM/ADM live in **msm/adsp/audio_pd**
+  (adspua.jsn: avs/audio, instance 74). Now audiod also serves QRTR on IPCRTR (the ADSP is node 5) with a
+  pd-mapper of the ADSP's domains (phone/wifi link.c has a per-channel table now; pdmapper.c -DPDMAPPER_ADSP),
+  then retries the AFE for 18 s.
 - Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
   tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
   I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM

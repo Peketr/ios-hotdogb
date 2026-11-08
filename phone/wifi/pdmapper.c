@@ -14,11 +14,18 @@
 #define PFR		0x24	/* protection domain failure report */
 
 static const struct { const char *service, *domain; uint32_t instance; } db[] = {
+#ifdef PDMAPPER_ADSP
+	/* the 7T's adspr.jsn + adspua.jsn (modem partition image/): audio runs in the ADSP's audio PD */
+	{ "tms/servreg", "msm/adsp/root_pd", 74 },
+	{ "tms/servreg", "msm/adsp/audio_pd", 74 },
+	{ "avs/audio", "msm/adsp/audio_pd", 74 },
+#else
 	{ "tms/servreg", "msm/modem/root_pd", 180 },
 	{ "gps/gps_service", "msm/modem/root_pd", 180 },
 	{ "kernel/elf_loader", "msm/modem/wlan_pd", 180 },
 	{ "tms/servreg", "msm/modem/wlan_pd", 180 },
 	{ "wlan/fw", "msm/modem/wlan_pd", 180 },
+#endif
 };
 
 int pdmapper_init(void)
