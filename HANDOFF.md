@@ -5,6 +5,27 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: graphics profiling - the home screen is GPU-bound, 24 ms per frame (kernels 0159-0161, 2026-11-08)
+- **Correction**: the first swipebench (k0158: "23 fps, GPU 6%") measured the wrong screen. The unlock swipe does
+  not always work; check with `tools/flame-shot X.png --h 1200 --stride 4352` (home screen centre pixel 72b2d2ff)
+  before `tools/hotdogb-swipebench.py 30 --no-unlock`.
+- **0159** sample bursts: USB command `sample NAMES COUNT MS`, `swipebench --sample`, `tools/sweet-profile.py`
+  (busy threads, hot pcs; symbolicate on the Mac with tools/sweet-crash.py + research/dsc). SpringBoard is mostly
+  idle; backboardd's render thread runs in ~45% of samples, under SweetMetal2 (sys_dcache_flush, IOConnect calls).
+  SweetMetal2's own offsets: llvm-symbolizer on work/metal2/SweetMetal2.bundle/SweetMetal2 (the
+  "MTL2[pid name]: images:" line gives its load address).
+- **0160** fence waits sleep after 100 us spin: **both k0160 boots froze 15-20 s after backboardd's first GPU work**
+  (Turnip DeviceLost in /var/local/mtl2.log, ~160000 refused command buffers, no kernel fault; brightness still
+  worked). k0160 with sweetgpusleep=0: fine. **0161** spins by default again; its sweetgpusleep=200 run
+  (k0161-1108-sleep) did NOT freeze (35.9 fps, ~21000 sleeps/5 s, avg 233 us, max ~400 us) and the render thread
+  still ran in 272/600 samples: the fence spin is not where its CPU goes. Why 0160 froze is open (Turnip only calls
+  the device lost on a v2 error, a kernel fault, a 5 s wait or 64 busy submits: 0161 logs v2 errors, none seen).
+- **0161 job timing** (`SWEET GPU: 5s jobs:` line), home-screen paging at 90 Hz (k0161-1108-spin): **35.0 fps, GPU
+  65-70% busy**; per 5 s ~130 backboardd frames take >= 16 ms: one submit of 16 IBs, ~111600 dwords, ~24 ms; of
+  that **one IB ~15.5 ms, one ~6 ms, one ~1.1 ms**, the other 13 are 3-120 us. Ring max ~1650/8192 dw, 0 busy
+  submits. So the frame rate is the GPU's: the next step is what that 15.5 ms IB renders (Turnip's view: GMEM or
+  sysmem, blur passes, target sizes) - Turnip debug/perf output in backboardd.
+
 ### HOTDOGB: 90 Hz panel (kernels 0157/0158) and a hands-free swipe benchmark (2026-11-08)
 - **0157** `sweet90=1`: the panel's 90 Hz timing switch over DSI0 DCS (F0 5A 5A, 60 10, F0 A5 A5; dtbo sofef03f_m
   90 Hz timing, same DSI clock) + vsync every 11.1 ms. Result (k0157-1108-1927): **the picture froze** (touch and
