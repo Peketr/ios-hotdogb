@@ -25,6 +25,7 @@
 #include "../wifi/link.h"
 #include "i2c.h"
 #include "../wifi/pdmapper.h"
+#include "../wifi/qmi.h"
 
 #define SMEM_HOST_ADSP	2
 #define ADSP_PA		0x8be00000ull	/* dtbo overlay 3: adsp region <0x8be00000 0x1e00000> = adsp.mdt's span */
@@ -596,6 +597,80 @@ static void mi2s_pins(void)
 
 static volatile int qrtr_hello, pdm_served;
 
+/*
+ * The service registry notifier (QMI 0x42, Linux soc/qcom/pdr_interface.c): Linux's APR registers as a listener
+ * for msm/adsp/audio_pd and talks to AFE/ASM/ADM only once it says UP; state changes come as indications to ack.
+ */
+#define SR_SERVICE	0x42
+#define SR_PORT		0x4001		/* our client port */
+#define SR_REGISTER	0x20
+#define SR_STATE_IND	0x22
+#define SR_STATE_ACK	0x23
+#define SR_UP		0x1fffffffu
+static const char audio_pd[] = "msm/adsp/audio_pd";
+static uint32_t sr_node, sr_port;
+static volatile uint32_t audio_pd_state;
+static uint16_t sr_txn;
+
+static const char *sr_state(uint32_t s)
+{
+	switch (s) {
+	case 0x7fffffffu: return "UNINIT";
+	case 0x0fffffffu: return "DOWN";
+	case SR_UP: return "UP";
+	case 0x2fffffffu: return "EARLY_DOWN";
+	default: return "?";
+	}
+}
+
+static void sr_register(void)
+{
+	struct qmi_buf q;
+	qmi_start(&q, QMI_REQUEST, ++sr_txn, SR_REGISTER);
+	qmi_tlv_u8(&q, 1, 1);
+	qmi_tlv(&q, 2, audio_pd, (uint16_t)strlen(audio_pd));
+	qrtr_send(QRTR_TYPE_DATA, SR_PORT, sr_node, sr_port, q.b, (uint32_t)qmi_finish(&q));
+	printf("servreg: listening for %s at %u:%x\n", audio_pd, sr_node, sr_port);
+}
+
+static void sr_handle(const uint8_t *d, uint32_t n)
+{
+	struct qmi_msg m;
+	uint32_t st = 0;
+	if (qmi_parse(d, n, &m))
+		return;
+	if (m.type == QMI_RESPONSE && m.id == SR_REGISTER) {
+		uint16_t rl = 0;
+		const uint8_t *r = qmi_get(&m, 2, &rl);
+		uint16_t res = r && rl >= 4 ? (uint16_t)(r[0] | r[1] << 8) : 0xffff, err = r && rl >= 4 ? (uint16_t)(r[2] | r[3] << 8) : 0;
+		if (qmi_get_u32(&m, 0x10, &st) == 0)
+			audio_pd_state = st;
+		printf("[%6llu] servreg: register -> result %u error %u, %s is %#x %s\n", (unsigned long long)link_ms(), res, err,
+		       audio_pd, st, sr_state(st));
+		if (st == SR_UP)
+			printf("[%6llu] #### AUDIO PD UP\n", (unsigned long long)link_ms());
+	} else if (m.type == QMI_INDICATION && m.id == SR_STATE_IND) {
+		uint16_t pl = 0, tl = 0;
+		const uint8_t *path = qmi_get(&m, 2, &pl), *tx = qmi_get(&m, 3, &tl);
+		qmi_get_u32(&m, 1, &st);
+		audio_pd_state = st;
+		printf("[%6llu] servreg: %.*s now %#x %s\n", (unsigned long long)link_ms(), path ? pl : 0,
+		       path ? (const char *)path : "", st, sr_state(st));
+		if (st == SR_UP)
+			printf("[%6llu] #### AUDIO PD UP\n", (unsigned long long)link_ms());
+		struct qmi_buf q;
+		qmi_start(&q, QMI_REQUEST, ++sr_txn, SR_STATE_ACK);
+		qmi_tlv(&q, 1, path ? path : (const uint8_t *)audio_pd, path ? pl : (uint16_t)strlen(audio_pd));
+		if (tx && tl >= 2)
+			qmi_tlv(&q, 2, tx, 2);
+		qrtr_send(QRTR_TYPE_DATA, SR_PORT, sr_node, sr_port, q.b, (uint32_t)qmi_finish(&q));
+	} else if (m.type == QMI_RESPONSE && m.id == SR_STATE_ACK) {
+		/* ack of our ack */
+	} else {
+		printf("servreg: message type %u id %#x\n", m.type, m.id);
+	}
+}
+
 static void qrtr_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 {
 	uint32_t w[5] = { 0 };
@@ -606,6 +681,10 @@ static void qrtr_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 		if (h->dst_port == PDMAPPER_PORT) {
 			pdmapper_handle(h, d, n);
 			pdm_served++;
+			return;
+		}
+		if (h->dst_port == SR_PORT) {
+			sr_handle(d, n);
 			return;
 		}
 		printf("[%6llu] qrtr: < DATA %u:%x -> %u:%x, %u bytes\n", (unsigned long long)link_ms(), h->src_node, h->src_port,
@@ -623,6 +702,11 @@ static void qrtr_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 		}
 	} else if (w[0] == QRTR_TYPE_NEW_SERVER) {
 		printf("qrtr:   server service %#x instance %#x at %u:%x\n", w[1], w[2], w[3], w[4]);
+		if (w[1] == SR_SERVICE && !sr_node) {
+			sr_node = w[3];
+			sr_port = w[4];
+			sr_register();
+		}
 	}
 }
 
@@ -662,6 +746,10 @@ static int up(unsigned delay)
 		link_poll(100);
 	printf("qrtr: IPCRTR %s, hello %s, pd-mapper answered %d request(s)\n", link_qrtr_open() ? "open" : "NOT open",
 	       qrtr_hello ? "yes" : "no", pdm_served);
+	for (int t = 0; t < 150 && audio_pd_state != SR_UP; t++)	/* as Linux APR: AFE/ASM/ADM only after UP */
+		link_poll(100);
+	printf("servreg: %s %#x %s%s\n", audio_pd, audio_pd_state, sr_state(audio_pd_state),
+	       sr_node ? "" : " (no notifier service seen)");
 	if (access("/var/local/audiod.noport", F_OK) != 0) {
 		mi2s_pins();
 		int ok = 0;
