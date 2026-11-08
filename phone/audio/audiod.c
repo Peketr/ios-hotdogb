@@ -752,6 +752,15 @@ static int up(unsigned delay)
 		link_poll(100);
 	printf("servreg: %s %#x %s%s\n", audio_pd, audio_pd_state, sr_state(audio_pd_state),
 	       sr_node ? "" : " (no notifier service seen)");
+	/* harmless requests first: does anything in the audio PD answer at all? (stop of a stopped port, an empty
+	 * ADM routing map: both should come back with a result, maybe an error) */
+	{
+		uint16_t s[2] = { AFE_PORT_QUAT_MI2S_RX, 0 };
+		apr_cmd(APR_SVC_AFE, AFE_PORT_CMD_DEVICE_STOP, s, sizeof(s), "probe: AFE stop QUAT_MI2S_RX");
+		uint32_t map[2] = { 0 /* ADM_MATRIX_ID_AUDIO_RX */, 0 /* sessions */ };
+		apr_cmd(8 /* ADM */, 0x00010325 /* ADM_CMD_MATRIX_MAP_ROUTINGS_V5 */, map, sizeof(map), "probe: ADM empty routing map");
+		apr_cmd(APR_SVC_ADSP_CORE, AVCS_GET_VERSIONS, NULL, 0, "probe: core versions again");
+	}
 	if (access("/var/local/audiod.noport", F_OK) != 0) {
 		mi2s_pins();
 		int ok = 0;
