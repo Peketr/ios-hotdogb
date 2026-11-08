@@ -180,3 +180,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0159 sample bursts: USB command "sample NAMES COUNT MS" samples the running (not waiting) threads of NAMES
   every MS ms (SMP name tN tid T pc ... bt ...; header once); tools/hotdogb-swipebench.py --sample triggers it
   during the swipes, tools/sweet-profile.py counts busy threads / hot pcs, tools/sweet-crash.py symbolicates.
+- 0160 GPU fence waits (v2 WaitFence/Submit wait, v1 wait, kernel present slot wait) spun on delay(20) for the
+  whole GPU job (k0159 profile: backboardd's render thread ~half a core in IOConnectCallStructMethod): now spin
+  sweetgpuspin us (100), then sleep sweetgpusleep us slices (200; 0 = old spin). 5 s GPU line: "N fence sleeps".

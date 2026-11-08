@@ -28,3 +28,4 @@
 0157 #### PANEL 90 HZ: timing switch
 0158 #### PANEL 90 HZ TEAR CHECK: vsync_count
 0159 #### SAMPLE BURST START
+0160 #### GPU FENCE WAIT: spin

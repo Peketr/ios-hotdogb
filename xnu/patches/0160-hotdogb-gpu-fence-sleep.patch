@@ -1,0 +1,102 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -331,6 +331,38 @@
+  * stamp ring (A6_TS_SLOTS) before they are summed only count as "missed".
+  */
+ #define GSTAT_OWNERS    6
++
++/*
++ * 0160: fence waits used to spin on delay(20) for as long as the GPU worked (10-15 ms per backboardd frame):
++ * the k0159 sample burst had backboardd's render thread running in IOConnectCallStructMethod (Turnip's
++ * WaitFence) for about half a core. Now: spin for the first sweetgpuspin us (default 100, short jobs), then
++ * sleep in sweetgpusleep us slices (default 200; 0 = spin always, as before). t0: when the wait began.
++ */
++extern int get_preemption_level(void);
++static uint32_t fence_spin_us = 100, fence_sleep_us = 200, fence_sleeps, fence_opts_read;
++
++static void
++gpu_pause(uint64_t t0)
++{
++	uint64_t ns, deadline;
++	if (!fence_opts_read) {
++		PE_parse_boot_argn("sweetgpuspin", &fence_spin_us, sizeof(fence_spin_us));
++		PE_parse_boot_argn("sweetgpusleep", &fence_sleep_us, sizeof(fence_sleep_us));
++		fence_opts_read = 1;
++		a6_log("#### GPU FENCE WAIT: spin %u us, then sleep %u us slices\n", fence_spin_us, fence_sleep_us);
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	if (fence_sleep_us == 0 || ns < fence_spin_us * 1000ULL || ml_at_interrupt_context() ||
++	    get_preemption_level() != 0) {
++		delay(20);
++		return;
++	}
++	clock_interval_to_deadline(fence_sleep_us, NSEC_PER_USEC, &deadline);
++	(void)assert_wait_deadline((event_t)&fence_sleeps, THREAD_UNINT, deadline);
++	(void)thread_block(THREAD_CONTINUE_NULL);
++	fence_sleeps++;
++}
++
+ static uint32_t gstat_next = 1;
+ static uint64_t gstat_abs;
+ static int gstat_pid[A6_TS_SLOTS];
+@@ -388,10 +420,11 @@
+ 			w += snprintf(who + w, sizeof(who) - w, " %s %u/%llums", name, gstat_own[o].n,
+ 			    gstat_own[o].busy / 19200);
+ 		}
+-		a6_log("5s: %u submits (%u missed), GPU busy %llu ms (%llu%%), longest %llu us, mean %llu us;%s\n",
++		a6_log("5s: %u submits (%u missed), GPU busy %llu ms (%llu%%), longest %llu us, mean %llu us;%s; %u fence sleeps\n",
+ 		    gstat_n, gstat_missed, gstat_busy / 19200, gstat_busy * 100 / 19200 / (ns / 1000000),
+-		    gstat_longest * 10 / 192, gstat_busy * 10 / 192 / gstat_n, who);
++		    gstat_longest * 10 / 192, gstat_busy * 10 / 192 / gstat_n, who, fence_sleeps);
+ 	}
++	fence_sleeps = 0;
+ 	gstat_n = gstat_missed = 0;
+ 	gstat_busy = gstat_longest = 0;
+ 	bzero(gstat_own, sizeof(gstat_own));
+@@ -535,13 +568,14 @@
+ static int
+ present_wait_locked(uint32_t k, const char *why)
+ {
++	uint64_t t0 = mach_absolute_time();
+ 	while (present_fence[k] && !a6_fence_done(&gpu, present_fence[k])) {
+ 		if (gpu_hung_locked(500)) {
+ 			gpu_recover_locked(why);
+ 			return -1;
+ 		}
+ 		lck_mtx_unlock(&sweet_gpu_lock);
+-		delay(20);
++		gpu_pause(t0);
+ 		lck_mtx_lock(&sweet_gpu_lock);
+ 	}
+ 	return 0;
+@@ -887,14 +921,19 @@
+ int
+ sweet_gpu_wait_fence(uint32_t fence, uint32_t timeout_ms)
+ {
+-	for (unsigned i = 0; i < timeout_ms * 50; i++) {
++	uint64_t t0 = mach_absolute_time(), ns = 0;
++	for (;;) {
+ 		if (!gpu_ready) {
+ 			return -1;
+ 		}
+ 		if (a6_fence_done(&gpu, fence)) {
+ 			return 0;
+ 		}
+-		delay(20);
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		if (ns >= timeout_ms * 1000000ULL) {
++			break;
++		}
++		gpu_pause(t0);
+ 	}
+ 	lck_mtx_lock(&sweet_gpu_lock);
+ 	int rc = a6_fence_done(&gpu, fence) ? 0 : -1;
+@@ -1155,7 +1194,7 @@
+ 		if (ns >= timeout_ns) {
+ 			return sweet_gpu_fence_done(fence) ? 0 : 1;
+ 		}
+-		delay(20);
++		gpu_pause(t0);
+ 	}
+ }
+ 
