@@ -10,7 +10,8 @@
  *   audiod auto         the boot job: `up 30` (wland's AOSS messages come first: one QMP mailbox)
  *   audiod shutdown     PAS shutdown of the ADSP
  * After the core is ready, up also muxes the quaternary MI2S pins and starts QUAT_MI2S_RX (48 kHz 16-bit stereo on
- * SD1, LPASS bit clock 1.536 MHz), then reads the amps again (/var/local/audiod.noport skips this).
+ * SD1, LPASS bit clock 1.536 MHz) (/var/local/audiod.noport skips this), then starts both TFA9874 amps on the
+ * container's "speaker" profile and unmutes them (tfa.c; /var/local/audiod.noamp skips that).
  *
  * The speakers (dtbo overlay 3): NXP TFA98xx amps at I2C 0x34 (right, reset GPIO 37) and 0x35 (left, reset
  * GPIO 100) on the quaternary MI2S port (oplus,speaker-i2s-id 3). No WCD9340 / SLIMbus on that path.
@@ -24,6 +25,7 @@
 #include "../wifi/smem.h"
 #include "../wifi/link.h"
 #include "i2c.h"
+#include "tfa.h"
 #include "../wifi/pdmapper.h"
 #include "../wifi/qmi.h"
 
@@ -778,8 +780,18 @@ static int up(unsigned delay)
 		if (ok && afe_i2s_config() == 0 && afe_start() == 0)
 			printf("[%6llu] #### QUAT MI2S RUNNING (%u Hz bit clock)\n", (unsigned long long)link_ms(), BCLK);
 		link_poll(500);
-		printf("amps with the bit clock running:\n");
-		tfa_probe();
+		/* the amps, now that the bit clock runs: start on the "speaker" profile, then unmute (silence: no stream yet) */
+		if (ok && access("/var/local/audiod.noamp", F_OK) != 0) {
+			static const uint8_t amp[] = { 0x34, 0x35 };
+			int n = 0;
+			for (unsigned i = 0; i < 2; i++)
+				if (tfa_start(amp[i], "speaker") == 0) {
+					tfa_mute(amp[i], 0);
+					n++;
+				}
+			if (n)
+				printf("[%6llu] #### SPEAKER AMPS RUNNING (%d of 2)\n", (unsigned long long)link_ms(), n);
+		}
 	}
 	printf("audiod: up; serving the ADSP (SMP2P, GLINK)\n");
 	for (;;)

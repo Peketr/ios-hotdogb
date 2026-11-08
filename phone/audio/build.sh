@@ -8,6 +8,6 @@ mkdir -p out
 W=../wifi
 ../../work/userland/bin/ios-cc -O2 -Wall -Wextra -Wno-unused-parameter \
 	-DGLINK_HOST=2 -DIPC_GLINK=8 -DLINK_CHAN='"apr_audio_svc"' -DLINK_RAW -DQRTR_NODE_REMOTE=5 -DPDMAPPER_ADSP \
-	-o out/audiod audiod.c i2c.c $W/smem.c $W/pmem.c $W/glink.c $W/link.c $W/qmi.c $W/pdmapper.c
+	-o out/audiod audiod.c i2c.c tfa.c $W/smem.c $W/pmem.c $W/glink.c $W/link.c $W/qmi.c $W/pdmapper.c
 codesign -f -s - out/audiod 2>/dev/null
 ls -la out/audiod
