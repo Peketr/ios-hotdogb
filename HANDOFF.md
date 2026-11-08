@@ -34,6 +34,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   (adspua.jsn: avs/audio, instance 74). Now audiod also serves QRTR on IPCRTR (the ADSP is node 5) with a
   pd-mapper of the ADSP's domains (phone/wifi link.c has a per-channel table now; pdmapper.c -DPDMAPPER_ADSP),
   then retries the AFE for 18 s.
+- **Where audio is stuck (2026-11-08, k0156-sr/apps2/probe-1108)**: the pd-mapper works (the ADSP asks for avs/audio
+  -> msm/adsp/audio_pd, tms/pdr_enabled, tms/pddump_disabled) and the servreg notifier (QMI 0x42 at 5:3) says
+  msm/adsp/audio_pd is **UP**, but nothing in the audio PD answers: AFE stop, an empty ADM routing map and the AFE
+  clock set get no reply and no error, on apr_audio_svc and on apr_apps2 alike. The core (AVCS, root PD) answers
+  every time. QRTR services the ADSP announces: 0x301, 0x42 (servreg), 0x422, 0x2b (ssctl), 0xf x2, 0x33, 0x18.
+  Best guess (not verified): the audio PD waits for FastRPC - Android's audioadsprpcd serves its file reads
+  (adsp_avs_config.acdb from vendor/etc/acdbdata) over the "fastrpcglink-apps-dsp" GLINK channel, which nobody
+  opens here. Next: a minimal FastRPC (adsprpc) apps_std file server in audiod, or find what the audio PD waits for.
 - Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
   tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
   I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM
