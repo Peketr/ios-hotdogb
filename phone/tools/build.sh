@@ -2,7 +2,8 @@
 # Build the on-phone tools into out/ with work/userland/bin/ios-cc, signed ad hoc (with NAME-ents.plist when
 # there is one). Install one: python3 tools/flame-files.py put phone/tools/out/NAME /var/local/bin/NAME 755
 # (usage is at the top of each source):
-#   psx      processes without /proc; psx -k NAME kills     pstack   PID: thread backtraces (tools/flame-profile.py)
+#   psx      processes without /proc; psx -k NAME kills     pstack   PID: thread backtraces (tools/flame-profile.py);
+#                                                           pstack -w NAME [N [SECS]]: wait for NAME, sample it
 #   openapp  BUNDLE_ID [URL]: launch an app                   lsreg    LaunchServices registration (no uicache)
 #   netsvc   SystemConfiguration network service for an IF    nettest  DNS, TCP, then HTTPS
 #   oslog    stream the unified log                           prefs    CFPreferences read/write (no defaults)

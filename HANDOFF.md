@@ -5,6 +5,20 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: button combos - screenshot works, power-off screen never appears (2026-11-08)
+- Volume keys were right in 0156 (GPIO6 = up, GPIO7 = down). 0157 swapped them on a misread (the user had pressed
+  Android's power + volume DOWN); 0158 swaps them back. iOS screenshot = side + volume UP: works.
+- Holding side + either volume: SpringBoard's SBSOSClawGestureObserver triggers SOS after ~1.1 s, sosd opens
+  InCallService with telSOS:, InCallService logs "showing SOS controller" / PHSOSViewController sosMode 2 and asks
+  for a full-screen-overlay scene, then its main thread goes silent right after loading com.apple.avfoundation
+  prefs (05:52:36 in logs/runs/k0156-poweroff2-1108-0120/hold.txt, read from /var/local/oslog-ui.log at
+  70-82 MB). 20 s later SpringBoard: "Watchdog scene-create provision violated" (ignored: BKNoWatchdogs), so the
+  power-off/SOS sliders never draw. Suspect: a synchronous audio/AVFoundation call (no audio on this phone).
+- Next: pstack -w InCallService (phone/tools/pstack.c, new) as launchd job org.iosonpixel.pstack-ics ->
+  /var/local/pstack-ics.log; symbolicate with tools/pstack-sym.py on the Mac.
+- oslog-ui now logs InCallService + SpringBoard (~80 MB per boot; the file was 134 MB on 2026-11-08). Remove the
+  job (or the file) when done.
+
 ### HOTDOGB: Settings > Date & Time froze Settings - fairplayd.H2 removed (2026-11-07)
 Same as on the flame (2026-10-21): fairplayd.H2 exits right after starting and launchd relaunches it every 10 s
 (13 `exec fairplayd.H2` in the first 150 s of k0156-1107), so requests to com.apple.fairplayd.versioned queue
