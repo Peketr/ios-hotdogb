@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: GPU variants traced on k0162 (k0162-gt-*, 2026-11-08)
+Same setup as the Turnip trace entry below (backboardd only, print_csv + TU_DEBUG perf), 20-swipe benchmark each.
+Big full-screen pass (~40 draws) / fps: sweetgpufreq=1 19.5 ms / 16.0; sweetgpufreq=5 9.4 ms / 17.5;
+TU_DEBUG=sysmem (default clock) 8.6 ms / **22.4**; TU_DEBUG=noubwc 11.2 ms / 14.5 (keep UBWC on).
+Earlier 0161 default-clock GMEM: 10.7 ms / 17. Uploads (copy_buffer_to_image, ~210 us each, 600-850/s) are
+15-18% of GPU time in every variant. No v2 submit refusal and no "IB is empty" line in any of the four runs,
+so 0162's skip path never ran: the 0160/0161 freezes did not recur here but their cause is not confirmed.
+Settings restored afterwards. Next: sysmem without tracing, against the 35 fps untraced baseline.
+
 ### HOTDOGB: Turnip trace of backboardd - where a frame's GPU time goes (k0161-1108-trace2, 2026-11-08)
 How (one run; undo afterwards): empty /var/local/gputrace-bb.csv and /var/local/turnip-backboardd.log with mode 666
 (backboardd's sandbox cannot create files there), /var/local/mtl2-env = `MESA_GPU_TRACES=print_csv` +

@@ -8,6 +8,7 @@
 #   netsvc   SystemConfiguration network service for an IF    nettest  DNS, TCP, then HTTPS
 #   oslog    stream the unified log                           prefs    CFPreferences read/write (no defaults)
 #   imgtest  does ImageIO decode real pixels (HEIC: no)       membw    CPU memory bandwidth
+#   sysapps  install the staged factory apps (-n dry run, -u undo); boot job: tools/hotdogb-sysapps-install.py
 #   expt, exq, runmigrator: one-off probes of ExtensionFoundation and DataMigration (runmigrator needs
 #   com.apple.migrationpluginwrapper's entitlements, not in git)
 set -euo pipefail
@@ -24,7 +25,7 @@ build() {	# NAME SOURCE [FLAGS...]
 		codesign -f -s - "out/$name"
 	fi
 }
-for c in membw pstack psx; do build $c $c.c; done
+for c in membw pstack psx sysapps; do build $c $c.c; done
 for m in expt exq nettest openapp oslog prefs runmigrator; do build $m $m.m -fobjc-arc -framework Foundation; done
 build imgtest imgtest.m -fobjc-arc -framework Foundation -framework ImageIO -framework CoreGraphics
 build lsreg lsreg.m -fobjc-arc -framework Foundation -framework MobileCoreServices
