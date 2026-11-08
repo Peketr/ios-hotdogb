@@ -1,0 +1,47 @@
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -2,10 +2,10 @@
+  * Minimal polled SWEET keys. Call once after the scheduler is running.
+  * flame: power (KPDPWR) and volume down (RESIN) on the PM8150 PON block,
+  * volume up on PM8150 GPIO6 (SID 0, 0xc500, active low).
+- * hotdogb (OnePlus 7T): power on KPDPWR, volume DOWN on GPIO6 and volume UP on
+- * PM8150 GPIO7 (0xc600, active low; gpio-keys in the 7T's FDT) instead of
+- * RESIN. 0157: swapped (0125-0156 had GPIO6 = up): pressing the upper volume
+- * button reported volume down, so side + volume up never made a screenshot.
++ * hotdogb (OnePlus 7T): power on KPDPWR, volume up on GPIO6 as on flame,
++ * volume down on PM8150 GPIO7 (0xc600, active low; gpio-keys in the 7T's FDT)
++ * instead of RESIN. 0158: confirmed on the phone (0157 swapped these and inverted the
++ * volume buttons; iOS screenshot is side + volume UP, not Android's volume down).
+  * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+  * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
+  */
+@@ -36,7 +36,7 @@
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
+ #if SWEET_HOTDOGB
+-static uint16_t keys_gpio7_apid = KEYS_NO_APID;	/* hotdogb volume up (0157) */
++static uint16_t keys_gpio7_apid = KEYS_NO_APID;	/* volume down */
+ #endif
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+@@ -116,9 +116,8 @@
+ #if SWEET_HOTDOGB
+ 		uint8_t gpio7 = 0;
+ 		bool g7ok = keys_read(keys_gpio7_apid, KEYS_GPIO7_RT, &gpio7);
+-		/* key 1 = volume up = GPIO7, key 2 = volume down = GPIO6 (0157) */
+-		int now[3] = {!!(pon & 1u), !(gpio7 & 1u), !(gpio & 1u)};
+-		bool kok[3] = {pok, g7ok, gok};
++		int now[3] = {!!(pon & 1u), !(gpio & 1u), !(gpio7 & 1u)};
++		bool kok[3] = {pok, gok, g7ok};
+ #else
+ 		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+ 		bool kok[3] = {pok, gok, pok};
+@@ -202,7 +201,7 @@
+ 		/* Same subtype as GPIO6 (one PM8150 GPIO block design). */
+ 		unsigned dir7 = subtype >= 0x10u && subtype <= 0x13u ? m7 & 3u : (m7 >> 4) & 7u;
+ 		if (!g7ok || !m7ok || !e7ok || !(e7 & 0x80u) || (dir7 != 0 && dir7 != 2)) {
+-			printf("SWEET KEYS: GPIO7 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++			printf("SWEET KEYS: GPIO7 not confirmed enabled as input; volume-down withheld, PMIC unchanged\n");
+ 			keys_gpio7_apid = KEYS_NO_APID;
+ 		}
+ 	}

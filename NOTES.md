@@ -171,3 +171,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   with sweetmtl (sweetbl default 2; 1 = panel off/on only, 0 = nothing).
 - 0157 hotdogb volume keys swapped: GPIO7 = volume up, GPIO6 = volume down (the upper button reported 0xea =
   volume down, so side + volume up never reached iOS as a screenshot combination).
+- 0158 hotdogb volume keys back to the 0156 mapping (GPIO6 = up, GPIO7 = down): 0157 inverted the volume buttons
+  on the phone. The original mapping was right; iOS screenshot is side + volume UP (Android uses volume down).
