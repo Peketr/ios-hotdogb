@@ -18,8 +18,11 @@
 #define LINK_CHAN	"IPCRTR"
 #endif
 #ifdef LINK_RAW
-#define NCHAN		2
-#define QCH		1	/* the QRTR channel */
+#define NCHAN		3
+#define QCH		1	/* the QRTR channel; 2 = LINK_CHAN2 (raw too) */
+#ifndef LINK_CHAN2
+#define LINK_CHAN2	"apr_apps2"
+#endif
 #else
 #define NCHAN		1
 #define QCH		0
@@ -45,6 +48,7 @@ static struct chan ch[NCHAN] = {
 #ifdef LINK_RAW
 	{ .name = LINK_CHAN, .lcid = 1, .deliver = link_raw },
 	{ .name = "IPCRTR", .lcid = 2, .deliver = qrtr_deliver },
+	{ .name = LINK_CHAN2, .lcid = 3, .deliver = link_raw },
 #else
 	{ .name = LINK_CHAN, .lcid = 1, .deliver = qrtr_deliver },
 #endif
@@ -356,6 +360,15 @@ int link_send(const void *data, uint32_t len)
 {
 	return chan_send(&ch[0], data, len);
 }
+
+#ifdef LINK_RAW
+int link_send2(const void *data, uint32_t len)
+{
+	if (!(ch[2].open_acked && ch[2].opened_by_remote))
+		return -1;
+	return chan_send(&ch[2], data, len);
+}
+#endif
 
 /* ---- QRTR ---- */
 

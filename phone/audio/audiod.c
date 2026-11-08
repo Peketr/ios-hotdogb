@@ -401,6 +401,8 @@ static uint32_t apr_token;
 static volatile int core_ready, versions_done;
 static volatile uint32_t rsp_opcode, rsp_status, rsp_seen;
 
+static int apr_chan2;	/* 1: send on apr_apps2 (the AFE did not answer on apr_audio_svc) */
+
 static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len)
 {
 	uint8_t b[512];
@@ -415,7 +417,7 @@ static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t 
 	memcpy(b, &h, sizeof(h));
 	if (len)
 		memcpy(b + sizeof(h), payload, len);
-	return link_send(b, (uint32_t)(sizeof(h) + len));
+	return apr_chan2 ? link_send2(b, (uint32_t)(sizeof(h) + len)) : link_send(b, (uint32_t)(sizeof(h) + len));
 }
 
 static const char *svc_name(uint32_t id)
@@ -753,11 +755,15 @@ static int up(unsigned delay)
 	if (access("/var/local/audiod.noport", F_OK) != 0) {
 		mi2s_pins();
 		int ok = 0;
-		for (int t = 0; t < 6 && !ok; t++) {	/* the audio PD may need a few seconds after the lookup */
+		for (int t = 0; t < 4 && !ok; t++) {	/* odd tries on apr_audio_svc, even ones on apr_apps2 */
+			apr_chan2 = t & 1;
+			printf("afe: trying on %s\n", apr_chan2 ? "apr_apps2" : "apr_audio_svc");
 			ok = afe_clock(LPASS_CLK_QUAD_MI2S_IBIT, BCLK, 1) == 0;
 			if (!ok)
-				link_poll(3000);
+				link_poll(2000);
 		}
+		if (ok)
+			printf("#### AFE ANSWERS ON %s\n", apr_chan2 ? "APR_APPS2" : "APR_AUDIO_SVC");
 		if (ok && afe_i2s_config() == 0 && afe_start() == 0)
 			printf("[%6llu] #### QUAT MI2S RUNNING (%u Hz bit clock)\n", (unsigned long long)link_ms(), BCLK);
 		link_poll(500);
