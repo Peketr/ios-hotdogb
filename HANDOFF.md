@@ -5,6 +5,28 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: iOS PLAYS THROUGH THE SPEAKERS, NO CRACKLE (2026-11-08) - SweetAudio.driver + audiod, kernel 0156
+The user played ringtones / Safari audio: clean from both speakers (k0156-jit-1108).
+- **SweetAudio.driver** (phone/audio/hal, build hal/build.sh; install tools/hotdogb-audio-install.py X.tgz, then
+  reboot): ios-topaz's RedwoodAudio HAL plug-in (MIT, from HackiOS user space, notices kept). In mediaserverd it
+  presents "Speaker" (+ "Hawking", "Actuator", "Codec", which VirtualAudio's routing needs) and writes the
+  speaker's 48 kHz 16-bit stereo into **/var/local/audio.fifo**: O_NONBLOCK, F_SETNOSIGPIPE, 512-byte (PIPE_BUF)
+  pieces so a full FIFO never splits a frame, reopened when audiod comes back. Its log file
+  (/var/local/sweetaudio.log) never appears: mediaserverd's sandbox does not allow writing there.
+- **VirtualAudio.plugin** is needed (it makes the speaker route): tools/sweet-root-tweaks.py's "audio" step moves
+  it to /Library/Audio/Plug-Ins/HAL.disabled; the installer links /Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin
+  -> ../HAL.disabled/VirtualAudio.plugin. mediaserverd did not crash with it (with SweetAudio's devices).
+- **audiod** after the stream opens (`#### SPEAKER READY FOR IOS`): makes the FIFO (0666), keeps the ASM session
+  running, drains the FIFO into a 1 s ring every 2 ms, and gives the DSP **whole 25 ms buffers only**, 6 queued;
+  silence when iOS plays nothing or the DSP is about to run dry. Logs `#### IOS AUDIO PLAYING` and, 2 s after the
+  last data, "idle (N frames from iOS, M buffers short, K frames dropped)".
+- Crackle history: (1) reading the FIFO only when the DSP returned a buffer: the pipe (16 KB, 85 ms) overflowed
+  on the HAL's bursts, ~38000 of 48000 frames/s arrived; (2) with the ring, partial buffers padded with silence:
+  85 of 280 buffers short. Both fixed.
+- The boot test tone is now opt-in: /var/local/audiod.tone. Volume: iOS scales the samples (software volume);
+  the amps have no speaker protection - keep it moderate.
+- Open: the amps stay unmuted and the stream runs all the time (power); microphone; haptics; Bluetooth.
+
 ### HOTDOGB: SOUND - A TEST TONE FROM BOTH SPEAKERS (2026-11-08) - audiod, kernel 0156
 The user heard the 3 s 440 Hz tone from both speakers (k0156-tone2-1108). All from userland, phone/audio/audiod
 (boot job org.iosonpixel.audiod, log /var/local/audiod.log), about 65 s after boot:
