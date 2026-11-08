@@ -1,0 +1,50 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -292,9 +292,12 @@
+ 	uint32_t hz = 10, hz90 = 0;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+-	/* 0157: boot-arg sweet90=1: the panel at 90 Hz (below, once DSI0 is mapped) and vsync at 90 Hz */
++	/*
++	 * 0157: boot-arg sweet90: the panel at 90 Hz (below, once DSI0 is mapped) and vsync at 90 Hz. 0158: a bit
++	 * mask, to test the halves apart: 1 = the panel (timing switch + INTF_1 tear check), 2 = the vsync timer.
++	 */
+ 	PE_parse_boot_argn("sweet90", &hz90, sizeof(hz90));
+-	fVsyncUS = hz90 ? 11111 : SWEET_FB_VSYNC_US;
++	fVsyncUS = (hz90 & 2) ? 11111 : SWEET_FB_VSYNC_US;
+ 	fStatTicks = 5000000 / fVsyncUS;
+ 	fVsync->setTimeoutUS(fVsyncUS);
+ 
+@@ -315,7 +318,31 @@
+ 		fDsi = (volatile uint8_t *)ml_io_map((vm_offset_t)SWEET_DSI0_PA, 0x1000);
+ 		fDsiCmd = (volatile uint32_t *)ml_io_map((vm_offset_t)SWEET_DSI_CMD_PA, 0x1000);
+ 	}
+-	if (hz90 && fDsi != NULL && fDsiCmd != NULL && fBlLock != NULL) {
++	if ((hz90 & 1) && fDsi != NULL && fDsiCmd != NULL && fBlLock != NULL) {
++		/*
++		 * 0158: with only the panel switched, the picture froze (k0157-1108-1927; touch and brightness still
++		 * worked). Command mode: INTF_1's tear check (MDP 0xae6b800, as shim/sde.c; Linux sde_hw_intf.c) counts
++		 * lines between the panel's TE pulses at SYNC_CONFIG_VSYNC's vsync_count (bits 18:0, set by ABL for
++		 * 60 Hz). At 90 Hz the next TE came at 2/3 of the frame, before the start position: no frame was sent
++		 * again. So the count is scaled by 60/90 first (downstream recomputes it per mode the same way).
++		 */
++		volatile uint8_t *intf = (volatile uint8_t *)ml_io_map((vm_offset_t)0x0ae6b800, 0x400);
++		if (intf != NULL) {
++			uint32_t tr[14];
++			for (unsigned i = 0; i < 14; i++) {
++				tr[i] = *(volatile uint32_t *)(intf + 0x280 + 4 * i);
++			}
++			uint32_t v = tr[1], cnt = v & 0x7ffff, cnt90 = cnt * 60 / 90;
++			IOLog("SWEET FB: INTF_1 tear check 280..2b4: %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", tr[0], tr[1], tr[2],
++			    tr[3], tr[4], tr[5], tr[6], tr[7], tr[8], tr[9], tr[10], tr[11], tr[12], tr[13]);
++			/* only a plausible 60 Hz count (19.2 MHz / (60 Hz x ~2450 lines) = ~130): otherwise just the log */
++			if (cnt >= 50 && cnt <= 1000) {
++				*(volatile uint32_t *)(intf + 0x284) = (v & ~0x7ffffu) | cnt90;
++				__asm__ volatile ("dsb sy" ::: "memory");
++			}
++			IOLog("#### PANEL 90 HZ TEAR CHECK: vsync_count %u -> %u (SYNC_CONFIG_VSYNC %#x -> %#x)\n", cnt, cnt90, v,
++			    *(volatile uint32_t *)(intf + 0x284));
++		}
+ 		/*
+ 		 * 0157: the 7T's panel (dtbo overlay 3: "samsung sofef03f_m fhd cmd mode dsc dsi panel") has a 60 and a
+ 		 * 90 Hz timing at the same DSI clock (0x4190ab00); its qcom,mdss-dsi-timing-switch-command, in high

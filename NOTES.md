@@ -174,3 +174,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0157 (panel-90hz; reuses the number) 90 Hz: boot-arg sweet90=1 sends the 7T panel's timing switch over DSI0 DCS
   (F0 5A 5A, 60 10, F0 A5 A5: dtbo sofef03f_m 90 Hz timing, same DSI clock) and runs vsync every 11111 us; the
   5 s stats follow the rate. Needs DSI0 mapped (sweetbl >= 1, the default with sweetmtl).
+- 0158 90 Hz froze the picture (panel at 90, INTF_1's tear check still counting for 60: the next TE came before
+  the start position): vsync_count (INTF_1 0xae6b800 + 0x284, bits 18:0) scaled by 60/90 if plausible (50..1000);
+  sweet90 is a bit mask now: 1 = panel + tear check, 2 = vsync timer, 3 = both.
