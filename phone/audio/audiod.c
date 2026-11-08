@@ -387,7 +387,9 @@ struct apr_hdr {
 	uint32_t token, opcode;
 } __attribute__((packed));
 
-#define APR_HDR_FIELD_CMD	((1u << 8) | ((sizeof(struct apr_hdr) / 4) << 4))	/* SEQ_CMD, 8 words, ver 0 */
+/* APR_MSG_TYPE_SEQ_CMD is 2 (techpack/audio/include/ipc/apr.h; 1 = CMD_RSP: the root PD's core answers either, the
+ * audio PD's AFE/ASM/ADM silently drop "responses"), 8-word header, version 0 */
+#define APR_HDR_FIELD_CMD	((2u << 8) | ((sizeof(struct apr_hdr) / 4) << 4))
 #define APR_DOMAIN_ADSP		4
 #define APR_DOMAIN_APPS		5
 #define APR_SVC_ADSP_CORE	3
@@ -512,7 +514,7 @@ static void tfa_probe(void)
 #define AFE_PORT_CMD_DEVICE_START 0x000100e5
 #define AFE_PORT_CMD_DEVICE_STOP 0x000100e6
 #define AFE_PORT_CMD_SET_PARAM_V2 0x000100ef
-#define AFE_SVC_CMD_SET_PARAM	0x000100f2
+#define AFE_SVC_CMD_SET_PARAM	0x000100f3	/* afe_svc_cmd_set_param_v1 (apr_audio-v2.h) */
 #define AFE_MODULE_AUDIO_DEV_INTERFACE 0x0001020c
 #define AFE_PARAM_ID_I2S_CONFIG	0x0001020d
 #define AFE_MODULE_CLOCK_SET	0x0001028f

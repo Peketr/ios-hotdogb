@@ -42,6 +42,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   Best guess (not verified): the audio PD waits for FastRPC - Android's audioadsprpcd serves its file reads
   (adsp_avs_config.acdb from vendor/etc/acdbdata) over the "fastrpcglink-apps-dsp" GLINK channel, which nobody
   opens here. Next: a minimal FastRPC (adsprpc) apps_std file server in audiod, or find what the audio PD waits for.
+- **Found the cause in our code** (downstream techpack/audio from LineageOS/android_kernel_oneplus_sm8150
+  lineage-20: ipc/apr.h, dsp/q6afe.c, include/dsp/apr_audio-v2.h): APR_MSG_TYPE_SEQ_CMD is **2** (audiod used 1 =
+  CMD_RSP; the root PD's core answered anyway, the audio PD dropped them), and AFE_SVC_CMD_SET_PARAM is
+  **0x000100f3** (v1 layout: payload_size + mem_mapping_hdr + param data, as audiod builds it), not 0x100f2.
+  The FastRPC guess above is not needed for that. Downstream order otherwise matches audiod: q6core ready
+  (AVCS_CMD_ADSP_EVENT_GET_STATE), then audio_notifier waits for servreg UP on the ADSP domain.
+- For the PCM path later: ios-topaz streams a 1 s ring of 48 kHz 16-bit stereo from shared memory, with an SMMU
+  identity mapping for the audio DMA stream and the SID in the address msw. Ours (stock DT qcom,msm-audio-ion):
+  apps SMMU **0x1b21**, qcom,smmu-sid-mask 0xf.
 - Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
   tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
   I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM
