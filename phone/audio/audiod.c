@@ -322,17 +322,28 @@ static int boot_adsp(void)
 			return -1;
 		}
 		if (ph[i].filesz) {
+			/* streamed in 64 KB pieces: launchd jobs have a small jetsam limit (a 9.4 MB segment in one
+			 * malloc got audiod killed, reason "per-process limit") */
 			char path[128];
-			size_t sl;
+			static uint8_t chunk[0x10000 + 4];
 			snprintf(path, sizeof(path), FW_DIR "/adsp.b%02u", i);
-			uint8_t *seg = slurp(path, &sl);
-			if (!seg || sl < ph[i].filesz) {
-				fprintf(stderr, "boot: %s missing or short\n", path);
+			FILE *f = fopen(path, "rb");
+			uint32_t done = 0;
+			while (f && done < ph[i].filesz) {
+				size_t want = ph[i].filesz - done < 0x10000 ? ph[i].filesz - done : 0x10000;
+				size_t got = fread(chunk, 1, want, f);
+				if (got != want)
+					break;
+				memset(chunk + got, 0, 4);
+				pm_wr(pa + done, chunk, (got + 3) & ~(size_t)3);
+				done += (uint32_t)got;
+			}
+			if (f)
+				fclose(f);
+			if (done < ph[i].filesz) {
+				fprintf(stderr, "boot: %s missing or short (%u of %u bytes)\n", path, done, ph[i].filesz);
 				return -1;
 			}
-			memset(seg + ph[i].filesz, 0, 4);
-			pm_wr(pa, seg, (ph[i].filesz + 3) & ~3u);
-			free(seg);
 			total += ph[i].filesz;
 		}
 		for (uint64_t o = (ph[i].filesz + 3) & ~3ull; o < ph[i].memsz; o += sizeof(zeros)) {
