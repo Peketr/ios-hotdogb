@@ -931,7 +931,10 @@ static void tone(unsigned secs)
  * from the DSP, silence when nothing comes; the stream runs from now on.
  */
 #define FIFO		"/var/local/audio.fifo"
-#define NBUF_LIVE	4	/* 100 ms in the DSP */
+#define NBUF_LIVE	6	/* up to 150 ms queued in the DSP: room for the HAL's bursts */
+#if NBUF_LIVE * BUF_BYTES > SHM_SIZE
+#error the live buffers do not fit in the shared memory
+#endif
 
 static void stream_serve(void)
 {
@@ -987,7 +990,13 @@ static void stream_serve(void)
 			dropped += drop / 4;
 		}
 		while (sent - (writes_done - done0) < NBUF_LIVE) {
-			size_t have = rlen < BUF_BYTES ? rlen & ~(size_t)3 : BUF_BYTES;
+			/* only whole buffers of iOS's sound (a partial one plus silence crackled: 85 of 280 buffers, the
+			 * HAL writes in bursts); while it plays and the DSP still has 2 queued, wait for more. Running
+			 * dry, a buffer of silence goes and what is in the ring waits for the next one. */
+			unsigned inflight = sent - (writes_done - done0);
+			if (playing && rlen < BUF_BYTES && inflight >= 2)
+				break;
+			size_t have = rlen < BUF_BYTES ? 0 : BUF_BYTES;
 			for (size_t i = 0; i < have;) {
 				size_t c = RING_BYTES - rhead < have - i ? RING_BYTES - rhead : have - i;
 				memcpy(buf + i, ring + rhead, c);
