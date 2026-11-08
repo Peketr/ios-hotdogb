@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: BLUETOOTH RADIO WORKS - btd scans 23 LE + 1 classic device (k0162-bt-3, 2026-11-08)
+Stage 1 of Bluetooth (no iOS stack yet): phone/bt/btd (build: phone/bt/build.sh), installed with
+`python tools/hotdogb-bt-install.py` (btd -> /var/local/bin, firmware -> /var/local/fw/bt from the bluetooth_a
+partition, pulled read-only into ../hotdogb/fw/bluetooth/image, not in git). Boot jobs org.iosonpixel.btd
+(`btd auto`: 40 s wait, then scan, power off; log /var/local/btd.log; skip: /var/local/btd.off) and
+org.iosonpixel.btd-regs (read-only dump, /var/local/btd-regs.log; can be removed). Kernel 0162, no boot args.
+- Hardware (uart.c, userland via /dev/pmem): QUPv3 wrapper 2 SE3 at 0xc8c000 (DT qupv3_se13_4uart), GPIO 43
+  CTS / 44 RTS / 45 TX / 46 RX = qup13 (function 1, EAST tile). GCC vote 0x52014 bit 7, RCG 0x1e4d8 (not DFS:
+  btd programs M/N/D from the Linux table), QUP hw 0x10030000 -> 32x oversampling, SE fw 0x20b (UART, loaded
+  by XBL), FIFO 16/32 words, polled. 3 Mbaud = 96 MHz / 1; 115200 = 7.3728 MHz / 2; 2400 = 7.3728 MHz / 96.
+- Supplies ldoa7 1.8 V, ldoc2 1.304 V, ldoc11 3.312 V + rfclka2 (wland votes the same rails).
+- WCN3998: pulse 0xC0 at 2400, 0xFC at 115200 -> EDL version 0.1 s later: product 0xa, soc 0x40010224, rom
+  0x1001 (btqca's formula would pick "01": btd maps soc ...224 -> crbtfw21/crnv21) -> 3 Mbaud -> rampatch
+  229812 bytes in 2.1 s -> NVM (in-band sleep bit and deep sleep cleared, baud byte 14) -> reset ->
+  HCI/LMP 10 (5.1), subversion 0x2be, manufacturer 29 (Qualcomm). 0 junk bytes, no UART errors.
+- 10 s passive LE scan: 23 devices; 10 s inquiry: 1 classic device. Then power-off pulse.
+- Next: stage 2 (kernel: an IOKit `bluetooth` node + Apple BT module stand-in + /dev/uart.bluetooth bridged
+  to btd), stage 3 (btd answers bluetoothd's Broadcom vendor commands and reports a BCM chip). Open: BD
+  address (the NVM default), IBS/power saving, coexistence with Wi-Fi under load.
+
 ### HOTDOGB: GPU variants traced on k0162 (k0162-gt-*, 2026-11-08)
 Same setup as the Turnip trace entry below (backboardd only, print_csv + TU_DEBUG perf), 20-swipe benchmark each.
 Big full-screen pass (~40 draws) / fps: sweetgpufreq=1 19.5 ms / 16.0; sweetgpufreq=5 9.4 ms / 17.5;
