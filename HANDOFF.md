@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: SOUND - A TEST TONE FROM BOTH SPEAKERS (2026-11-08) - audiod, kernel 0156
+The user heard the 3 s 440 Hz tone from both speakers (k0156-tone2-1108). All from userland, phone/audio/audiod
+(boot job org.iosonpixel.audiod, log /var/local/audiod.log), about 65 s after boot:
+- ADSP PAS boot -> GLINK apr_audio_svc + IPCRTR (QRTR, pd-mapper with the ADSP's domains, servreg listener:
+  msm/adsp/audio_pd UP). APR headers must be SEQ_CMD (2): with 1 the audio PD ignored everything.
+- AFE QUAT_MI2S_RX 0x1006: GPIO 137-140 = qua_mi2s, clock 0x106 at 3.072 MHz, I2S 48 kHz **32-bit** stereo SD1
+  (the amps' container: 32-bit slots), start.
+- TFA9874 x2 (tfa.c): container /var/local/fw/tfa98xx.cnt "speaker" profile, PLLS/CLKS/AMPS/SWS 1, MANSTATE 9.
+- apps SMMU stream 0x1b21 -> a translation-off bank (CB6 / SMR8). Shared buffers: 0x9e380000 + 512 KB (top of
+  ABL's display carve-out, below 4 GiB), ADSP address msw = SID offset 1.
+- ASM: shared memory map (handle) -> open write v3 (session 1 stream 1, port 0x0101, multi-channel PCM v2,
+  16-bit, no post-processing) -> media format 48 kHz stereo -> **then** ADM device open (NULL topology, 32-bit,
+  COPP 0) and matrix map session 1 -> COPP (mapping before the ASM open: 0x2 EBADPARAM) -> run -> 120 x 25 ms
+  writes, all done -> pause.
+- Volume: the tone is at about -26 dBFS. The amps run without speaker protection (no NXP algorithm on the ADSP):
+  keep levels moderate.
+- Skip files: /var/local/audiod.{off,noport,noamp,notone}.
+- Next: a PCM path from iOS: a CoreAudio HAL plug-in (ios-topaz uses HackiOS's RedwoodAudio.driver writing
+  48 kHz 16-bit stereo to /dev/redwood-audio) feeding audiod's ASM ring; volume; stop the amps when idle.
+
 ### HOTDOGB: AUDIO STEP 1 - the ADSP boots and its audio services answer (2026-11-08) - audiod, kernel 0156
 - phone/audio/audiod (build: phone/audio/build.sh; phone/wifi's SMEM/GLINK with -DGLINK_HOST=2 -DIPC_GLINK=8
   -DLINK_CHAN='"apr_audio_svc"' -DLINK_RAW). Boot job org.iosonpixel.audiod = `audiod auto` (`up 30`: waits for
