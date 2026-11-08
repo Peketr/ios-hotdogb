@@ -5,6 +5,23 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: 90 Hz panel (kernels 0157/0158) and a hands-free swipe benchmark (2026-11-08)
+- **0157** `sweet90=1`: the panel's 90 Hz timing switch over DSI0 DCS (F0 5A 5A, 60 10, F0 A5 A5; dtbo sofef03f_m
+  90 Hz timing, same DSI clock) + vsync every 11.1 ms. Result (k0157-1108-1927): **the picture froze** (touch and
+  brightness still worked, iOS kept presenting): INTF_1's tear check still counted for 60 Hz.
+- **0158**: before the switch, INTF_1 (0xae6b800) SYNC_CONFIG_VSYNC vsync_count (0x284 bits 18:0) x 60/90 (only
+  if 50..1000); `sweet90` is a bit mask: 1 = panel + tear check, 2 = vsync timer, 3 = both (run-current: 3).
+  k0158-1108-1946: the picture updates; the user: "hard to tell, probably yes, but still sluggish". The tear-check
+  log lines come before the live log starts (read them from the rawdump if needed).
+- **Do not poke 0xae70000**: reading it (wrong ping-pong guess) reset the phone. The tear check is in INTF_1.
+- **tools/hotdogb-swipebench.py [SECS]**: tap + swipe-up unlock, then home pages 1 <-> 2 through the kernel's
+  "swipe" command, averaging the 5 s SWEET FB / SWEET GPU lines inside the window. k0158 at 90 Hz, 30 s:
+  **23.0 fps** (18.6-24.8), **GPU busy 6%**, backboardd 715 submits at 2.1 ms. So home-screen paging is not
+  GPU-bound (CPUs are at their top clocks since 0086, DDR/SH0 voted at top by sweet_gpu.c): the time goes on the
+  CPU side / frame pacing (backboardd's and SpringBoard's threads). Settings-type screens did reach 57-59% GPU.
+- Next: on-demand thread samples during the benchmark (bsd/dev/sweet_sample.c only samples every 120 s) and
+  symbolication with tools/sweet-crash.py on the Mac.
+
 ### HOTDOGB: iOS PLAYS THROUGH THE SPEAKERS, NO CRACKLE (2026-11-08) - SweetAudio.driver + audiod, kernel 0156
 The user played ringtones / Safari audio: clean from both speakers (k0156-jit-1108).
 - **SweetAudio.driver** (phone/audio/hal, build hal/build.sh; install tools/hotdogb-audio-install.py X.tgz, then
