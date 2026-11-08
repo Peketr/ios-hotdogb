@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include "../wifi/pmem.h"
 #include "../wifi/smem.h"
 #include "../wifi/link.h"
@@ -922,6 +925,67 @@ static void tone(unsigned secs)
 	link_poll(200);
 }
 
+/*
+ * iOS's sound: SweetAudio.driver (phone/audio/hal, in mediaserverd) writes what iOS plays for the speaker into
+ * this FIFO, 48 kHz 16-bit stereo, in whole 512-byte pieces. Here it goes into the ASM buffers as they come back
+ * from the DSP, silence when nothing comes; the stream runs from now on.
+ */
+#define FIFO		"/var/local/audio.fifo"
+#define NBUF_LIVE	4	/* 100 ms in the DSP */
+
+static void stream_serve(void)
+{
+	unlink(FIFO);
+	if (mkfifo(FIFO, 0666) || chmod(FIFO, 0666)) {
+		printf("stream: mkfifo %s: %s\n", FIFO, strerror(errno));
+		return;
+	}
+	int fd = open(FIFO, O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		printf("stream: open %s: %s\n", FIFO, strerror(errno));
+		return;
+	}
+	uint32_t run[3] = { 0, 0, 0 };
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_SESSION_RUN_V2, run, sizeof(run));
+	link_poll(50);
+	printf("[%6llu] #### SPEAKER READY FOR IOS (%s)\n", (unsigned long long)link_ms(), FIFO);
+	static uint8_t buf[BUF_BYTES];
+	unsigned sent = 0;
+	uint32_t done0 = writes_done;
+	uint64_t last_data = 0, frames_in = 0;
+	int playing = 0;
+	for (;;) {
+		while (sent - (writes_done - done0) < NBUF_LIVE) {
+			size_t have = 0;
+			while (have < BUF_BYTES) {
+				ssize_t n = read(fd, buf + have, BUF_BYTES - have);
+				if (n <= 0)
+					break;
+				have += (size_t)n;
+			}
+			have &= ~(size_t)3;
+			if (have) {
+				frames_in += have / 4;
+				last_data = link_ms();
+				if (!playing) {
+					playing = 1;
+					printf("[%6llu] #### IOS AUDIO PLAYING\n", (unsigned long long)link_ms());
+				}
+			}
+			memset(buf + have, 0, BUF_BYTES - have);
+			pm_wr(SHM_PA + (sent % NBUF_LIVE) * BUF_BYTES, buf, BUF_BYTES);
+			stream_write(sent % NBUF_LIVE);
+			sent++;
+		}
+		if (playing && link_ms() - last_data > 2000) {
+			playing = 0;
+			printf("[%6llu] stream: idle (%llu frames from iOS so far)\n", (unsigned long long)link_ms(),
+			       (unsigned long long)frames_in);
+		}
+		link_poll(2);
+	}
+}
+
 static int up(unsigned delay)
 {
 	tfa_probe();
@@ -997,9 +1061,11 @@ static int up(unsigned delay)
 				}
 			if (n)
 				printf("[%6llu] #### SPEAKER AMPS RUNNING (%d of 2)\n", (unsigned long long)link_ms(), n);
-			if (n && access("/var/local/audiod.notone", F_OK) != 0 && smmu_identity(AUDIO_SID, 0) == 0 &&
-			    stream_open() == 0)
-				tone(3);
+			if (n && smmu_identity(AUDIO_SID, 0) == 0 && stream_open() == 0) {
+				if (access("/var/local/audiod.tone", F_OK) == 0)	/* the boot tone only when asked */
+					tone(3);
+				stream_serve();
+			}
 		}
 	}
 	printf("audiod: up; serving the ADSP (SMP2P, GLINK)\n");
