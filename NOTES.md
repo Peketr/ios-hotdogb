@@ -177,3 +177,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0158 90 Hz froze the picture (panel at 90, INTF_1's tear check still counting for 60: the next TE came before
   the start position): vsync_count (INTF_1 0xae6b800 + 0x284, bits 18:0) scaled by 60/90 if plausible (50..1000);
   sweet90 is a bit mask now: 1 = panel + tear check, 2 = vsync timer, 3 = both.
+- 0159 sample bursts: USB command "sample NAMES COUNT MS" samples the running (not waiting) threads of NAMES
+  every MS ms (SMP name tN tid T pc ... bt ...; header once); tools/hotdogb-swipebench.py --sample triggers it
+  during the swipes, tools/sweet-profile.py counts busy threads / hot pcs, tools/sweet-crash.py symbolicates.

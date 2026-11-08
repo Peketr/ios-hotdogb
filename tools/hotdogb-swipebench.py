@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Swipe benchmark for the running hotdogb, no hands needed: the kernel's command server injects the touches.
 
-  python tools/hotdogb-swipebench.py [SECONDS] [--no-unlock]      (default 30 s)
+  python tools/hotdogb-swipebench.py [SECONDS] [--no-unlock] [--sample]      (default 30 s)
 
 Wakes the screen (power-key-free: a tap), swipes up to unlock (no passcode), then swipes between home screen
 pages 1 <-> 2 for SECONDS and averages the kernel's 5 s lines that fall inside that window:
   SWEET FB: 5s: N swaps (F fps) ...        frames iOS presented
   SWEET GPU: 5s: ... GPU busy X ms (P%) ... backboardd n/ms ...
 Reads the newest logs/runs/*/live.txt (the run's live recorder must be running).
+--sample (kernel 0159): a thread sample burst of SpringBoard and backboardd every 50 ms while swiping;
+then python tools/sweet-profile.py -o logs/profile.txt counts it.
 """
 import glob, os, re, subprocess, sys, time
 
@@ -46,6 +48,8 @@ def main():
         cmd('swipe 540 2350 540 900 300')	# up from the bottom edge: unlock
         time.sleep(2.0)
     n0 = len(lines(path))
+    if '--sample' in sys.argv:
+        cmd(f'sample SpringBoard,backboardd {secs * 20} 50')
     t_end = time.time() + secs
     n = 0
     while time.time() < t_end:
