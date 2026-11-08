@@ -11,6 +11,10 @@
 #include "pmem.h"
 
 #define LCID		1
+/* the channel: QRTR's by default; phone/audio builds LINK_RAW on "apr_audio_svc" (packets to link_raw) */
+#ifndef LINK_CHAN
+#define LINK_CHAN	"IPCRTR"
+#endif
 #define N_INTENTS	8
 #define INTENT_SIZE	4096
 #define FEAT_INTENT_REUSE 1
@@ -50,7 +54,7 @@ uint64_t link_ms(void)
 
 static void send_open(void)
 {
-	const char name[] = "IPCRTR";
+	const char name[] = LINK_CHAN;
 	glink_send(GLINK_CMD_OPEN, LCID, sizeof(name), name, sizeof(name));
 	open_tx = 1;
 }
@@ -102,9 +106,9 @@ static int rx_one(void)
 		glink_rx_peek(name, 8, p2 < 63 ? p2 : 63);
 		adv += nl;
 		LOG("glink: < OPEN rcid %u \"%s\"\n", p1, name);
-		/* Linux acks every remote open; only IPCRTR gets opened from our side */
+		/* Linux acks every remote open; only LINK_CHAN gets opened from our side */
 		glink_send(GLINK_CMD_OPEN_ACK, p1, 0, NULL, 0);
-		if (!strcmp(name, "IPCRTR")) {
+		if (!strcmp(name, LINK_CHAN)) {
 			rcid = p1;
 			opened_by_remote = 1;
 			if (!open_tx)
@@ -209,7 +213,7 @@ static int rx_one(void)
 		break;
 	}
 	case GLINK_CMD_READ_NOTIF:
-		wr32(0x17c0000cull, 1u << 12);
+		glink_kick();
 		break;
 	case GLINK_CMD_SIGNALS:
 		LOG("glink: < SIGNALS %#x\n", p2);
@@ -244,15 +248,21 @@ int link_up(qrtr_cb_t cb, unsigned timeout_ms)
 	if (glink_init())
 		return -1;
 	glink_send(GLINK_CMD_VERSION, 1, FEAT_INTENT_REUSE, NULL, 0);
-	uint64_t end = now_ms() + timeout_ms;
-	while (now_ms() < end && !(open_acked && opened_by_remote))
+	uint64_t start = now_ms(), end = start + timeout_ms;
+	while (now_ms() < end && !(open_acked && opened_by_remote)) {
 		link_poll(10);
+#ifdef LINK_RAW
+		/* the remote may wait for us to open first */
+		if (!open_tx && version_done && now_ms() > start + 3000)
+			send_open();
+#endif
+	}
 	if (!(open_acked && opened_by_remote)) {
-		printf("glink: IPCRTR not open (version %d, remote open %d, ack %d)\n",
+		printf("glink: %s not open (version %d, remote open %d, ack %d)\n", LINK_CHAN,
 		       version_done, opened_by_remote, open_acked);
 		return -1;
 	}
-	printf("glink: IPCRTR open (rcid %u)\n", rcid);
+	printf("glink: %s open (rcid %u)\n", LINK_CHAN, rcid);
 	return 0;
 }
 
@@ -311,6 +321,10 @@ fail:
 
 static void handle_data(const uint8_t *d, uint32_t n)
 {
+#ifdef LINK_RAW
+	link_raw(d, n);
+	return;
+#endif
 	struct qrtr_hdr hd;
 	if (n < sizeof(hd)) {
 		LOG("qrtr: short packet %u\n", n);

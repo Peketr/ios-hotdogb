@@ -8,7 +8,13 @@
 #define FIFO_TX_ITEM	479	/* ours: apps -> modem */
 #define FIFO_RX_ITEM	480	/* the modem's */
 #define APCS_IPC	0x17c0000cull
+/* the edge: modem by default; phone/audio builds the ADSP's (SMEM host 2, APCS IPC bit 8) */
+#ifndef GLINK_HOST
+#define GLINK_HOST	SMEM_HOST_MODEM
+#endif
+#ifndef IPC_GLINK
 #define IPC_GLINK	12
+#endif
 
 static uint64_t desc, tx_fifo, rx_fifo;
 static uint32_t tx_len, rx_len;
@@ -22,14 +28,14 @@ static uint32_t tx_len, rx_len;
 int glink_init(void)
 {
 	uint32_t sz;
-	if (smem_alloc(SMEM_HOST_MODEM, DESC_ITEM, 32, &desc) ||
-	    smem_alloc(SMEM_HOST_MODEM, FIFO_TX_ITEM, 16384, &tx_fifo) ||
-	    smem_get(SMEM_HOST_MODEM, FIFO_TX_ITEM, &tx_fifo, &tx_len)) {
+	if (smem_alloc(GLINK_HOST, DESC_ITEM, 32, &desc) ||
+	    smem_alloc(GLINK_HOST, FIFO_TX_ITEM, 16384, &tx_fifo) ||
+	    smem_get(GLINK_HOST, FIFO_TX_ITEM, &tx_fifo, &tx_len)) {
 		fprintf(stderr, "glink: smem items\n");
 		return -1;
 	}
-	if (smem_get(SMEM_HOST_MODEM, FIFO_RX_ITEM, &rx_fifo, &rx_len)) {
-		fprintf(stderr, "glink: the modem has no rx fifo (item 480)\n");
+	if (smem_get(GLINK_HOST, FIFO_RX_ITEM, &rx_fifo, &rx_len)) {
+		fprintf(stderr, "glink: the remote has no rx fifo (item 480, host %u)\n", (unsigned)GLINK_HOST);
 		return -1;
 	}
 	(void)sz;
@@ -74,8 +80,13 @@ int glink_send(uint16_t cmd, uint16_t p1, uint32_t p2, const void *data, size_t 
 	head = tx_write(head, buf, padded);
 	__asm__ volatile("dsb sy" ::: "memory");
 	wr32(TX_HEAD, head);
-	wr32(APCS_IPC, 1u << IPC_GLINK);
+	glink_kick();
 	return 0;
+}
+
+void glink_kick(void)
+{
+	wr32(APCS_IPC, 1u << IPC_GLINK);
 }
 
 size_t glink_rx_avail(void)

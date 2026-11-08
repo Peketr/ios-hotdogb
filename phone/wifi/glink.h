@@ -21,6 +21,7 @@
 #define GLINK_CMD_SIGNALS	15
 
 int glink_init(void);
+void glink_kick(void);		/* ring the remote's GLINK doorbell */
 /* Queue one command (8-byte header + data, padded to 8) and ring the modem. */
 int glink_send(uint16_t cmd, uint16_t p1, uint32_t p2, const void *data, size_t len);
 /* Bytes available from the modem, and copying/consuming them. */
