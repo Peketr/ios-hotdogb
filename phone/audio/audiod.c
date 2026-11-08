@@ -9,6 +9,8 @@
  *   audiod up [DELAY]   after DELAY s (default 0): power votes, PAS boot, GLINK, APR core state + versions
  *   audiod auto         the boot job: `up 30` (wland's AOSS messages come first: one QMP mailbox)
  *   audiod shutdown     PAS shutdown of the ADSP
+ * After the core is ready, up also muxes the quaternary MI2S pins and starts QUAT_MI2S_RX (48 kHz 16-bit stereo on
+ * SD1, LPASS bit clock 1.536 MHz), then reads the amps again (/var/local/audiod.noport skips this).
  *
  * The speakers (dtbo overlay 3): NXP TFA98xx amps at I2C 0x34 (right, reset GPIO 37) and 0x35 (left, reset
  * GPIO 100) on the quaternary MI2S port (oplus,speaker-i2s-id 3). No WCD9340 / SLIMbus on that path.
@@ -395,6 +397,7 @@ struct apr_hdr {
 
 static uint32_t apr_token;
 static volatile int core_ready, versions_done;
+static volatile uint32_t rsp_opcode, rsp_status, rsp_seen;
 
 static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len)
 {
@@ -449,9 +452,12 @@ void link_raw(const uint8_t *d, uint32_t n)
 		versions_done = 1;
 		break;
 	case APR_BASIC_RSP_RESULT:
-		printf("apr: result for %#x from %s: %#x\n", w[0], svc_name(h.src_svc), w[1]);
+		printf("apr: result for %#x from %s: %#x%s\n", w[0], svc_name(h.src_svc), w[1], w[1] ? " (ERROR)" : "");
 		if (w[0] == AVCS_GET_VERSIONS)
 			versions_done = 1;
+		rsp_opcode = w[0];
+		rsp_status = w[1];
+		rsp_seen++;
 		break;
 	default:
 		printf("apr: < %s port %u -> %s port %u opcode %#x token %u, %u bytes: %x %x %x %x\n", svc_name(h.src_svc),
@@ -495,6 +501,96 @@ static void tfa_probe(void)
 	}
 }
 
+/* ---- AFE (Linux sound/soc/qcom/qdsp6/q6afe.c, q6dsp-lpass-clocks): the quaternary MI2S RX port ---- */
+
+#define APR_SVC_AFE		4
+#define AFE_PORT_QUAT_MI2S_RX	0x1006
+#define AFE_PORT_CMD_DEVICE_START 0x000100e5
+#define AFE_PORT_CMD_DEVICE_STOP 0x000100e6
+#define AFE_PORT_CMD_SET_PARAM_V2 0x000100ef
+#define AFE_SVC_CMD_SET_PARAM	0x000100f2
+#define AFE_MODULE_AUDIO_DEV_INTERFACE 0x0001020c
+#define AFE_PARAM_ID_I2S_CONFIG	0x0001020d
+#define AFE_MODULE_CLOCK_SET	0x0001028f
+#define AFE_PARAM_ID_CLOCK_SET	0x00010290
+#define LPASS_CLK_QUAD_MI2S_IBIT 0x106
+#define I2S_SD1			2	/* AFE_PORT_I2S_SD1: the stock DT's quat mi2s rx-lines = 0x02 */
+#define RATE			48000
+#define BCLK			(RATE * 16 * 2)
+
+/* send and wait for the APR basic response to this opcode: 0 = ok */
+static int apr_cmd(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len, const char *what)
+{
+	uint32_t seen = rsp_seen;
+	if (apr_send(svc, opcode, payload, len))
+		return -1;
+	for (int t = 0; t < 200; t++) {
+		link_poll(10);
+		if (rsp_seen != seen && rsp_opcode == opcode) {
+			printf("afe: %s -> %#x\n", what, rsp_status);
+			return rsp_status ? -1 : 0;
+		}
+	}
+	printf("afe: %s -> no answer\n", what);
+	return -1;
+}
+
+struct param_hdr { uint32_t module_id, param_id; uint16_t param_size, reserved; } __attribute__((packed));
+
+static int afe_clock(uint32_t id, uint32_t hz, int on)
+{
+	struct {
+		uint32_t payload_size, lsw, msw, map;
+		struct param_hdr p;
+		uint32_t minor, clk_id, freq;
+		uint16_t attri, root;
+		uint32_t enable;
+	} __attribute__((packed)) c = {
+		.payload_size = sizeof(struct param_hdr) + 24,
+		.p = { AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, 24, 0 },
+		.minor = 1, .clk_id = id, .freq = hz, .attri = 1 /* COUPLE_NO */, .root = 0, .enable = (uint32_t)on,
+	};
+	char what[64];
+	snprintf(what, sizeof(what), "clock %#x %u Hz %s", id, hz, on ? "on" : "off");
+	return apr_cmd(APR_SVC_AFE, AFE_SVC_CMD_SET_PARAM, &c, sizeof(c), what);
+}
+
+static int afe_i2s_config(void)
+{
+	struct {
+		uint16_t port, payload_size;
+		uint32_t lsw, msw, map;
+		struct param_hdr p;
+		uint32_t minor;
+		uint16_t bit_width, channel_mode, mono_stereo, ws_src;
+		uint32_t sample_rate;
+		uint16_t data_format, reserved;
+	} __attribute__((packed)) c = {
+		.port = AFE_PORT_QUAT_MI2S_RX, .payload_size = sizeof(struct param_hdr) + 20,
+		.p = { AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, 20, 0 },
+		.minor = 1, .bit_width = 16, .channel_mode = I2S_SD1, .mono_stereo = 1 /* stereo */,
+		.ws_src = 1 /* internal: we are the I2S master */, .sample_rate = RATE,
+	};
+	return apr_cmd(APR_SVC_AFE, AFE_PORT_CMD_SET_PARAM_V2, &c, sizeof(c), "QUAT_MI2S_RX i2s config 48 kHz 16-bit stereo SD1");
+}
+
+static int afe_start(void)
+{
+	uint16_t s[2] = { AFE_PORT_QUAT_MI2S_RX, 0 };
+	return apr_cmd(APR_SVC_AFE, AFE_PORT_CMD_DEVICE_START, s, sizeof(s), "QUAT_MI2S_RX start");
+}
+
+/* TLMM south tile (pinctrl-sm8150.c): 137 sck, 138 ws, 139 sd0, 140 sd1 = qua_mi2s (function 1), 8 mA, no pull */
+static void mi2s_pins(void)
+{
+	for (unsigned g = 137; g <= 140; g++) {
+		uint64_t ctl = 0x03d00000ull + 0x1000ull * g;
+		uint32_t was = rd32(ctl);
+		wr32(ctl, (1u << 2) | (3u << 6));
+		printf("pins: gpio%u ctl %#x -> %#x\n", g, was, rd32(ctl));
+	}
+}
+
 static int up(unsigned delay)
 {
 	tfa_probe();
@@ -526,6 +622,14 @@ static int up(unsigned delay)
 	apr_send(APR_SVC_ADSP_CORE, AVCS_GET_VERSIONS, NULL, 0);
 	for (int t = 0; t < 30 && !versions_done; t++)
 		link_poll(100);
+	if (access("/var/local/audiod.noport", F_OK) != 0) {
+		mi2s_pins();
+		if (afe_clock(LPASS_CLK_QUAD_MI2S_IBIT, BCLK, 1) == 0 && afe_i2s_config() == 0 && afe_start() == 0)
+			printf("[%6llu] #### QUAT MI2S RUNNING (%u Hz bit clock)\n", (unsigned long long)link_ms(), BCLK);
+		link_poll(500);
+		printf("amps with the bit clock running:\n");
+		tfa_probe();
+	}
 	printf("audiod: up; serving the ADSP (SMP2P, GLINK)\n");
 	for (;;)
 		link_poll(1000);

@@ -18,7 +18,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   or QRTR needed so far.
 - First try: jetsam killed audiod (reason ns 1 code 7 = per-process limit) holding the 9.4 MB segment in one
   malloc; segments are now streamed in 64 KB pieces.
-- Next: AFE QUATERNARY_MI2S_RX (port 0x1020) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
+- **Speaker amps answer** (k0156-audio3-1108, `audiod tfa`, also run first by up/auto): phone/audio/i2c.c = GENI
+  I2C FIFO mode on QUP0 SE4 0x890000 (XBL/ABL leave it clocked from XO with SER_M_CLK_CFG 0x21, FIFO mode allowed:
+  GENI_IF_DISABLE_RO 0, firmware 0x303; pins 51/52 already qup4 + pull-up). 0x34 (right) and 0x35 (left) both:
+  reg 03 = 0x0c74 = **TFA9874** (has a CoolFlux DSP), 00=0001 02=25c8 05=1000 08=0002 10=0017 13=010f. Reset GPIOs
+  37 (north tile 0x3900000) / 100 (south 0x3d00000) are inputs pulled low = out of reset. MI2S pins 137-140 (south)
+  are still GPIOs (function 1 = qua_mi2s).
+- No tfa98xx.cnt in vendor_a (only "audio_tfa9894" / oplus_audio_check_tfa98xx_driver_ready strings): looking in
+  odm_a (super + 0x100000, ext4, 51740 x 4 KB; read with `flame-files.py part super`), kept in ../hotdogb/fw/odm.
+- Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
   tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
   I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM
   (ios-topaz: HackiOS's RedwoodAudio.driver -> /dev/redwood-audio, 48 kHz 16-bit stereo).
