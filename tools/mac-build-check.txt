@@ -29,3 +29,4 @@
 0158 #### PANEL 90 HZ TEAR CHECK: vsync_count
 0159 #### SAMPLE BURST START
 0160 #### GPU FENCE WAIT: spin
+0161 5s jobs: <1ms

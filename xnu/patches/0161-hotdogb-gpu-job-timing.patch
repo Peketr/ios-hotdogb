@@ -1,0 +1,269 @@
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -749,13 +749,17 @@
+ 	return v;
+ }
+ 
++int a6_ibts_on = 1;
++uint32_t a6_ring_used_max;
++
+ uint32_t a6_submit_ibs_async(struct a6_gpu *g, const uint64_t *iova, const uint32_t *dwords, unsigned nib,
+ 			     unsigned timeout_ms)
+ {
+ 	uint64_t fva = a6_pool_va(A6_OFF_SCRATCH);
+ 	/* GPU time of this submit: CP_ALWAYS_ON_COUNTER before the IBs and once they are idle (a6_submit_time) */
+ 	uint64_t ts = a6_pool_va(A6_OFF_SCRATCH + A6_TS_OFF) + 16ull * ((g->fence + 1) % A6_TS_SLOTS);
+-	uint32_t dw[4 + 4 + 4 * A6_SUBMIT_MAX + 5 + 5], n = 0;
++	uint64_t ibts = a6_pool_va(A6_OFF_SCRATCH + A6_IBTS_OFF) + A6_IBTS_STRIDE * ((g->fence + 1) % A6_TS_SLOTS);
++	uint32_t dw[4 + 4 + 9 * A6_SUBMIT_MAX + 5 + 5], n = 0;
+ 	if (nib == 0 || nib > A6_SUBMIT_MAX)
+ 		return 0;
+ 	dw[n++] = a6_pkt7(A6_CP_EVENT_WRITE, 1);
+@@ -771,6 +775,14 @@
+ 		dw[n++] = (uint32_t)iova[i];
+ 		dw[n++] = (uint32_t)(iova[i] >> 32);
+ 		dw[n++] = dwords[i] & 0xfffff;
++		if (a6_ibts_on && i + 1 < nib) {
++			/* 0161: this IB's end (the last IB's end is the idle stamp below) */
++			dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++			dw[n++] = a6_pkt7(0x3e, 3);
++			dw[n++] = 0x980 | 2u << 18;
++			dw[n++] = (uint32_t)(ibts + 8ull * i);
++			dw[n++] = (uint32_t)((ibts + 8ull * i) >> 32);
++		}
+ 	}
+ 	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
+ 	dw[n++] = a6_pkt7(0x3e, 3);		/* ... -> ts + 8 */
+@@ -785,6 +797,8 @@
+ 	/* room in the ring: what the CP has not read yet stays intact */
+ 	for (unsigned i = 0; ; i++) {
+ 		uint32_t r = rd32(GREG(CP_RB_RPTR)), used = (g->wptr + A6_RING_DW - r) % A6_RING_DW;
++		if (used > a6_ring_used_max)
++			a6_ring_used_max = used;
+ 		if (used + n + 16 < A6_RING_DW)
+ 			break;
+ 		if (i >= timeout_ms * 50)
+@@ -811,6 +825,17 @@
+ 	a6_write(a6_pool_pa(g, A6_OFF_SCRATCH), &v, 4);
+ }
+ 
++void a6_submit_ib_times(const struct a6_gpu *g, uint32_t fence, uint64_t *t, unsigned n)
++{
++	uint64_t se[2] = { 0, 0 };
++	a6_read(a6_pool_pa(g, A6_OFF_SCRATCH + A6_TS_OFF) + 16ull * (fence % A6_TS_SLOTS), se, 16);
++	t[0] = se[0];
++	if (n > 1)
++		a6_read(a6_pool_pa(g, A6_OFF_SCRATCH + A6_IBTS_OFF) + A6_IBTS_STRIDE * (fence % A6_TS_SLOTS), t + 1,
++		    8ull * (n - 1));
++	t[n] = se[1];		/* the last IB's end: the idle stamp */
++}
++
+ uint64_t a6_submit_time(const struct a6_gpu *g, uint32_t fence)
+ {
+ 	uint64_t t[2] = { 0, 0 };
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -122,6 +122,17 @@
+ #define A6_TS_OFF	0x1000ull	/* in the scratch page: 16-byte slots by fence */
+ #define A6_TS_SLOTS	256u
+ uint64_t a6_submit_time(const struct a6_gpu *g, uint32_t fence);
++/*
++ * 0161: with a6_ibts_on (boot-arg sweetgpuibts, default 1), a6_submit_ibs_async also stamps the
++ * counter after each IB (CP_WAIT_FOR_IDLE first, so it is that IB's end): 32 8-byte stamps per fence
++ * slot at A6_IBTS_OFF. a6_submit_ib_times: t[0] = start, t[1..n] = end of IB 0..n-1 (n <= A6_SUBMIT_MAX).
++ * a6_ring_used_max: the fullest the ring was (dwords) when a submit looked for room.
++ */
++#define A6_IBTS_OFF	0x10000ull
++#define A6_IBTS_STRIDE	0x100ull
++extern int a6_ibts_on;
++extern uint32_t a6_ring_used_max;
++void a6_submit_ib_times(const struct a6_gpu *g, uint32_t fence, uint64_t *t, unsigned n);
+ 
+ /* 4K pages (AP=01, NC) at iova -> pa; tables from the arena. Then a6_tlb_flush. */
+ int a6_map(struct a6_gpu *g, uint64_t iova, uint64_t pa, uint64_t size);
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -289,6 +289,7 @@
+ 	a6_init_state(&gpu, ptoa_64(pn));
+ 	uint32_t lvl = 4;	/* 499 MHz; boot-arg sweetgpufreq=1 (257) .. 5 (585) */
+ 	PE_parse_boot_argn("sweetgpufreq", &lvl, sizeof(lvl));
++	PE_parse_boot_argn("sweetgpuibts", &a6_ibts_on, sizeof(a6_ibts_on));    /* 0161: per-IB GPU stamps */
+ 	gpu.perf_level = lvl;
+ 	pool_kva = va;
+ 	vm_offset_t pva = 0;
+@@ -337,9 +338,14 @@
+  * the k0159 sample burst had backboardd's render thread running in IOConnectCallStructMethod (Turnip's
+  * WaitFence) for about half a core. Now: spin for the first sweetgpuspin us (default 100, short jobs), then
+  * sleep in sweetgpusleep us slices (default 200; 0 = spin always, as before). t0: when the wait began.
++ * 0161: the default is 0 again: with sleeps, backboardd's Turnip called the device lost 15-20 s after it
++ * started (k0160, no kernel fault; its frame froze). sweetgpusleep=200 brings them back, with the counters
++ * below (sleep lengths, busy submits, ring fill) to find out why.
+  */
+ extern int get_preemption_level(void);
+-static uint32_t fence_spin_us = 100, fence_sleep_us = 200, fence_sleeps, fence_opts_read;
++static uint32_t fence_spin_us = 100, fence_sleep_us = 0, fence_sleeps, fence_opts_read;
++static uint64_t fence_sleep_max_ns, fence_sleep_sum_ns;
++static uint32_t wait_calls, wait_timeouts, submit_busy_rets;
+ 
+ static void
+ gpu_pause(uint64_t t0)
+@@ -357,10 +363,16 @@
+ 		delay(20);
+ 		return;
+ 	}
++	uint64_t s0 = mach_absolute_time(), sns;
+ 	clock_interval_to_deadline(fence_sleep_us, NSEC_PER_USEC, &deadline);
+ 	(void)assert_wait_deadline((event_t)&fence_sleeps, THREAD_UNINT, deadline);
+ 	(void)thread_block(THREAD_CONTINUE_NULL);
++	absolutetime_to_nanoseconds(mach_absolute_time() - s0, &sns);
+ 	fence_sleeps++;
++	fence_sleep_sum_ns += sns;
++	if (sns > fence_sleep_max_ns) {
++		fence_sleep_max_ns = sns;
++	}
+ }
+ 
+ static uint32_t gstat_next = 1;
+@@ -369,12 +381,23 @@
+ static struct { int pid; uint32_t n; uint64_t busy; } gstat_own[GSTAT_OWNERS + 1];     /* last: everyone else */
+ static uint32_t gstat_n, gstat_missed;
+ static uint64_t gstat_busy, gstat_longest;
++/* 0161: per fence: IBs and dwords (v2 submits; 0 = other paths); per window: job GPU-time histogram,
++ * the longest job's owner and IB times (read when it lands, before its stamp slot is reused) */
++static uint8_t gstat_nib[A6_TS_SLOTS];
++static uint32_t gstat_dws[A6_TS_SLOTS];
++static uint32_t gstat_hist[5];                  /* <1, 1-4, 4-8, 8-16, >=16 ms */
++static int gstat_lpid = -1;
++static unsigned gstat_lnib;
++static uint32_t gstat_ldw;
++static uint64_t gstat_lib[A6_SUBMIT_MAX + 1];
+ 
+ static void
+ gpu_owner_locked(uint32_t fence, int pid)
+ {
+ 	if (fence) {
+ 		gstat_pid[fence % A6_TS_SLOTS] = pid;
++		gstat_nib[fence % A6_TS_SLOTS] = 0;
++		gstat_dws[fence % A6_TS_SLOTS] = 0;
+ 	}
+ }
+ 
+@@ -396,8 +419,16 @@
+ 		gstat_own[o].busy += t;
+ 		gstat_n++;
+ 		gstat_busy += t;
++		uint64_t us = t * 10 / 192;
++		gstat_hist[us < 1000 ? 0 : us < 4000 ? 1 : us < 8000 ? 2 : us < 16000 ? 3 : 4]++;
+ 		if (t > gstat_longest) {
+ 			gstat_longest = t;
++			gstat_lpid = pid;
++			gstat_lnib = gstat_nib[gstat_next % A6_TS_SLOTS];
++			gstat_ldw = gstat_dws[gstat_next % A6_TS_SLOTS];
++			if (gstat_lnib > 0 && gstat_lnib <= A6_SUBMIT_MAX) {
++				a6_submit_ib_times(&gpu, gstat_next, gstat_lib, gstat_lnib);
++			}
+ 		}
+ 	}
+ 	uint64_t now = mach_absolute_time(), ns;
+@@ -423,8 +454,35 @@
+ 		a6_log("5s: %u submits (%u missed), GPU busy %llu ms (%llu%%), longest %llu us, mean %llu us;%s; %u fence sleeps\n",
+ 		    gstat_n, gstat_missed, gstat_busy / 19200, gstat_busy * 100 / 19200 / (ns / 1000000),
+ 		    gstat_longest * 10 / 192, gstat_busy * 10 / 192 / gstat_n, who, fence_sleeps);
++		/* 0161: where the GPU time goes, and the fence-wait counters */
++		char lname[24] = "?", ibs[200] = "";
++		size_t k = 0;
++		if (gstat_lpid > 0) {
++			proc_name(gstat_lpid, lname, sizeof(lname));
++		} else if (gstat_lpid == 0) {
++			strlcpy(lname, "present", sizeof(lname));
++		}
++		if (gstat_lnib > 1 && gstat_lnib <= A6_SUBMIT_MAX && a6_ibts_on) {
++			for (unsigned i = 0; i < gstat_lnib && k < sizeof(ibs) - 16; i++) {
++				uint64_t a = gstat_lib[i], b = gstat_lib[i + 1];
++				k += snprintf(ibs + k, sizeof(ibs) - k, " %llu", b > a ? (b - a) * 10 / 192 : 0);
++			}
++		}
++		a6_log("5s jobs: <1ms %u, 1-4 %u, 4-8 %u, 8-16 %u, >=16 %u; longest %s %llu us, %u IBs %u dw%s%s; ring max %u/%u dw, "
++		    "submit busy %u; waits %u (timeouts %u), sleeps %u avg %llu us max %llu us\n",
++		    gstat_hist[0], gstat_hist[1], gstat_hist[2], gstat_hist[3], gstat_hist[4], lname,
++		    gstat_longest * 10 / 192, gstat_lnib, gstat_ldw, k ? ", IB us:" : "", ibs, a6_ring_used_max, A6_RING_DW,
++		    submit_busy_rets, wait_calls, wait_timeouts, fence_sleeps,
++		    fence_sleeps ? fence_sleep_sum_ns / fence_sleeps / 1000 : 0, fence_sleep_max_ns / 1000);
+ 	}
+ 	fence_sleeps = 0;
++	fence_sleep_sum_ns = fence_sleep_max_ns = 0;
++	wait_calls = wait_timeouts = submit_busy_rets = 0;
++	a6_ring_used_max = 0;
++	bzero(gstat_hist, sizeof(gstat_hist));
++	gstat_lpid = -1;
++	gstat_lnib = 0;
++	gstat_ldw = 0;
+ 	gstat_n = gstat_missed = 0;
+ 	gstat_busy = gstat_longest = 0;
+ 	bzero(gstat_own, sizeof(gstat_own));
+@@ -1155,8 +1213,19 @@
+ 	gpu_note_submit_locked();
+ 	uint32_t fence = a6_submit_ibs_async(&gpu, iova, dwords, n, 0);
+ 	gpu_owner_locked(fence, proc_selfpid());
+-	lck_mtx_unlock(&sweet_gpu_lock);
++	if (fence) {
++		uint32_t s = 0;
++		for (unsigned i = 0; i < n; i++) {
++			s += dwords[i];
++		}
++		gstat_nib[fence % A6_TS_SLOTS] = (uint8_t)n;
++		gstat_dws[fence % A6_TS_SLOTS] = s;
++	}
+ 	*busy = fence == 0 && n > 0 && n <= A6_SUBMIT_MAX;
++	if (*busy) {
++		submit_busy_rets++;
++	}
++	lck_mtx_unlock(&sweet_gpu_lock);
+ 	return fence;
+ }
+ 
+@@ -1177,6 +1246,7 @@
+ 	static uint64_t last_check;
+ 	uint64_t t0 = mach_absolute_time(), ns = 0, check_abs;
+ 	nanoseconds_to_absolutetime(5000000, &check_abs);
++	wait_calls++;
+ 	for (;;) {
+ 		if (sweet_gpu_fence_done(fence)) {
+ 			return 0;
+@@ -1192,7 +1262,13 @@
+ 		}
+ 		absolutetime_to_nanoseconds(now - t0, &ns);
+ 		if (ns >= timeout_ns) {
+-			return sweet_gpu_fence_done(fence) ? 0 : 1;
++			if (sweet_gpu_fence_done(fence)) {
++				return 0;
++			}
++			if (timeout_ns != 0) {
++				wait_timeouts++;
++			}
++			return 1;
+ 		}
+ 		gpu_pause(t0);
+ 	}
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -398,11 +398,19 @@
+ 		void *o = args->structureOutputDescriptor == NULL ? args->structureOutput : NULL;
+ 		uint32_t osz = o != NULL ? args->structureOutputSize : 0;
+ 		IOReturn r;
++		uint32_t m = selector;
+ 		if (isz >= 8 && w[0] == SWEET_V2_TUNNEL) {
++			m = w[1];
+ 			r = w[1] == 0xffffffffu ? kIOReturnSuccess : v2Method(w[1], w + 2, isz - 8, o, &osz);
+ 		} else {
+ 			r = v2Method(selector, isz ? args->structureInput : NULL, isz, o, &osz);
+ 		}
++		/* 0161: Turnip calls the device lost on anything but success, timeout or busy: name it (first 40) */
++		static uint32_t v2_errors;
++		if (r != kIOReturnSuccess && r != kIOReturnTimeout && r != kIOReturnBusy && v2_errors < 40) {
++			v2_errors++;
++			IOLog("SWEET MTL: v2 %s method %u -> %#x (in %u)\n", fName, m, r, isz);
++		}
+ 		if (o != NULL) {
+ 			args->structureOutputSize = r == kIOReturnSuccess ? osz : 0;
+ 		}

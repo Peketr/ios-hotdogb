@@ -183,3 +183,9 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0160 GPU fence waits (v2 WaitFence/Submit wait, v1 wait, kernel present slot wait) spun on delay(20) for the
   whole GPU job (k0159 profile: backboardd's render thread ~half a core in IOConnectCallStructMethod): now spin
   sweetgpuspin us (100), then sleep sweetgpusleep us slices (200; 0 = old spin). 5 s GPU line: "N fence sleeps".
+  With sleeps Turnip in backboardd called the device lost 15-20 s after start (k0160 x2, no kernel fault,
+  frozen frame; sweetgpusleep=0: fine, 32.1 fps / 65% GPU).
+- 0161 sweetgpusleep defaults to 0 again. New 5 s line "SWEET GPU: 5s jobs:": job GPU-time histogram, the longest
+  job (owner, IBs, dwords, per-IB us: CP_WAIT_FOR_IDLE + counter stamp between IBs, boot-arg sweetgpuibts=0 off),
+  ring max fill, submit busy returns, v2 waits/timeouts, sleep avg/max. v2 calls returning anything but
+  success/timeout/busy (Turnip: device lost) log "SWEET MTL: v2 NAME method M -> rc" (first 40).
