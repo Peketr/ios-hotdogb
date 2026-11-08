@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Install btd (phone/bt, Bluetooth stage 1) and the WCN3998 firmware on the running hotdogb.
+"""Install btd (phone/bt) and the WCN3998 firmware on the running hotdogb.
 
-  python tools/hotdogb-bt-install.py            put btd + firmware, add the boot job org.iosonpixel.btd
+  python tools/hotdogb-bt-install.py            put btd + firmware, boot job org.iosonpixel.btd = `btd serve`
+  python tools/hotdogb-bt-install.py --scan     same, but the stage 1 job `btd auto` (one scan, power off)
   python tools/hotdogb-bt-install.py --no-job   files only
   python tools/hotdogb-bt-install.py --remove   remove the boot job
 
 Firmware: ../hotdogb/fw/bluetooth/image (from the bluetooth_a partition, `flame-files.py part bluetooth_a`;
 not in git) -> /var/local/fw/bt. btd: phone/bt/out/btd (built on the Mac with phone/bt/build.sh).
-The job runs `btd auto` once at boot (log /var/local/btd.log; skip: /var/local/btd.off). Reboot afterwards.
+`btd serve` (stage 2, KeepAlive): brings the controller up ~20 s after boot and serves bluetoothd through a
+Skywalk user pipe; needs kernel 0163 (the "com.apple.uart.sk.bluetooth" control) and an ADT with
+/arm-io/bluetooth (tools/adt-add-bluetooth.py). Log /var/local/btd.log; idle: /var/local/btd.off.
+The job is replaced on every run of this script. Reboot afterwards.
 """
 import os, subprocess, sys
 
@@ -45,8 +49,12 @@ def main():
             sys.exit(f'{p} missing: pull bluetooth_a first')
         run(FILES + ['put', p, f'/var/local/fw/bt/{f}', '644'])
     if '--no-job' not in a:
-        run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--', '/var/local/bin/btd', 'auto'])
-    print('next: python tools/flame-cmd.py reboot, boot again; ~45 s after boot see /var/local/btd.log')
+        run(JOB + ['remove', 'btd'], check=False)
+        if '--scan' in a:
+            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--', '/var/local/bin/btd', 'auto'])
+        else:
+            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--keep', '--', '/var/local/bin/btd', 'serve'])
+    print('next: python tools/flame-cmd.py reboot, boot again; see /var/local/btd.log')
 
 
 if __name__ == '__main__':

@@ -1,0 +1,247 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6e00153..2513095 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -124,6 +124,7 @@ bsd/dev/redwood_net.c		standard
+ bsd/dev/redwood_apple80211.c	standard
+ bsd/dev/flame_sta.c		standard
+ bsd/dev/flame_wlan.c		standard
++bsd/dev/sweet_btuart.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_btuart.c b/bsd/dev/sweet_btuart.c
+new file mode 100755
+index 0000000..5499fdc
+--- /dev/null
++++ b/bsd/dev/sweet_btuart.c
+@@ -0,0 +1,209 @@
++/*
++ * Bluetooth UART for iOS 16's bluetoothd without Apple's AppleOnboardSerial Skywalk driver.
++ *
++ * bluetoothd's H4 transport (transport-encoding 1 in IODeviceTree:/arm-io/bluetooth) connects a
++ * SYSPROTO_CONTROL socket to the kernel control "com.apple.uart.sk.bluetooth" and asks it, by socket
++ * option, for a Skywalk channel (IOAOSSKYSETCHANNELSPEC, IOAOSSKYGETCHANNELUUID); then it moves H4 bytes
++ * through os_channel slots. Read from its disassembly (iOS 16.7, usr/sbin/bluetoothd 0x100066bf0).
++ *
++ * Here userland owns the data path: btd (phone/bt) registers an anonymous Skywalk user pipe (the kernel
++ * cannot: NEXUS_TYPE_USER_PIPE is userland-only), opens its server port and drives the WCN3998 over the
++ * QUP UART; it hands the pipe's instance UUID to this control (BTUART_SET_UUID, root only). bluetoothd's
++ * GETCHANNELUUID returns it and bluetoothd opens the pipe's client port. termios (TIOCGETA/TIOCSETA as
++ * socket options) is kept and readable by btd (BTUART_GET_TERMIOS), which owns the real line speed.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/kern_control.h>
++#include <sys/kauth.h>
++#include <sys/proc.h>
++#include <sys/mbuf.h>
++#include <kern/locks.h>
++#include <uuid/uuid.h>
++
++void sweet_btuart_init(void);
++
++#define BTUART_CTL_NAME		"com.apple.uart.sk.bluetooth"
++#define IOAOSSKYSETCHANNELSPEC	0x800c5414u	/* _IOW('T', 20, 12 bytes) */
++#define IOAOSSKYGETCHANNELUUID	0x40105412u	/* _IOR('T', 18, uuid_t) */
++#define BTUART_SET_UUID		0x42540001u	/* btd: the user pipe instance (16 bytes; zero = gone) */
++#define BTUART_GET_TERMIOS	0x42540002u	/* btd: last termios bluetoothd set */
++#define BTUART_GET_SPEC		0x42540003u	/* btd: last channel spec (12 bytes) */
++/* termios as socket options: userland struct termios (arm64: 4 x 8-byte flags, 20 c_cc, pad, 2 x 8-byte speeds) */
++#define UTIOCGETA		0x40487413u
++#define UTIOCSETA		0x80487414u
++#define UTIOCSETAW		0x80487415u
++#define UTIOCSETAF		0x80487416u
++#define UTERMIOS_LEN		72
++#define UT_CFLAG		16
++#define UT_ISPEED		56
++#define UT_OSPEED		64
++
++static struct {
++	lck_mtx_t lock;
++	kern_ctl_ref ref;
++	uuid_t pipe;
++	uint8_t tio[UTERMIOS_LEN];
++	uint32_t spec[3];
++	uint32_t connects, uuid_gets;
++} bt;
++
++static LCK_GRP_DECLARE(btuart_grp, "sweet_btuart");
++
++static errno_t
++btuart_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
++{
++#pragma unused(ref)
++	*unitinfo = NULL;
++	if (bt.connects++ < 20) {
++		printf("SWEET BTUART: connect unit %u (pid %d)\n", sac->sc_unit, proc_selfpid());
++	}
++	return 0;
++}
++
++static errno_t
++btuart_disconnect(kern_ctl_ref ref, u_int32_t unit, void *unitinfo)
++{
++#pragma unused(ref, unit, unitinfo)
++	return 0;
++}
++
++static errno_t
++btuart_send(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, mbuf_t m, int flags)
++{
++#pragma unused(ref, unit, unitinfo, flags)
++	mbuf_freem(m);
++	return ENOTSUP;
++}
++
++static errno_t
++btuart_setopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t len)
++{
++#pragma unused(ref, unit, unitinfo)
++	errno_t err = 0;
++	lck_mtx_lock(&bt.lock);
++	switch ((uint32_t)opt) {
++	case IOAOSSKYSETCHANNELSPEC:
++		if (len != sizeof(bt.spec)) {
++			err = EINVAL;
++			break;
++		}
++		memcpy(bt.spec, data, sizeof(bt.spec));
++		printf("SWEET BTUART: channel spec %u %u %u (pid %d)\n", bt.spec[0], bt.spec[1], bt.spec[2],
++		    proc_selfpid());
++		break;
++	case UTIOCSETA:
++	case UTIOCSETAW:
++	case UTIOCSETAF: {
++		uint64_t sp, cf;
++		if (len != UTERMIOS_LEN) {
++			err = EINVAL;
++			break;
++		}
++		memcpy(bt.tio, data, UTERMIOS_LEN);
++		memcpy(&sp, bt.tio + UT_OSPEED, sizeof(sp));
++		memcpy(&cf, bt.tio + UT_CFLAG, sizeof(cf));
++		printf("SWEET BTUART: termios speed %llu cflag %#llx (pid %d)\n", sp, cf, proc_selfpid());
++		break;
++	}
++	case BTUART_SET_UUID: {
++		uuid_string_t s;
++		if (len != sizeof(uuid_t)) {
++			err = EINVAL;
++			break;
++		}
++		if (!kauth_cred_issuser(kauth_cred_get())) {
++			err = EPERM;
++			break;
++		}
++		memcpy(bt.pipe, data, sizeof(uuid_t));
++		uuid_unparse_upper(bt.pipe, s);
++		printf("#### BTUART PIPE %s (pid %d)\n", uuid_is_null(bt.pipe) ? "GONE" : s, proc_selfpid());
++		break;
++	}
++	default:
++		err = ENOPROTOOPT;
++		break;
++	}
++	lck_mtx_unlock(&bt.lock);
++	if (err) {
++		printf("SWEET BTUART: setopt %#x len %zu -> %d\n", (uint32_t)opt, len, err);
++	}
++	return err;
++}
++
++static errno_t
++btuart_getopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t *len)
++{
++#pragma unused(ref, unit, unitinfo)
++	errno_t err = 0;
++	const void *src = NULL;
++	size_t n = 0;
++	lck_mtx_lock(&bt.lock);
++	switch ((uint32_t)opt) {
++	case IOAOSSKYGETCHANNELUUID:
++		if (uuid_is_null(bt.pipe)) {
++			err = ENXIO;	/* btd is not running */
++			break;
++		}
++		src = bt.pipe;
++		n = sizeof(uuid_t);
++		if (bt.uuid_gets++ < 20) {
++			printf("SWEET BTUART: channel UUID to pid %d\n", proc_selfpid());
++		}
++		break;
++	case UTIOCGETA:
++	case BTUART_GET_TERMIOS:
++		src = bt.tio;
++		n = UTERMIOS_LEN;
++		break;
++	case BTUART_GET_SPEC:
++		src = bt.spec;
++		n = sizeof(bt.spec);
++		break;
++	default:
++		err = ENOPROTOOPT;
++		break;
++	}
++	if (!err && data != NULL) {
++		if (*len < n) {
++			err = EINVAL;
++		} else {
++			memcpy(data, src, n);
++		}
++	}
++	if (!err) {
++		*len = n;
++	}
++	lck_mtx_unlock(&bt.lock);
++	if (err) {
++		printf("SWEET BTUART: getopt %#x -> %d (pid %d)\n", (uint32_t)opt, err, proc_selfpid());
++	}
++	return err;
++}
++
++void
++sweet_btuart_init(void)
++{
++	struct kern_ctl_reg reg;
++	uint64_t cf = 0x00030b00ull, sp = 3000000;	/* CS8 | CREAD | CLOCAL | CRTSCTS, 3 Mbaud */
++
++	lck_mtx_init(&bt.lock, &btuart_grp, LCK_ATTR_NULL);
++	memcpy(bt.tio + UT_CFLAG, &cf, sizeof(cf));
++	memcpy(bt.tio + UT_ISPEED, &sp, sizeof(sp));
++	memcpy(bt.tio + UT_OSPEED, &sp, sizeof(sp));
++
++	bzero(&reg, sizeof(reg));
++	strlcpy(reg.ctl_name, BTUART_CTL_NAME, sizeof(reg.ctl_name));
++	reg.ctl_flags = CTL_FLAG_REG_SOCK_STREAM;
++	reg.ctl_connect = btuart_connect;
++	reg.ctl_disconnect = btuart_disconnect;
++	reg.ctl_send = btuart_send;
++	reg.ctl_setopt = btuart_setopt;
++	reg.ctl_getopt = btuart_getopt;
++	errno_t err = ctl_register(&reg, &bt.ref);
++	printf("SWEET BTUART: kernel control %s -> %d\n", BTUART_CTL_NAME, err);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 5eb0105..4967801 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -58,6 +58,7 @@ extern void sweet_s3706_init(void);
+ extern void sweet_cpufreq_init(void);
+ extern void sweet_pmem_init(void);
+ extern void flame_wlan_init(void);
++extern void sweet_btuart_init(void);
+ extern void sweet_gpu_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -732,6 +733,7 @@ sweet_ufs_init(void)
+ 	sweet_cpufreq_init();
+ 	sweet_pmem_init();       /* /dev/pmem: bsd/dev/sweet_pmem.c */
+ 	flame_wlan_init();       /* /dev/wlan, en0 + Apple80211 for wifid: bsd/dev/flame_wlan.c */
++	sweet_btuart_init();     /* "com.apple.uart.sk.bluetooth" for bluetoothd: bsd/dev/sweet_btuart.c */
+ 	sweet_gpu_init();        /* Adreno 640 (sweetgpu=1): bsd/dev/sweet_gpu.c */
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();

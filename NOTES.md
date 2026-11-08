@@ -192,3 +192,8 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0162 the backboardd freezes (k0160 x2, k0161-gt-freq1): a v2 Submit refused with kIOReturnBadArgument
   (method 5 -> 0xe00002c2) = Turnip device lost. Empty IBs are skipped now (all empty: success with the last
   fence); other refusals log which check failed (count/reserved, not dwords, over 1M dwords, outside the window).
+- 0163 Bluetooth stage 2: bsd/dev/sweet_btuart.c registers the kernel control "com.apple.uart.sk.bluetooth"
+  that iOS 16 bluetoothd's H4 transport opens (IOAOSSKYSETCHANNELSPEC, IOAOSSKYGETCHANNELUUID, termios as
+  socket options). btd (phone/bt) registers an anonymous Skywalk user pipe and hands its UUID over
+  (BTUART_SET_UUID, root only); bluetoothd opens the pipe's client port. Needs /arm-io/bluetooth in the ADT
+  (tools/adt-add-bluetooth.py: transport-encoding 1 = H4, transport-speed 3000000).

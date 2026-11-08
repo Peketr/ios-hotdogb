@@ -10,6 +10,8 @@
  *   btd regs           read-only register dump
  *   btd scan [SECS]    bring up, scan SECS each (default 10), power off
  *   btd auto           boot job: skip if /var/local/btd.off, wait 40 s, scan
+ *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait 20 s, bring up, then
+ *                      serve bluetoothd through the Skywalk user pipe (pipe.c, kernel 0163) and log its HCI
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,7 @@
 #include <unistd.h>
 #include "../wifi/pmem.h"
 #include "uart.h"
+#include "pipe.h"
 
 #define FW_DIR "/var/local/fw/bt"
 
@@ -428,6 +431,115 @@ static void bt_scan(unsigned secs)
 	    n_reports, junk);
 }
 
+/* ---- serve: bluetoothd <-> Skywalk user pipe <-> UART ---- */
+
+static const char *pkt_name(int t)
+{
+	return t == 1 ? "cmd" : t == 2 ? "acl" : t == 3 ? "sco" : t == 4 ? "evt" : "?";
+}
+
+/* reassemble H4 packets of one direction for the log (the bytes themselves pass unchanged) */
+struct h4log {
+	const char *dir;
+	uint8_t b[1100];
+	size_t n;
+	unsigned logged, pkts, bytes, junk;
+};
+
+static void h4log_pkt(struct h4log *l, const uint8_t *p, size_t len)
+{
+	l->pkts++;
+	if (l->logged >= 400)
+		return;
+	if (p[0] == 1 && len >= 4) {
+		unsigned op = p[1] | p[2] << 8;
+		LOG("%s cmd %#06x (ogf %#x ocf %#05x) len %u%s\n", l->dir, op, op >> 10, op & 0x3ff, p[3],
+		    (op >> 10) == 0x3f ? " VENDOR" : "");
+	} else if (p[0] == 4 && len >= 3) {
+		if (p[1] == 0x0e && len >= 7)
+			LOG("%s evt cmd complete %#06x status %#x len %u\n", l->dir, p[4] | p[5] << 8, p[6], p[2]);
+		else if (p[1] == 0x0f && len >= 7)
+			LOG("%s evt cmd status %#06x status %#x\n", l->dir, p[5] | p[6] << 8, p[3]);
+		else if (p[1] == 0x3e && len >= 4)
+			LOG("%s evt LE meta sub %#x len %u\n", l->dir, p[3], p[2]);
+		else
+			LOG("%s evt %#04x len %u\n", l->dir, p[1], p[2]);
+	} else {
+		LOG("%s %s len %zu\n", l->dir, pkt_name(p[0]), len);
+	}
+	if (++l->logged == 400)
+		LOG("%s: logged 400 packets, counting only from here\n", l->dir);
+}
+
+static void h4log(struct h4log *l, const uint8_t *d, size_t len)
+{
+	l->bytes += (unsigned)len;
+	for (size_t i = 0; i < len; i++) {
+		if (l->n == 0 && (d[i] < 1 || d[i] > 4)) {
+			l->junk++;
+			continue;
+		}
+		if (l->n < sizeof(l->b))
+			l->b[l->n] = d[i];
+		l->n++;
+		size_t need = 0;
+		uint8_t *b = l->b;
+		if (b[0] == 1 && l->n >= 4)
+			need = 4u + b[3];
+		else if (b[0] == 4 && l->n >= 3)
+			need = 3u + b[2];
+		else if (b[0] == 2 && l->n >= 5)
+			need = 5u + (b[3] | b[4] << 8);
+		else if (b[0] == 3 && l->n >= 4)
+			need = 4u + b[3];
+		if (need && l->n >= need) {
+			h4log_pkt(l, b, need < sizeof(l->b) ? need : sizeof(l->b));
+			l->n = 0;
+		}
+	}
+}
+
+static int bt_serve(void)
+{
+	static uint8_t buf[64 * 1024];
+	struct h4log up = { .dir = "host>", .n = 0 }, down = { .dir = "<ctlr", .n = 0 };
+	uint64_t speed = 0, last_speed = 0, next_stat = ms_now() + 10000;
+	if (pipe_open()) {
+		LOG("#### BLUETOOTH PIPE FAILED\n");
+		return -1;
+	}
+	LOG("#### BLUETOOTH SERVING bluetoothd (H4 at 3 Mbaud)\n");
+	for (;;) {
+		int busy = 0;
+		size_t n = pipe_read(buf, sizeof(buf));
+		if (n) {
+			busy = 1;
+			h4log(&up, buf, n);
+			if (uart_write(buf, n, 2000))
+				LOG("UART write of %zu bytes failed\n", n);
+		}
+		n = uart_read(buf, sizeof(buf));
+		if (n) {
+			busy = 1;
+			h4log(&down, buf, n);
+			if (pipe_write(buf, n))
+				LOG("pipe write of %zu bytes failed (bluetoothd not reading?)\n", n);
+		}
+		if (ms_now() >= next_stat) {
+			next_stat = ms_now() + 10000;
+			if (!pipe_termios_speed(&speed) && speed != last_speed) {
+				LOG("bluetoothd termios speed %llu\n", (unsigned long long)speed);
+				last_speed = speed;
+			}
+			LOG("stats: host> %u packets %u bytes, <ctlr %u packets %u bytes, junk %u/%u\n", up.pkts, up.bytes,
+			    down.pkts, down.bytes, up.junk, down.junk);
+		}
+		if (!busy)
+			usleep(300);
+	}
+	return 0;
+}
+
 static void bt_off(void)
 {
 	uint8_t st[4];
@@ -449,7 +561,17 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	unsigned secs = 10;
-	if (!strcmp(argv[1], "auto")) {
+	int serve = !strcmp(argv[1], "serve");
+	if (serve) {
+		struct stat sb;
+		while (!stat("/var/local/btd.off", &sb)) {	/* KeepAlive job: idle, do not respawn */
+			printf("btd: /var/local/btd.off exists, idle\n");
+			sleep(600);
+		}
+		printf("btd: serve: waiting 20 s\n");
+		sleep(20);
+		t0 = ms_now();
+	} else if (!strcmp(argv[1], "auto")) {
 		struct stat sb;
 		if (!stat("/var/local/btd.off", &sb)) {
 			printf("btd: /var/local/btd.off exists, not starting\n");
@@ -464,7 +586,7 @@ int main(int argc, char **argv)
 		if (secs < 1 || secs > 60)
 			secs = 10;
 	} else {
-		fprintf(stderr, "usage: btd regs | scan [SECS] | auto\n");
+		fprintf(stderr, "usage: btd regs | scan [SECS] | auto | serve\n");
 		return 2;
 	}
 	LOG("#### BLUETOOTH BRING-UP (btd, pid %d)\n", getpid());
@@ -472,6 +594,15 @@ int main(int argc, char **argv)
 	if (bt_up()) {
 		LOG("#### BLUETOOTH FAILED\n");
 		bt_off();
+		if (serve)
+			sleep(60);	/* KeepAlive: retry in a minute, not every 10 s */
+		return 1;
+	}
+	if (serve) {
+		bt_serve();
+		pipe_close();
+		bt_off();
+		sleep(30);
 		return 1;
 	}
 	bt_scan(secs);
