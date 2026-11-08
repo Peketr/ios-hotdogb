@@ -949,29 +949,54 @@ static void stream_serve(void)
 	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_SESSION_RUN_V2, run, sizeof(run));
 	link_poll(50);
 	printf("[%6llu] #### SPEAKER READY FOR IOS (%s)\n", (unsigned long long)link_ms(), FIFO);
-	static uint8_t buf[BUF_BYTES];
+	/*
+	 * The FIFO is drained into this ring every round (2 ms), so it never fills (a pipe holds 16 KB, 85 ms: the
+	 * HAL's bursts overflowed it and the plug-in dropped the rest - crackling, 2026-11-08); the DSP's buffers
+	 * are filled from the ring, silence only when it runs dry. Over MAX_BACKLOG (the HAL's clock a little
+	 * faster than the DSP's) the oldest frames go, so the delay stays bounded.
+	 */
+	#define RING_BYTES	(RATE * 4)		/* 1 s */
+	#define MAX_BACKLOG	(RATE * 4 / 5)		/* 200 ms */
+	static uint8_t ring[RING_BYTES], buf[BUF_BYTES];
+	size_t rhead = 0, rlen = 0;
 	unsigned sent = 0;
 	uint32_t done0 = writes_done;
-	uint64_t last_data = 0, frames_in = 0;
+	uint64_t last_data = 0, frames_in = 0, underruns = 0, dropped = 0;
 	int playing = 0;
 	for (;;) {
+		for (;;) {	/* drain the FIFO */
+			size_t tail = (rhead + rlen) % RING_BYTES, room = RING_BYTES - rlen;
+			size_t chunk = RING_BYTES - tail < room ? RING_BYTES - tail : room;
+			if (!chunk)
+				break;
+			ssize_t n = read(fd, ring + tail, chunk);
+			if (n <= 0)
+				break;
+			rlen += (size_t)n;
+			frames_in += (uint64_t)n / 4;
+			last_data = link_ms();
+			if (!playing) {
+				playing = 1;
+				printf("[%6llu] #### IOS AUDIO PLAYING\n", (unsigned long long)link_ms());
+			}
+		}
+		if (rlen > MAX_BACKLOG) {
+			size_t drop = (rlen - MAX_BACKLOG / 2) & ~(size_t)3;
+			rhead = (rhead + drop) % RING_BYTES;
+			rlen -= drop;
+			dropped += drop / 4;
+		}
 		while (sent - (writes_done - done0) < NBUF_LIVE) {
-			size_t have = 0;
-			while (have < BUF_BYTES) {
-				ssize_t n = read(fd, buf + have, BUF_BYTES - have);
-				if (n <= 0)
-					break;
-				have += (size_t)n;
+			size_t have = rlen < BUF_BYTES ? rlen & ~(size_t)3 : BUF_BYTES;
+			for (size_t i = 0; i < have;) {
+				size_t c = RING_BYTES - rhead < have - i ? RING_BYTES - rhead : have - i;
+				memcpy(buf + i, ring + rhead, c);
+				rhead = (rhead + c) % RING_BYTES;
+				i += c;
 			}
-			have &= ~(size_t)3;
-			if (have) {
-				frames_in += have / 4;
-				last_data = link_ms();
-				if (!playing) {
-					playing = 1;
-					printf("[%6llu] #### IOS AUDIO PLAYING\n", (unsigned long long)link_ms());
-				}
-			}
+			rlen -= have;
+			if (playing && have < BUF_BYTES)
+				underruns++;
 			memset(buf + have, 0, BUF_BYTES - have);
 			pm_wr(SHM_PA + (sent % NBUF_LIVE) * BUF_BYTES, buf, BUF_BYTES);
 			stream_write(sent % NBUF_LIVE);
@@ -979,8 +1004,9 @@ static void stream_serve(void)
 		}
 		if (playing && link_ms() - last_data > 2000) {
 			playing = 0;
-			printf("[%6llu] stream: idle (%llu frames from iOS so far)\n", (unsigned long long)link_ms(),
-			       (unsigned long long)frames_in);
+			printf("[%6llu] stream: idle (%llu frames from iOS so far, %llu buffers short, %llu frames dropped)\n",
+			       (unsigned long long)link_ms(), (unsigned long long)frames_in, (unsigned long long)underruns,
+			       (unsigned long long)dropped);
 		}
 		link_poll(2);
 	}
