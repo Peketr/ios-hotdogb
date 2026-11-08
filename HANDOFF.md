@@ -5,6 +5,24 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: AUDIO STEP 1 - the ADSP boots and its audio services answer (2026-11-08) - audiod, kernel 0156
+- phone/audio/audiod (build: phone/audio/build.sh; phone/wifi's SMEM/GLINK with -DGLINK_HOST=2 -DIPC_GLINK=8
+  -DLINK_CHAN='"apr_audio_svc"' -DLINK_RAW). Boot job org.iosonpixel.audiod = `audiod auto` (`up 30`: waits for
+  wland's AOSS messages, one QMP mailbox), log /var/local/audiod.log; off: /var/local/audiod.off.
+- Firmware /var/local/fw/adsp/adsp.mdt + b00-b13 from ../hotdogb/fw/modem-image/image (not in git). Carve-out
+  0x8be00000 + 0x1e00000 (dtbo overlay 3; exactly adsp.mdt's span). PAS id 1, SMP2P out 429 / in 443, APCS IPC
+  bit 10 (SMP2P) / 8 (GLINK), SMEM host 2, cx.lvl top vote, QMP load_state adsp.
+- k0156-audio2-1108: init image, mem setup, 13.5 MB of segments, auth and reset -> SMP2P "ready handover" after
+  100 ms; GLINK opens glink_ssr, fastrpcglink-apps-dsp, IPCRTR, LOOPBACK_CTL_LPASS, apr_audio_svc, apr_apps2;
+  AVCS state 1 = ready; services core/AFE/ASM/ADM/MVM/CVS/CVP/USM/LSM (legacy APR, not AudioReach). No pd-mapper
+  or QRTR needed so far.
+- First try: jetsam killed audiod (reason ns 1 code 7 = per-process limit) holding the 9.4 MB segment in one
+  malloc; segments are now streamed in 64 KB pieces.
+- Next: AFE QUATERNARY_MI2S_RX (port 0x1020) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
+  tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
+  I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM
+  (ios-topaz: HackiOS's RedwoodAudio.driver -> /dev/redwood-audio, 48 kHz 16-bit stereo).
+
 ### HOTDOGB: button combos - screenshot works, power-off screen never appears (2026-11-08)
 - Volume keys were right in 0156 (GPIO6 = up, GPIO7 = down). 0157 swapped them on a misread (the user had pressed
   Android's power + volume DOWN); 0157 and its undo 0158 were dropped. iOS screenshot = side + volume UP: works.

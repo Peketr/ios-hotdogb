@@ -5,6 +5,7 @@
  * qcom_glink_smem (edge "lpass": SMEM host 2, IPC bit 8) and soc/qcom/apr.c on the "apr_audio_svc" channel.
  *
  *   audiod smp2p        the ADSP's SMP2P state
+ *   audiod tfa          the speaker amps' registers 0x00-0x13 over I2C (also done first by up/auto)
  *   audiod up [DELAY]   after DELAY s (default 0): power votes, PAS boot, GLINK, APR core state + versions
  *   audiod auto         the boot job: `up 30` (wland's AOSS messages come first: one QMP mailbox)
  *   audiod shutdown     PAS shutdown of the ADSP
@@ -20,6 +21,7 @@
 #include "../wifi/pmem.h"
 #include "../wifi/smem.h"
 #include "../wifi/link.h"
+#include "i2c.h"
 
 #define SMEM_HOST_ADSP	2
 #define ADSP_PA		0x8be00000ull	/* dtbo overlay 3: adsp region <0x8be00000 0x1e00000> = adsp.mdt's span */
@@ -458,8 +460,44 @@ void link_raw(const uint8_t *d, uint32_t n)
 	}
 }
 
+/* ---- the speaker amps: NXP TFA98xx, 16-bit big-endian registers (Linux tfa98xx / tfa989x.c) ---- */
+
+static int tfa_rd(uint8_t addr, uint8_t reg, uint16_t *v)
+{
+	uint8_t b[2];
+	int rc = i2c_write_read(addr, &reg, 1, b, 2);
+	if (!rc)
+		*v = (uint16_t)((b[0] << 8) | b[1]);
+	return rc;
+}
+
+static void tfa_probe(void)
+{
+	static const struct { uint8_t addr; const char *side; } amp[] = { { 0x34, "right" }, { 0x35, "left" } };
+	i2c_init();
+	for (unsigned a = 0; a < 2; a++) {
+		uint16_t rev;
+		int rc = tfa_rd(amp[a].addr, 0x03, &rev);
+		if (rc) {
+			printf("tfa %02x (%s): no answer (%d)\n", amp[a].addr, amp[a].side, rc);
+			continue;
+		}
+		printf("#### SPEAKER AMP %02x (%s): TFA98xx revision %04x\n", amp[a].addr, amp[a].side, rev);
+		printf("tfa %02x:", amp[a].addr);
+		for (uint8_t r = 0; r < 0x14; r++) {
+			uint16_t v;
+			if (tfa_rd(amp[a].addr, r, &v) == 0)
+				printf(" %02x=%04x", r, v);
+			else
+				printf(" %02x=----", r);
+		}
+		printf("\n");
+	}
+}
+
 static int up(unsigned delay)
 {
+	tfa_probe();
 	if (delay) {
 		printf("waiting %u s (wland's AOSS messages first)\n", delay);
 		sleep(delay);
@@ -505,6 +543,10 @@ int main(int argc, char **argv)
 		return 1;
 	if (!strcmp(argv[1], "smp2p")) {
 		smp2p_show();
+		return 0;
+	}
+	if (!strcmp(argv[1], "tfa")) {
+		tfa_probe();
 		return 0;
 	}
 	if (!strcmp(argv[1], "up"))
