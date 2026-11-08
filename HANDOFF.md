@@ -7,7 +7,7 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ### HOTDOGB: button combos - screenshot works, power-off screen never appears (2026-11-08)
 - Volume keys were right in 0156 (GPIO6 = up, GPIO7 = down). 0157 swapped them on a misread (the user had pressed
-  Android's power + volume DOWN); 0158 swaps them back. iOS screenshot = side + volume UP: works.
+  Android's power + volume DOWN); 0157 and its undo 0158 were dropped. iOS screenshot = side + volume UP: works.
 - Holding side + either volume: SpringBoard's SBSOSClawGestureObserver triggers SOS after ~1.1 s, sosd opens
   InCallService with telSOS:, InCallService logs "showing SOS controller" / PHSOSViewController sosMode 2 and asks
   for a full-screen-overlay scene, then its main thread goes silent right after loading com.apple.avfoundation

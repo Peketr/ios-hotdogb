@@ -9,7 +9,7 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-08): kernel 0156 again (0157 inverted the volume keys; 0158 undoes it). Screenshot = side + vol UP.  
+# Current (2026-11-08): kernel 0156 (0157/0158 volume-key swap dropped). Screenshot = side + volume UP.
 # 0156 (brightness slider -> panel; backlight service on by default, sweetbl=1 = panel
 # off/on only) on 0155 (backlight IODisplayParameters + /backlight panel description) on 0154 (panel dark while the display is off; sweetbl=2 adds the backlight service, which
 # stalls backboardd) on 0153 (logs and accepts display/backlight property keys) on 0152 (panel brightness: DCS 0x51 + AppleARMBacklight, sweetbl=0 = off) on 0151 (GPU present fills the panel, sweetfb_fill=0 = bars; a client's first 3

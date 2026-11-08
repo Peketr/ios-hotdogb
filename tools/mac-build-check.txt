@@ -25,5 +25,3 @@
 0154 sweetbl=2 publishes it
 0155 properties from the device tree's /backlight
 0156 BRIGHTNESS FROM IOS: backlight-level
-0157 GPIO7 not confirmed enabled as input; volume-up withheld
-0158 GPIO7 not confirmed enabled as input; volume-down withheld
