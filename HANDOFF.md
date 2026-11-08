@@ -51,6 +51,12 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 - For the PCM path later: ios-topaz streams a 1 s ring of 48 kHz 16-bit stereo from shared memory, with an SMMU
   identity mapping for the audio DMA stream and the SID in the address msw. Ours (stock DT qcom,msm-audio-ion):
   apps SMMU **0x1b21**, qcom,smmu-sid-mask 0xf.
+- **k0156-seqcmd-1108: THE AUDIO PD ANSWERS, QUAT MI2S RUNS.** With SEQ_CMD headers: AFE stop -> 0, ADM empty
+  routing map -> 0, AFE_SVC_CMD_SET_PARAM clock 0x106 1.536 MHz -> 0, I2S config (48 kHz 16-bit stereo SD1,
+  internal WS) -> 0, QUAT_MI2S_RX start -> 0: `#### QUAT MI2S RUNNING`. The amps' registers do not change
+  (00=0001, 10=0016): they are still powered down (TFA init from tfa98xx.cnt not written yet).
+- Next: TFA9874 bring-up (power up, clock lock on the bit clock, the container's register settings; the DSP code
+  is in ROM: 9874_dummy.patch), then ADM COPP + ASM stream + shared memory through SMMU stream 0x1b21, a test tone.
 - Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test
   tone; the two NXP TFA98xx amps (I2C 0x34 right / 0x35 left, reset GPIO 37 / 100, dtbo fragment@96) need their
   I2C bus (base DT) and probably tfa98xx.cnt from vendor. iOS side: a CoreAudio HAL plug-in feeding PCM
