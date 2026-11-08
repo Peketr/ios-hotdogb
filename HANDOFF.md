@@ -55,6 +55,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   routing map -> 0, AFE_SVC_CMD_SET_PARAM clock 0x106 1.536 MHz -> 0, I2S config (48 kHz 16-bit stereo SD1,
   internal WS) -> 0, QUAT_MI2S_RX start -> 0: `#### QUAT MI2S RUNNING`. The amps' registers do not change
   (00=0001, 10=0016): they are still powered down (TFA init from tfa98xx.cnt not written yet).
+- **k0156-amps-1108: BOTH SPEAKER AMPS RUN** (phone/audio/tfa.c, the vendor driver's CF-bypass path: the TFA9874
+  has no CoolFlux DSP). I2C reset, keys, the 0x0c74 V1.16 settings, the container's 55 device items + the
+  "speaker" profile (6 items; also "receiver", "calibrate.cal"), MANSCONF 1, PWDN 0, then AMPE 1: both amps
+  PLLS 1 CLKS 1 AREFS 1 AMPS 1 SWS 1, MANSTATE 9 (operating), NOCLK 0, `#### SPEAKER AMPS RUNNING (2 of 2)`.
+  Silence so far: the I2S line carries zeros (no stream).
+- The container's TDM setup: TDMSLLN / TDMSSIZE = 31 (**32-bit slots**), TDMNBCK 2, 0x34 speaker on slot 0
+  (TDMSPKS 0), 0x35 on slot 1. QUAT_MI2S_RX runs 16-bit now: for audio switch it to 32-bit (bit clock
+  48000 * 32 * 2 = 3.072 MHz).
 - Next: TFA9874 bring-up (power up, clock lock on the bit clock, the container's register settings; the DSP code
   is in ROM: 9874_dummy.patch), then ADM COPP + ASM stream + shared memory through SMMU stream 0x1b21, a test tone.
 - Next: AFE QUATERNARY_MI2S_RX (port 0x1006) clocks + config + start, ADM COPP, ASM stream + shared memory, a test

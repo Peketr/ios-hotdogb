@@ -404,16 +404,20 @@ struct apr_hdr {
 static uint32_t apr_token;
 static volatile int core_ready, versions_done;
 static volatile uint32_t rsp_opcode, rsp_status, rsp_seen;
+static volatile uint32_t copp_id = 0xffff, copp_status = 0xffffffff, mem_handle, writes_done;
+#define ADM_CMDRSP_DEVICE_OPEN_V5	0x00010329
+#define ASM_CMDRSP_SHARED_MEM_MAP	0x00010d93
+#define ASM_DATA_EVENT_WRITE_DONE_V2	0x00010d99
 
 static int apr_chan2;	/* 1: send on apr_apps2 (the AFE did not answer on apr_audio_svc) */
 
-static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len)
+static int apr_send_port(uint8_t svc, uint16_t port, uint32_t opcode, const void *payload, uint16_t len)
 {
 	uint8_t b[512];
 	struct apr_hdr h = {
 		.hdr_field = APR_HDR_FIELD_CMD, .pkt_size = (uint16_t)(sizeof(h) + len),
-		.src_svc = svc, .src_domain = APR_DOMAIN_APPS, .src_port = 0,
-		.dest_svc = svc, .dest_domain = APR_DOMAIN_ADSP, .dest_port = 0,
+		.src_svc = svc, .src_domain = APR_DOMAIN_APPS, .src_port = port,
+		.dest_svc = svc, .dest_domain = APR_DOMAIN_ADSP, .dest_port = port,
 		.token = ++apr_token, .opcode = opcode,
 	};
 	if (sizeof(h) + len > sizeof(b))
@@ -422,6 +426,11 @@ static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t 
 	if (len)
 		memcpy(b + sizeof(h), payload, len);
 	return apr_chan2 ? link_send2(b, (uint32_t)(sizeof(h) + len)) : link_send(b, (uint32_t)(sizeof(h) + len));
+}
+
+static int apr_send(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len)
+{
+	return apr_send_port(svc, 0, opcode, payload, len);
 }
 
 static const char *svc_name(uint32_t id)
@@ -458,6 +467,20 @@ void link_raw(const uint8_t *d, uint32_t n)
 			printf(" %s(%#x) v%u", svc_name(w[2 + 2 * i] & 0xff), w[2 + 2 * i], w[3 + 2 * i]);
 		printf("\n");
 		versions_done = 1;
+		break;
+	case ADM_CMDRSP_DEVICE_OPEN_V5:
+		copp_status = w[0];
+		copp_id = w[1] & 0xffff;
+		printf("apr: ADM device open -> status %#x, COPP %u\n", w[0], copp_id);
+		break;
+	case ASM_CMDRSP_SHARED_MEM_MAP:
+		mem_handle = w[0];
+		printf("apr: ASM shared memory mapped, handle %#x\n", w[0]);
+		break;
+	case ASM_DATA_EVENT_WRITE_DONE_V2:
+		writes_done++;
+		if (w[3])
+			printf("apr: write done with status %#x\n", w[3]);
 		break;
 	case APR_BASIC_RSP_RESULT:
 		printf("apr: result for %#x from %s: %#x%s\n", w[0], svc_name(h.src_svc), w[1], w[1] ? " (ERROR)" : "");
@@ -524,7 +547,8 @@ static void tfa_probe(void)
 #define LPASS_CLK_QUAD_MI2S_IBIT 0x106
 #define I2S_SD1			2	/* AFE_PORT_I2S_SD1: the stock DT's quat mi2s rx-lines = 0x02 */
 #define RATE			48000
-#define BCLK			(RATE * 16 * 2)
+#define PORT_BITS		32	/* tfa98xx.cnt: TDMSLLN / TDMSSIZE 32-bit slots */
+#define BCLK			(RATE * PORT_BITS * 2)
 
 /* send and wait for the APR basic response to this opcode: 0 = ok */
 static int apr_cmd(uint8_t svc, uint32_t opcode, const void *payload, uint16_t len, const char *what)
@@ -576,10 +600,10 @@ static int afe_i2s_config(void)
 	} __attribute__((packed)) c = {
 		.port = AFE_PORT_QUAT_MI2S_RX, .payload_size = sizeof(struct param_hdr) + 20,
 		.p = { AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, 20, 0 },
-		.minor = 1, .bit_width = 16, .channel_mode = I2S_SD1, .mono_stereo = 1 /* stereo */,
+		.minor = 1, .bit_width = PORT_BITS, .channel_mode = I2S_SD1, .mono_stereo = 1 /* stereo */,
 		.ws_src = 1 /* internal: we are the I2S master */, .sample_rate = RATE,
 	};
-	return apr_cmd(APR_SVC_AFE, AFE_PORT_CMD_SET_PARAM_V2, &c, sizeof(c), "QUAT_MI2S_RX i2s config 48 kHz 16-bit stereo SD1");
+	return apr_cmd(APR_SVC_AFE, AFE_PORT_CMD_SET_PARAM_V2, &c, sizeof(c), "QUAT_MI2S_RX i2s config 48 kHz 32-bit stereo SD1");
 }
 
 static int afe_start(void)
@@ -716,6 +740,187 @@ static void qrtr_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 	}
 }
 
+/* ---- apps SMMU: the ADSP's accesses to shared buffers (stock DT qcom,msm-audio-ion: stream 0x1b21) through a
+ * translation-off context bank, as phone/wifi/radio.c does for the WLAN stream ---- */
+
+#define SMMU_PA		0x15000000ull
+#define AUDIO_SID	0x1b21
+
+static int smmu_identity(uint32_t sid, uint32_t mask)
+{
+	uint64_t s = SMMU_PA;
+	uint32_t id0 = rd32(s + 0x20), id1 = rd32(s + 0x24), nsmr = id0 & 0xff, ncb = id1 & 0xff;
+	uint32_t psize = (id1 >> 31) ? 0x10000 : 0x1000, npage = 1u << (((id1 >> 28) & 7) + 1);
+	uint64_t used[4] = { 0 };
+	int slot = -1, cb = -1;
+	for (uint32_t i = 0; i < nsmr && i < 128; i++) {
+		uint32_t smr = rd32(s + 0x800 + 4 * i), s2cr = rd32(s + 0xc00 + 4 * i);
+		if (!(smr >> 31)) {
+			if (slot < 0)
+				slot = (int)i;
+			continue;
+		}
+		if (((s2cr >> 16) & 3) == 0)
+			used[(s2cr & 0xff) / 64] |= 1ull << ((s2cr & 0xff) % 64);
+		uint32_t id = smr & 0x7fff, m = (smr >> 16) & 0x7fff;
+		if (((id ^ sid) & ~(m | mask) & 0x7fff) == 0) {
+			printf("smmu: SMR%u %08x already matches %#x: S2CR %08x\n", i, smr, sid, s2cr);
+			return 0;
+		}
+	}
+	for (uint32_t c = 0; c < ncb && c < 256; c++) {
+		uint64_t cbp = s + (uint64_t)npage * psize + (uint64_t)c * psize;
+		if (!(used[c / 64] & (1ull << (c % 64))) && !(rd32(cbp) & 1) && rd32(s + psize + 4 * c) == 0) {
+			cb = (int)c;
+			break;
+		}
+	}
+	if (slot < 0 || cb < 0) {
+		printf("smmu: no free SMR/bank (SMR %d, bank %d)\n", slot, cb);
+		return -1;
+	}
+	uint64_t gr1 = s + psize, cbp = s + (uint64_t)npage * psize + (uint64_t)cb * psize;
+	wr32(cbp + 0x58, 0xffffffff);
+	wr32(cbp + 0x20, 0);
+	wr32(cbp + 0x24, 0);
+	wr32(cbp + 0x30, 0);
+	wr32(cbp + 0x10, 0);
+	wr32(cbp + 0x38, 0);
+	wr32(cbp + 0x3c, 0);
+	wr32(gr1 + 0x800 + 4 * cb, 1);			/* CBA2R: AArch64 */
+	wr32(gr1 + 4 * cb, 0x0001f000u);		/* CBAR as ABL's banks */
+	wr32(cbp, 0x000000e0u);				/* SCTLR: M = 0, no translation */
+	wr32(s + 0xc00 + 4 * slot, (uint32_t)cb);
+	wr32(s + 0x800 + 4 * slot, (1u << 31) | (mask << 16) | sid);
+	wr32(s + 0x70, 0);
+	for (int i = 0; i < 1000 && (rd32(s + 0x74) & 1); i++)
+		usleep(1000);
+	printf("smmu: audio %#x -> CB%d via SMR%d: SMR %08x S2CR %08x\n", sid, cb, slot, rd32(s + 0x800 + 4 * slot),
+	       rd32(s + 0xc00 + 4 * slot));
+	return 0;
+}
+
+/* ---- the stream (Linux techpack/audio dsp/q6adm.c + q6asm.c): ADM COPP on the port, ASM session 1 into it ---- */
+
+#define APR_SVC_ADM		8
+#define APR_SVC_ASM		7
+#define ADM_CMD_DEVICE_OPEN_V5	0x00010326
+#define ADM_CMD_MATRIX_MAP_V5	0x00010325
+#define NULL_COPP_TOPOLOGY	0x00010312
+#define ASM_CMD_SHARED_MEM_MAP	0x00010d92
+#define ASM_STREAM_OPEN_WRITE_V3 0x00010db3
+#define ASM_FMT_MULTI_CH_PCM_V2	0x00010da5
+#define ASM_POSTPROC_NONE	0x00010c68
+#define ASM_FMT_UPDATE_V2	0x00010d98
+#define ASM_SESSION_RUN_V2	0x00010daa
+#define ASM_SESSION_PAUSE	0x00010bd3
+#define ASM_DATA_WRITE_V2	0x00010dab
+#define ASM_PORT		0x0101	/* (session 1 << 8) | stream 1 */
+/* the shared buffers: the top 512 KB of ABL's display carve-out (0x9c000000 + 0x2400000; the framebuffer is at
+ * its start, the DSI packets at + 0x2300000): below 4 GiB, so the address msw is just the SMMU SID offset */
+#define SHM_PA			0x9e380000ull
+#define SHM_SIZE		0x80000u
+#define SHM_SID_MSW		(AUDIO_SID & 0xf)	/* qcom,smmu-sid-mask 0xf: upper 32 bits of the ADSP address */
+#define BUF_BYTES		4800	/* 25 ms of 48 kHz 16-bit stereo: 1200 frames = 11 cycles of 440 Hz */
+#define NBUF			8
+
+static int wait_for(volatile uint32_t *v, uint32_t not, int ms)
+{
+	for (int t = 0; t < ms / 10 && *v == not; t++)
+		link_poll(10);
+	return *v == not ? -1 : 0;
+}
+
+static int stream_open(void)
+{
+	struct {
+		uint16_t flags, mode, ep1, ep2;
+		uint32_t topology;
+		uint16_t channels, bit_width;
+		uint32_t rate;
+		uint8_t map[8];
+	} __attribute__((packed)) o = { 0, 1 /* RX */, AFE_PORT_QUAT_MI2S_RX, 0xffff, NULL_COPP_TOPOLOGY, 2, PORT_BITS, RATE,
+					{ 1, 2 } /* FL, FR */ };
+	apr_send_port(APR_SVC_ADM, AFE_PORT_QUAT_MI2S_RX, ADM_CMD_DEVICE_OPEN_V5, &o, sizeof(o));
+	if (wait_for(&copp_status, 0xffffffff, 2000) || copp_status) {
+		printf("stream: ADM open failed (%#x)\n", copp_status);
+		return -1;
+	}
+	struct { uint32_t matrix, sessions; uint16_t session, ncopps, copp, pad; } m = { 0, 1, 1, 1, (uint16_t)copp_id, 0 };
+	if (apr_cmd(APR_SVC_ADM, ADM_CMD_MATRIX_MAP_V5, &m, sizeof(m), "ADM map ASM session 1 -> COPP"))
+		return -1;
+	struct { uint16_t pool, nregions; uint32_t property; uint32_t lsw, msw, size; } mm = {
+		3 /* ADSP_MEMORY_MAP_SHMEM8_4K_POOL */, 1, 0, (uint32_t)SHM_PA, SHM_SID_MSW, SHM_SIZE };
+	apr_send(APR_SVC_ASM, ASM_CMD_SHARED_MEM_MAP, &mm, sizeof(mm));
+	if (wait_for(&mem_handle, 0, 2000)) {
+		printf("stream: ASM shared memory map: no handle\n");
+		return -1;
+	}
+	struct { uint32_t mode; uint16_t sink, bits; uint32_t postproc, fmt; } ow = { 0, 0 /* matrix */, 16, ASM_POSTPROC_NONE,
+										 ASM_FMT_MULTI_CH_PCM_V2 };
+	uint32_t seen = rsp_seen;
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_STREAM_OPEN_WRITE_V3, &ow, sizeof(ow));
+	for (int i = 0; i < 200 && !(rsp_seen != seen && rsp_opcode == ASM_STREAM_OPEN_WRITE_V3); i++)
+		link_poll(10);
+	printf("stream: ASM open write -> %#x\n", rsp_opcode == ASM_STREAM_OPEN_WRITE_V3 ? rsp_status : 0xdead);
+	if (rsp_opcode != ASM_STREAM_OPEN_WRITE_V3 || rsp_status)
+		return -1;
+	struct { uint32_t blk; uint16_t ch, bits; uint32_t rate; uint16_t sign, res; uint8_t map[8]; } f = {
+		20, 2, 16, RATE, 1, 0, { 1, 2 } };
+	seen = rsp_seen;
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_FMT_UPDATE_V2, &f, sizeof(f));
+	for (int i = 0; i < 200 && !(rsp_seen != seen && rsp_opcode == ASM_FMT_UPDATE_V2); i++)
+		link_poll(10);
+	printf("stream: media format 48 kHz 16-bit stereo -> %#x\n", rsp_opcode == ASM_FMT_UPDATE_V2 ? rsp_status : 0xdead);
+	return 0;
+}
+
+static void stream_write(unsigned idx)
+{
+	struct { uint32_t lsw, msw, handle, size, seq, ts_lsw, ts_msw, flags; } w = {
+		(uint32_t)SHM_PA + idx * BUF_BYTES, SHM_SID_MSW, mem_handle, BUF_BYTES, idx, 0, 0, 0 };
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_DATA_WRITE_V2, &w, sizeof(w));
+}
+
+/* a quiet 440 Hz tone (the amps run without speaker protection: about -26 dBFS) for secs seconds */
+static void tone(unsigned secs)
+{
+	static int16_t buf[BUF_BYTES / 2];
+	for (unsigned i = 0; i < BUF_BYTES / 4; i++) {
+		/* 11 cycles over 1200 frames: sin by a 4th-order polynomial is plenty for a test tone */
+		double x = 2.0 * 3.14159265358979 * 11.0 * i / (BUF_BYTES / 4), s;
+		while (x > 3.14159265358979)
+			x -= 2.0 * 3.14159265358979;
+		s = x * (1.27323954 - 0.405284735 * (x < 0 ? -x : x));
+		int16_t v = (int16_t)(s * 1600.0);
+		buf[2 * i] = v;
+		buf[2 * i + 1] = v;
+	}
+	for (unsigned b = 0; b < NBUF; b++)
+		pm_wr(SHM_PA + b * BUF_BYTES, buf, BUF_BYTES);
+	uint32_t run[3] = { 0, 0, 0 };
+	uint32_t seen = rsp_seen;
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_SESSION_RUN_V2, run, sizeof(run));
+	for (int i = 0; i < 200 && !(rsp_seen != seen && rsp_opcode == ASM_SESSION_RUN_V2); i++)
+		link_poll(10);
+	printf("stream: run -> %#x\n", rsp_opcode == ASM_SESSION_RUN_V2 ? rsp_status : 0xdead);
+	unsigned total = secs * 40, sent = 0;
+	uint32_t done0 = writes_done;
+	printf("[%6llu] #### PLAYING A 440 HZ TEST TONE (%u s)\n", (unsigned long long)link_ms(), secs);
+	uint64_t t0 = link_ms();
+	while (writes_done - done0 < total && link_ms() - t0 < secs * 1000ull + 3000) {
+		while (sent < total && sent - (writes_done - done0) < NBUF) {
+			stream_write(sent % NBUF);
+			sent++;
+		}
+		link_poll(5);
+	}
+	printf("[%6llu] stream: %u buffers sent, %u done\n", (unsigned long long)link_ms(), sent, writes_done - done0);
+	seen = rsp_seen;
+	apr_send_port(APR_SVC_ASM, ASM_PORT, ASM_SESSION_PAUSE, NULL, 0);
+	link_poll(200);
+}
+
 static int up(unsigned delay)
 {
 	tfa_probe();
@@ -791,6 +996,9 @@ static int up(unsigned delay)
 				}
 			if (n)
 				printf("[%6llu] #### SPEAKER AMPS RUNNING (%d of 2)\n", (unsigned long long)link_ms(), n);
+			if (n && access("/var/local/audiod.notone", F_OK) != 0 && smmu_identity(AUDIO_SID, 0) == 0 &&
+			    stream_open() == 0)
+				tone(3);
 		}
 	}
 	printf("audiod: up; serving the ADSP (SMP2P, GLINK)\n");
