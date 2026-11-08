@@ -833,22 +833,6 @@ static int wait_for(volatile uint32_t *v, uint32_t not, int ms)
 
 static int stream_open(void)
 {
-	struct {
-		uint16_t flags, mode, ep1, ep2;
-		uint32_t topology;
-		uint16_t channels, bit_width;
-		uint32_t rate;
-		uint8_t map[8];
-	} __attribute__((packed)) o = { 0, 1 /* RX */, AFE_PORT_QUAT_MI2S_RX, 0xffff, NULL_COPP_TOPOLOGY, 2, PORT_BITS, RATE,
-					{ 1, 2 } /* FL, FR */ };
-	apr_send_port(APR_SVC_ADM, AFE_PORT_QUAT_MI2S_RX, ADM_CMD_DEVICE_OPEN_V5, &o, sizeof(o));
-	if (wait_for(&copp_status, 0xffffffff, 2000) || copp_status) {
-		printf("stream: ADM open failed (%#x)\n", copp_status);
-		return -1;
-	}
-	struct { uint32_t matrix, sessions; uint16_t session, ncopps, copp, pad; } m = { 0, 1, 1, 1, (uint16_t)copp_id, 0 };
-	if (apr_cmd(APR_SVC_ADM, ADM_CMD_MATRIX_MAP_V5, &m, sizeof(m), "ADM map ASM session 1 -> COPP"))
-		return -1;
 	struct { uint16_t pool, nregions; uint32_t property; uint32_t lsw, msw, size; } mm = {
 		3 /* ADSP_MEMORY_MAP_SHMEM8_4K_POOL */, 1, 0, (uint32_t)SHM_PA, SHM_SID_MSW, SHM_SIZE };
 	apr_send(APR_SVC_ASM, ASM_CMD_SHARED_MEM_MAP, &mm, sizeof(mm));
@@ -872,6 +856,23 @@ static int stream_open(void)
 	for (int i = 0; i < 200 && !(rsp_seen != seen && rsp_opcode == ASM_FMT_UPDATE_V2); i++)
 		link_poll(10);
 	printf("stream: media format 48 kHz 16-bit stereo -> %#x\n", rsp_opcode == ASM_FMT_UPDATE_V2 ? rsp_status : 0xdead);
+	/* then the device and the routing, as downstream's PCM prepare does after q6asm_open_write */
+	struct {
+		uint16_t flags, mode, ep1, ep2;
+		uint32_t topology;
+		uint16_t channels, bit_width;
+		uint32_t rate;
+		uint8_t map[8];
+	} __attribute__((packed)) o = { 0, 1 /* RX */, AFE_PORT_QUAT_MI2S_RX, 0xffff, NULL_COPP_TOPOLOGY, 2, PORT_BITS, RATE,
+					{ 1, 2 } /* FL, FR */ };
+	apr_send_port(APR_SVC_ADM, AFE_PORT_QUAT_MI2S_RX, ADM_CMD_DEVICE_OPEN_V5, &o, sizeof(o));
+	if (wait_for(&copp_status, 0xffffffff, 2000) || copp_status) {
+		printf("stream: ADM open failed (%#x)\n", copp_status);
+		return -1;
+	}
+	struct { uint32_t matrix, sessions; uint16_t session, ncopps, copp, pad; } m = { 0, 1, 1, 1, (uint16_t)copp_id, 0 };
+	if (apr_cmd(APR_SVC_ADM, ADM_CMD_MATRIX_MAP_V5, &m, sizeof(m), "ADM map ASM session 1 -> COPP"))
+		return -1;
 	return 0;
 }
 
