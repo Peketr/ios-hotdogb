@@ -5,6 +5,27 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: CELLULAR - how iOS reaches a baseband, and step 1 (CommCenter back) (2026-11-09)
+- iOS stack (20H392): CommCenter (CoreTelephony/Support) speaks **QMI** itself (qmi::Client, QMIClientPool, "Unified
+  QMUX v2"), over QMUX channels qmux1..5 + qmux_control. AppleBasebandManager (in CommCenter/abm-helper) powers and
+  boots the baseband through the AppleBaseband / AppleBasebandPCIControl kernel drivers, BBUpdater loads its firmware;
+  transports in the cache: TelephonyBasebandPCITransport (iPhone X: MobileGestalt baseband 'mav17' = Qualcomm over
+  PCIe), TelephonyBasebandUSBTransport (HSIC), UART, plain FD/file (TelephonyUtilTransportCreateWithFD).
+- Our modem already answers QMI over QRTR (wland: WDS 0x1, DMS 0x2, NAS 0x3, WMS 0x5, VOICE 0x9, UIM 0xb, LOC 0x10, ...).
+  Plan: (1) see what CommCenter does here; (2) give it a transport (kernel IOService it opens, or an FD/UART path)
+  and a userland bridge QMUX <-> QRTR (QMUX CTL client ids <-> QRTR ports; the QMI SDU is the same); (3) skip/fake
+  the boot (the modem is already up from wland: AppleBasebandManager's power/boot/BBUpdater steps must be answered,
+  not done); (4) answer Apple vendor QMI messages the OnePlus firmware lacks (as btd does for Broadcom HCI);
+  (5) SIM/registration (UIM/NAS), then data (WDS + the IPA data path: another driver), SMS, voice last (audio).
+- launchd picks the CommCenter job by device tree: com.apple.CommCenter.plist `_LimitLoadToDeviceTree baseband`,
+  com.apple.CommCenter-noncellular.plist `_LimitLoadFromDeviceTree baseband` (same binary). Our ADT has no baseband
+  node; sweet-root-tweaks removes both (label com.apple.CommCenter) since it blocked Setup.
+- **Step 1 (on the phone, not run yet)**: the non-cellular job restored (`hotdogb-launchd-job.py enable
+  com.apple.CommCenter`, entry from the root's plist in /var/local/launchd-disabled) + job oslog-commcenter
+  (`oslog -l CommCenter` -> /var/local/oslog-commcenter.log). Expect: CoreTelephony answers (Settings > Privacy shows
+  Location Services, the getSubscriptionInfo check below) - or the old crash loop. Undo:
+  `hotdogb-launchd-job.py disable com.apple.CommCenter` + `remove oslog-commcenter`.
+
 ### HOTDOGB: GPS, accelerometer, gyro - plan, and GPS step 1 (QMI LOC client in wland) (2026-11-09)
 - **Hardware** (strings in ../hotdogb/fw/modem-image/image/slpi.b*): IMU = ST **LSM6DSM** (accel + gyro), magnetometer
   MEMSIC **MMC5603**, SAR sx932x; all on the **SLPI** (sensor DSP, sensor_pd per slpius.jsn), not reachable from apps.
