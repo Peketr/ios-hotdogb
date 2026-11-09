@@ -23,6 +23,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   LocationServicesEnabledIn7.0 (Setup Assistant sets it; our roots skip it), so locationd authorizes no client
   (none in clients.plist) and Settings has no per-app Location rows. tools/sweet-root-tweaks.py now sets it (and
   LocationServicesEnabled) on new roots; on the running phone put the edited plist + reboot (backup in /var/local).
+- **Settings hides the Location Services row anyway** (after the fix above; disassembly of the 20H392 shared cache,
+  extracted on the PC with a small reader + llvm-mc): -[PUIPrivacyController updateLocationServicesVisibility] removes
+  the LOCATION specifier unless _cachedLocationServicesAvailableValue is YES, and refreshLocationServicesAvailable sets
+  it only after CoreTelephonyClient getSubscriptionInfoWithError: succeeds (then per SIM: carrier bundle value). On an
+  error it sets nothing -> nil -> NO. Our roots remove com.apple.CommCenter (no baseband), so the call fails. The
+  locationd switch itself is on; apps can still ask. Fix options: a stub CommCenter XPC server that answers "no SIMs",
+  or bring CommCenter back now that Setup is done.
 - **GPS step 2 (iOS side)**: an injector daemon that reads gps.fix and feeds locationd (candidate: CoreLocation's
   private CLSimulationManager, the path Xcode's location simulation uses - to be checked against this root's locationd).
 - **Accel/gyro plan**: (1) SLPI PAS boot (like the ADSP's in audiod: pil_slpi carve-out from dtbo overlay 3, its
