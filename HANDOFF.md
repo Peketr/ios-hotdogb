@@ -32,12 +32,16 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   Once, between restarts, a bluetoothd ran with STACK_READY and no restart (PowerState 2, manager not powered on).
 - k0165-bt-12: ANTENNA_PREF_B passes; next BD_VSC_FACTORY_CAL_READ_TABLE (1 parameter byte) -> "Invalid data size 1",
   restart. Vendor answers are now padded with zeros to >= 32 return bytes.
+- k0165-bt-13: calibration passes; locationd/sharingd/FindMy register scans; then LE Set Scan Parameters 0x200b
+  -> 0xc (Command Disallowed), "Could not start LE scan ... STATUS 712", restart. Cause: bluetoothd's init sends
+  0x204a (an extended-advertising-family command), after which the chip refuses legacy LE commands. btd now answers
+  0x204a itself (list size 8).
 - Fix: btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
   never sees it) and logs every refused command ("REFUSED") regardless of the 400-packet limit.
 - bluetoothd's own log: job org.iosonpixel.oslog-bluetoothd (`oslog -l bluetoothd`, /var/local/oslog-bluetoothd.log).
 - The k0165-bt-2 "freeze": SpringBoard started a shutdown at 298 s (after touches); halt is not implemented, so
   "Halt/Restart Timed Out" panic at 332 s. Not Bluetooth.
-- Next: new btd at /var/local/bin/btd7 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
+- Next: new btd at /var/local/bin/btd8 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
   log; extend local_answers until "Stack: STACK_BUSY -> STACK_READY". Then Settings > Bluetooth.
 
 ### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)

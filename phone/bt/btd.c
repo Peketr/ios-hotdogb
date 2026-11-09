@@ -516,6 +516,13 @@ static const struct local_answer {
 	uint8_t octet, bit;	/* its bit in the Read Local Supported Commands mask (Core spec vol 4 part E 6.27) */
 } local_answers[] = {
 	{ 0x0c5b, 0, { 0 }, 18, 3 },
+	/*
+	 * LE Read Periodic Advertiser List Size: one of the Bluetooth 5 "extended advertising" commands. Once the chip
+	 * has seen one, it refuses the legacy LE commands bluetoothd uses next (0x2007, LE Set Scan Parameters 0x200b:
+	 * status 0xc), and bluetoothd restarts ("Could not start LE scan ... STATUS 712", k0165-bt-13). Answered here
+	 * (list size 8) so the chip stays in legacy mode. It is in the chip's own mask already (octet 0xff: no change).
+	 */
+	{ 0x204a, 1, { 8 }, 0xff, 0 },
 };
 
 /*
@@ -530,7 +537,8 @@ static void patch_supported_commands(uint8_t *d, size_t len)
 		return;
 	uint8_t *mask = d + 7;
 	for (size_t k = 0; k < sizeof(local_answers) / sizeof(local_answers[0]); k++)
-		mask[local_answers[k].octet] |= (uint8_t)(1u << local_answers[k].bit);
+		if (local_answers[k].octet < 64)
+			mask[local_answers[k].octet] |= (uint8_t)(1u << local_answers[k].bit);
 	LOG("<ctlr supported commands: set the bits of %zu commands btd answers\n",
 	    sizeof(local_answers) / sizeof(local_answers[0]));
 }
