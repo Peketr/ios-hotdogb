@@ -202,3 +202,9 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
 - 0165 Bluetooth: sweet_btuart.c becomes a plain bridge on "com.apple.uart.bluetooth" (the Galaxy S9 port's
   route): btd claims the chip side (BTUART_CLAIM_CHIP), bluetoothd (BT_HCI_TRANSPORT=H4:POSIX:...) is the host;
   bytes are copied between the two sockets. No Skywalk; the .sk. control is gone.
+- 0166 hotdogb battery: SweetBattery reads the 7T's own fuel gauge, a TI bq27411 (DEVICE_TYPE 0x0421, I2C 0x55 on
+  i2c@a80000 = QUPv3 1 SE0, GENI FIFO mode, polled; GCC 0x5200c bits 18-22, RCG 0x18148) every 20 s from 15 s after
+  start: SOC, voltage, average current, remaining/full capacity, temperature. Charger state from the PM8150B SMB5
+  over SPMI SID 2 (sweet_spmi.c now allows SID 2 peripherals 0x10/0x11/0x13), else the sign of the current.
+  CurrentCapacity = percent, MaxCapacity = 100 (as real iPhones), mAh in AppleRaw*. Default on; `sweetbattery=0`
+  = the old static 100%.

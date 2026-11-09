@@ -9,7 +9,11 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-09): GPS step 2 - same kernel; gpsfeed boot job (/var/local/gpsfeed.log) hands wland's fixes to
+# Current (2026-11-09, later): kernel 0166 = battery from the 7T's bq27411 fuel gauge (default on; sweetbattery=0 = old
+# static 100%). Look for "#### BATTERY GAUGE UP" and "#### FIRST BATTERY READING: N% ..." ~15 s after start; compare N
+# with the status bar / Settings > Battery; plug/unplug USB power -> "#### CHARGER CONNECTED/DISCONNECTED" within 20 s.
+# Until kernel-0166 is fetched the script falls back to kernel-0165 (says so). The GPS step below is unchanged.
+# GPS step 2 (2026-11-09) - same kernel; gpsfeed boot job (/var/local/gpsfeed.log) hands wland's fixes to
 # locationd. Outdoors, wait for "#### FIRST LOCATION SENT TO LOCATIOND", then open Maps. CommCenter stays off.
 # Also on the phone: GPS wland (phone/wifi/gnss.c, "#### FIRST GPS FIX", /var/local/gps.fix) and Location Services on.
 # Before (2026-11-08): kernel 0158 (sweet90=3: panel at 90 Hz + INTF_1 tear check rescaled + 11.1 ms vsync; 1 = panel only, 2 = vsync only) on 0157 (90 Hz switch) on 0156.
@@ -25,8 +29,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=work/boot/kernel-0165
-TAG=k0165-gpsfeed
+KERNEL=work/boot/kernel-0166
+TAG=k0166-batt
+if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0165 ]; then
+	echo "no $KERNEL yet: using kernel-0165 (no battery gauge)" >&2
+	KERNEL=work/boot/kernel-0165 TAG=k0165-gpsfeed
+fi
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3"

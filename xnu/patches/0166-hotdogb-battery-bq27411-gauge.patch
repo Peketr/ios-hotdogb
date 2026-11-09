@@ -1,0 +1,671 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 6a121c5..0b6d067 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -4,7 +4,8 @@
+  * No interrupt clear, peripheral enable, charger config, or PMIC writes.
+  * Init is serialized by the single built-in SweetBattery personality.
+  * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
+- * Also the PM8150 RTC (peripheral 0x60) for the time of day (SweetPlatformExpert.cpp).
++ * Also the PM8150 RTC (peripheral 0x60) for the time of day (SweetPlatformExpert.cpp),
++ * and on hotdogb the PM8150B charger status (SID 2: SMB5 CHGR 0x10, DCDC 0x11, USBIN 0x13).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -89,9 +90,16 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ {
+ 	/* Restrict access to the battery blocks and the RTC (0x60); keys retain their own lanes. */
+ 	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
+-	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48 && peripheral != 0x60)) {
++	if (!sp_ready || !out || addr > 0xffffu) {
++		return -1;
++	}
++	if (sid == 0) {
++		if (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
++		    peripheral != 0x13 && peripheral != 0x48 && peripheral != 0x60) {
++			return -1;
++		}
++	} else if (sid != 2 ||
++	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x13)) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 9969739..8b6c19f 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -3,6 +3,12 @@
+  * sweetbattery=1: read-only PM6150 polling every 30 seconds; voltage-derived
+  * SOC is an UNCALIBRATED estimate, not a replacement for the Linux QG algo.
+  * See report.md for binary evidence, register provenance and integration.
++ *
++ * hotdogb (OnePlus 7T): the state of charge comes from the phone's own fuel
++ * gauge, a TI bq27411 (DEVICE_TYPE 0x0421; stock DT "bq27541-battery@55" on
++ * i2c@a80000 = QUPv3 1 SE0), read over GENI I2C in FIFO mode, polled, every
++ * 20 s from 15 s after boot. Charger state: PM8150B SMB5 over SPMI (SID 2).
++ * Default on; sweetbattery=0 = the static 100% source.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <device/device_types.h> /* io_buf_ptr_t for private OSKext headers */
+@@ -12,10 +18,344 @@
+ #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+ #include <libkern/c++/OSCollectionIterator.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+ 
++#if SWEET_HOTDOGB
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++#define BQ_SE_PA        0x00a80000u     /* i2c@a80000, QUPv3 1 SE0 (qupv3_se8_i2c) */
++#define BQ_GCC_PA       0x00100000u
++#define BQ_GCC_VOTE     0x5200cu        /* APCS_CLOCK_BRANCH_ENA_VOTE */
++/* wrap1 core_2x 18, core 19, wrap_1_m_ahb 20, wrap_1_s_ahb 21, wrap1_s0 22 (gcc-sm8150) */
++#define BQ_GCC_BITS     (0x1fu << 18)
++#define BQ_RCG          0x18148u        /* gcc_qupv3_wrap1_s0_clk_src */
++#define BQ_ADDR         0x55u
++#define BQ_DESIGN_MAH   3800u           /* stock DT qcom,batt_capacity_mah */
++
++/* GENI (include/linux/soc/qcom/geni-se.h); the same init as bsd/dev/sweet_s3706.c */
++#define SE_STATUS       0x040u
++#define SE_MCLK         0x048u
++#define SE_FIFO_OFF     0x064u
++#define SE_FW           0x068u
++#define SE_CLK_SEL      0x07cu
++#define SE_DMA          0x258u
++#define SE_I2C_TX_LEN   0x26cu
++#define SE_I2C_RX_LEN   0x270u
++#define SE_I2C_SCL      0x278u
++#define SE_CMD          0x600u
++#define SE_CTRL         0x604u
++#define SE_IRQ          0x610u
++#define SE_IRQ_EN       0x614u
++#define SE_IRQ_CLR      0x618u
++#define SE_TX           0x700u
++#define SE_RX           0x780u
++#define SE_TX_COUNT     0x800u
++#define SE_RX_COUNT     0x804u
++#define SE_TX_WM        0x80cu
++#define SE_HW_TX        0xe24u
++#define SE_HW_RX        0xe28u
++#define SE_DONE         (1u << 0)
++#define SE_NACK         (1u << 10)      /* M_GP_IRQ_1 */
++#define SE_GP_IRQS      (0x3fu << 9)
++#define SE_ERRORS       (0x3eu | (3u << 28) | SE_GP_IRQS)
++#define SE_EVENTS       (SE_DONE | SE_ERRORS | (3u << 26) | (1u << 30))
++#define SE_PACK0        0x0007f8feu     /* 8-bit words, 4 per FIFO entry, LSB first */
++#define SE_PACK1        0x000ffefeu
++#define I2C_WRITE       1u
++#define I2C_READ        2u
++#define I2C_STOP_STRETCH (1u << 2)
++/* 19.2 MHz XO: 400 kHz = div 2, t_high 5, t_low 11, t_cycle 22 (geni_i2c_clk_map_19p2mhz) */
++#define I2C_MCLK        ((2u << 4) | 1u)
++#define I2C_SCL         ((5u << 20) | (11u << 10) | 22u)
++
++/* bq27411 / bq27421 and bq27541 standard commands (2 bytes, little endian). */
++struct bq_map {
++	uint8_t temp, volt, flags, rm, fcc, ai, soc;
++};
++static const bq_map bq27411_map = {0x02, 0x04, 0x06, 0x0c, 0x0e, 0x10, 0x1c};
++static const bq_map bq27541_map = {0x06, 0x08, 0x0a, 0x10, 0x12, 0x14, 0x2c};
++#define BQ_FLAG_FC      (1u << 9)       /* full charge (both families) */
++
++static struct {
++	vm_offset_t se, gcc;
++	bool tried, up, dead;
++	uint16_t type;
++	const bq_map *map;
++} bq;
++
++static uint32_t
++bq_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++bq_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++static bool
++bq_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
++{
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (!(bq_rd(base, off) & mask)) {
++			return true;
++		}
++		IODelay(1);
++	}
++	return false;
++}
++
++static bool
++bq_clocks(void)
++{
++	uint32_t before = bq_rd(bq.gcc, BQ_GCC_VOTE);
++	if ((before & BQ_GCC_BITS) != BQ_GCC_BITS) {
++		bq_wr(bq.gcc, BQ_GCC_VOTE, before | BQ_GCC_BITS);
++	}
++	uint32_t cmd = bq_rd(bq.gcc, BQ_RCG), cfg = bq_rd(bq.gcc, BQ_RCG + 4u);
++	uint32_t dfs = bq_rd(bq.gcc, BQ_RCG + 0x14u);
++	IOLog("SWEET BATTERY: gcc vote %#x -> %#x rcg=%#x cfg=%#x dfs=%#x\n",
++	    before, bq_rd(bq.gcc, BQ_GCC_VOTE), cmd, cfg, dfs);
++	if (dfs & 1u) {
++		/* CLK_SEL 0 picks DFS level 0; it must be XO (19.2 MHz) undivided. */
++		cfg = bq_rd(bq.gcc, BQ_RCG + 0x1cu);
++		if ((cfg & 0x371fu) != 1u) {
++			IOLog("SWEET BATTERY: DFS level 0 cfg=%#x is not XO/1\n", cfg);
++			return false;
++		}
++	} else if ((cfg & (0x371fu | (1u << 20))) != 1u) {
++		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
++		bq_wr(bq.gcc, BQ_RCG + 4u, cfg);
++		bq_wr(bq.gcc, BQ_RCG, bq_rd(bq.gcc, BQ_RCG) | 1u);
++		if (!bq_wait_clear(bq.gcc, BQ_RCG, 1u)) {
++			IOLog("SWEET BATTERY: RCG update timeout\n");
++			return false;
++		}
++	}
++	/* Branch halt bits: wrap1 m_ahb, s_ahb, s0 (hardware-gated ones skipped, as Linux). */
++	const uint32_t branches[] = {0x18004, 0x18008, 0x18144};
++	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
++		uint32_t cbcr = bq_rd(bq.gcc, branches[i]);
++		if (cbcr & 2u) {
++			continue;
++		}
++		if (!bq_wait_clear(bq.gcc, branches[i], 1u << 31)) {
++			IOLog("SWEET BATTERY: GCC branch %#x halted (%#x)\n", branches[i],
++			    bq_rd(bq.gcc, branches[i]));
++			return false;
++		}
++	}
++	return true;
++}
++
++static bool
++bq_se_init(void)
++{
++	uint32_t fw = bq_rd(bq.se, SE_FW), off = bq_rd(bq.se, SE_FIFO_OFF);
++	uint32_t tx = bq_rd(bq.se, SE_HW_TX), rx = bq_rd(bq.se, SE_HW_RX);
++	uint32_t status = bq_rd(bq.se, SE_STATUS);
++	IOLog("SWEET BATTERY: se fw=%#x proto=%u status=%#x fifo-off=%#x tx=%#x rx=%#x\n",
++	    fw, (fw >> 8) & 0xffu, status, off, tx, rx);
++	if (((fw >> 8) & 0xffu) != 3u) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 HAS NO I2C FIRMWARE (FW %#x)\n", fw);
++		return false;
++	}
++	if (off & 1u) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 IS GSI-ONLY (FIFO MODE DISABLED)\n");
++		return false;
++	}
++	if (((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
++	    ((tx >> 16) & 0x3fu) < 2u || ((rx >> 16) & 0x3fu) < 2u) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 FIFO tx=%#x rx=%#x\n", tx, rx);
++		return false;
++	}
++	if (status & 0x1001u) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 BUSY (STATUS %#x)\n", status);
++		return false;
++	}
++	/* geni_se_init + FIFO mode, polled (no GSI, no IRQ routing). */
++	bq_wr(bq.se, 0xe18, 0);
++	bq_wr(bq.se, 0xe1c, 0);
++	bq_wr(bq.se, 0x644, 0);
++	bq_wr(bq.se, SE_IRQ_CLR, 0xffffffffu);
++	bq_wr(bq.se, 0x648, 0xffffffffu);
++	bq_wr(bq.se, SE_DMA, 0);
++	bq_wr(bq.se, 0x28, bq_rd(bq.se, 0x28) | 0x7fu);
++	bq_wr(bq.se, 0xe30, bq_rd(bq.se, 0xe30) | 0x0fu);
++	bq_wr(bq.se, 0x24, 0x7f);
++	bq_wr(bq.se, 0x20, 1);
++	/* qcom_geni_i2c_conf: XO level 0, 400 kHz. */
++	bq_wr(bq.se, SE_CLK_SEL, 0);
++	bq_wr(bq.se, SE_MCLK, I2C_MCLK);
++	bq_wr(bq.se, SE_I2C_SCL, I2C_SCL);
++	bq_wr(bq.se, 0x254, 0);
++	bq_wr(bq.se, 0x260, SE_PACK0);
++	bq_wr(bq.se, 0x264, SE_PACK1);
++	bq_wr(bq.se, 0x284, SE_PACK0);
++	bq_wr(bq.se, 0x288, SE_PACK1);
++	bq_wr(bq.se, SE_TX_WM, 0);
++	bq_wr(bq.se, 0x810, ((rx >> 16) & 0x3fu) - 1u);   /* RX watermark */
++	bq_wr(bq.se, 0x814, (rx >> 16) & 0x3fu);          /* RX RFR watermark */
++	bq_wr(bq.se, SE_IRQ_EN, SE_EVENTS);
++	for (unsigned i = 0; i < 64 && (bq_rd(bq.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
++		(void)bq_rd(bq.se, SE_RX);
++	}
++	if (bq_rd(bq.se, SE_TX_COUNT) & 0xfffffffu) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 TX FIFO NOT EMPTY\n");
++		return false;
++	}
++	return true;
++}
++
++static void
++bq_abort(void)
++{
++	bq_wr(bq.se, SE_CTRL, 2);       /* M_GENI_CMD_ABORT */
++	bool done = false;
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (bq_rd(bq.se, SE_IRQ) & (1u << 5)) {
++			done = true;
++			break;
++		}
++		IODelay(1);
++	}
++	for (unsigned i = 0; i < 64 && (bq_rd(bq.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
++		(void)bq_rd(bq.se, SE_RX);
++	}
++	bq_wr(bq.se, SE_IRQ_CLR, 0xffffffffu);
++	if (!done || !bq_wait_clear(bq.se, SE_STATUS, 1u)) {
++		bq.dead = true;
++		IOLog("#### BATTERY GAUGE FAILED: I2C ABORT STUCK (STATUS %#x IRQ %#x)\n",
++		    bq_rd(bq.se, SE_STATUS), bq_rd(bq.se, SE_IRQ));
++	}
++}
++
++/* One I2C message of at most 8 bytes (fits the FIFO). 0, -1 = NACK, -2 = error, -3 = timeout. */
++static int
++bq_msg(bool rd, uint8_t *buf, unsigned len, bool stretch)
++{
++	if (bq.dead || len == 0 || len > 8) {
++		return -2;
++	}
++	if (!bq_wait_clear(bq.se, SE_STATUS, 1u)) {
++		bq.dead = true;
++		IOLog("#### BATTERY GAUGE FAILED: SE8 STAYS BUSY\n");
++		return -2;
++	}
++	bq_wr(bq.se, SE_IRQ_CLR, 0xffffffffu);
++	bq_wr(bq.se, rd ? SE_I2C_RX_LEN : SE_I2C_TX_LEN, len);
++	bq_wr(bq.se, SE_CMD, ((rd ? I2C_READ : I2C_WRITE) << 27) | (BQ_ADDR << 9) |
++	    (stretch ? I2C_STOP_STRETCH : 0u));
++	if (!rd) {
++		for (unsigned i = 0; i < len; i += 4) {
++			uint32_t w = 0;
++			for (unsigned k = 0; k < 4 && i + k < len; ++k) {
++				w |= (uint32_t)buf[i + k] << (8 * k);
++			}
++			bq_wr(bq.se, SE_TX, w);
++		}
++	}
++	unsigned got = 0;
++	uint32_t irq = 0;
++	for (unsigned i = 0; i < 10000; ++i) {
++		if (rd) {
++			uint32_t words = bq_rd(bq.se, SE_RX_COUNT) & 0x1ffffffu;
++			while (words-- && got < len) {
++				uint32_t w = bq_rd(bq.se, SE_RX);
++				for (unsigned k = 0; k < 4 && got < len; ++k) {
++					buf[got++] = (uint8_t)(w >> (8 * k));
++				}
++			}
++		}
++		irq = bq_rd(bq.se, SE_IRQ);
++		if ((irq & SE_ERRORS) || ((irq & SE_DONE) && (!rd || got == len))) {
++			break;
++		}
++		IODelay(1);
++	}
++	bq_wr(bq.se, SE_IRQ_CLR, irq);
++	if (!(irq & (SE_DONE | SE_ERRORS))) {
++		bq_abort();
++		return -3;
++	}
++	if (irq & SE_NACK) {
++		return -1;
++	}
++	if ((irq & SE_ERRORS) || got != (rd ? len : 0u)) {
++		return -2;
++	}
++	return 0;
++}
++
++/* Standard command: write the command code (no STOP), read 2 bytes. */
++static int
++bq_cmd(uint8_t code, uint16_t *value)
++{
++	int rc = -2;
++	for (unsigned attempt = 0; attempt < 2 && !bq.dead; ++attempt) {
++		uint8_t b[2] = {0, 0};
++		rc = bq_msg(false, &code, 1, true);
++		if (!rc) {
++			rc = bq_msg(true, b, 2, false);
++		}
++		IODelay(100);   /* bq27xxx: >= 66 us bus free between transactions */
++		if (!rc) {
++			*value = (uint16_t)(b[0] | (b[1] << 8));
++			return 0;
++		}
++	}
++	return rc;
++}
++
++static bool
++bq_start(void)
++{
++	bq.tried = true;
++	IOLog("#### STARTING BATTERY GAUGE\n");
++	bq.gcc = ml_io_map(BQ_GCC_PA, 0x60000);
++	bq.se = ml_io_map(BQ_SE_PA, 0x1000);    /* never SE + 0x2000.. (TrustZone) */
++	if (!bq.gcc || !bq.se) {
++		IOLog("#### BATTERY GAUGE FAILED: MMIO MAPPING\n");
++		return false;
++	}
++	if (!bq_clocks()) {
++		IOLog("#### BATTERY GAUGE FAILED: SE8 CLOCKS\n");
++		return false;
++	}
++	if (!bq_se_init()) {
++		return false;
++	}
++	/* Control(DEVICE_TYPE): a read-only query, as the stock driver does at probe. */
++	uint8_t ctl[3] = {0x00, 0x01, 0x00};
++	uint16_t type = 0;
++	int rc = bq_msg(false, ctl, 3, false);
++	IODelay(100);
++	if (!rc) {
++		rc = bq_cmd(0x00, &type);
++	}
++	if (rc) {
++		IOLog("#### BATTERY GAUGE FAILED: NO ANSWER AT 0x55 (%s)\n",
++		    rc == -1 ? "NACK" : rc == -3 ? "TIMEOUT" : "BUS ERROR");
++		return false;
++	}
++	bq.type = type;
++	bq.map = type == 0x0541 ? &bq27541_map : &bq27411_map;
++	bq.up = true;
++	IOLog("#### BATTERY GAUGE UP: %s (DEVICE TYPE %#x)\n",
++	    bq.map == &bq27541_map ? "BQ27541" : "BQ27411", type);
++	return true;
++}
++#endif /* SWEET_HOTDOGB */
++
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+ public:
+@@ -28,6 +368,15 @@ private:
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+ 	int fLastMode;
++#if SWEET_HOTDOGB
++	/* Gauge extras for publish(): remaining / full charge capacity (mAh), centidegrees C. */
++	bool fSpmi, fGaugeDue, fHaveSample;
++	unsigned fRawRemaining, fRawFull, fFailures;
++	int fTempCenti;
++	unsigned fLastPercent;
++	bool fLastExternal, fLastCharging, fLastFull;
++	void pollGauge(void);
++#endif
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -52,6 +401,13 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
++#if SWEET_HOTDOGB
++	fSpmi = fGaugeDue = fHaveSample = false;
++	fRawRemaining = fRawFull = fFailures = 0;
++	fTempCenti = 2500;
++	fLastPercent = 100;
++	fLastExternal = fLastCharging = fLastFull = false;
++#endif
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -101,16 +457,34 @@ void
+ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+     bool capable, bool charging, bool full, bool measured, bool currentValid)
+ {
++#if SWEET_HOTDOGB
++	/* As on real iPhones: CurrentCapacity = the percentage, MaxCapacity = 100
++	 * (C*100/M is the percentage either way); mAh in AppleRaw*. The gauge's
++	 * own remaining / full charge capacity when there is a sample. */
++	const unsigned design = BQ_DESIGN_MAH;
++	const unsigned rawMax = fHaveSample && fRawFull ? fRawFull : design;
++	const unsigned rawCurrent = fHaveSample ? fRawRemaining : (rawMax * percent + 50u) / 100u;
++	const unsigned current = percent, maximum = 100;
++	const int temperature = fHaveSample ? fTempCenti : 2500;
++	const bool socEstimated = !fHaveSample, tempEstimated = !fHaveSample;
++	const bool warn = fHaveSample && percent <= 10 && !external;
++#else
+ 	/* Use consistent mAh units (DT nominal=5020). powerd computes C*100/M. */
+-	const unsigned capacity = (5020u * percent + 50u) / 100u;
++	const unsigned design = 5020u, rawMax = 5020u;
++	const unsigned rawCurrent = (5020u * percent + 50u) / 100u;
++	const unsigned current = rawCurrent, maximum = rawMax;
++	/* iOS battery convention: centidegrees C; fixed 25 C, NOT measured. */
++	const int temperature = 2500;
++	const bool socEstimated = measured, tempEstimated = true, warn = false;
++#endif
+ 	setBatteryInstalled(true);
+-	setCurrentCapacity(capacity);
+-	setMaxCapacity(5020);
++	setCurrentCapacity(current);
++	setMaxCapacity(maximum);
+ 	setExternalConnected(external);
+ 	setExternalChargeCapable(capable);
+ 	setIsCharging(charging);
+-	setAtWarnLevel(false);
+-	/* An uncalibrated voltage curve must not assert a critical shutdown. */
++	setAtWarnLevel(warn);
++	/* Never assert a critical shutdown from here; the PMIC cuts off on its own. */
+ 	setAtCriticalLevel(false);
+ 	setVoltage(mv);
+ 	setAmperage(ma);
+@@ -118,16 +492,16 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	setCycleCount(0);     /* Placeholder: cycle learning is not implemented. */
+ 	putBool("FullyCharged", full);
+ 	putBool("AppleRawExternalConnected", external);
+-	putNumber("AppleRawCurrentCapacity", capacity);
+-	putNumber("AppleRawMaxCapacity", 5020);
+-	putNumber("DesignCapacity", 5020);
++	putNumber("AppleRawCurrentCapacity", rawCurrent);
++	putNumber("AppleRawMaxCapacity", rawMax);
++	putNumber("NominalChargeCapacity", rawMax);
++	putNumber("DesignCapacity", design);
+ 	putNumber("InstantAmperage", (UInt32)ma);
+-	/* iOS battery convention: centidegrees C; fixed 25 C, NOT measured. */
+-	putNumber("Temperature", 2500);
++	putNumber("Temperature", (UInt32)temperature);
+ 	putBool("SweetBatteryHardwareSampleValid", measured);
+ 	putBool("SweetBatteryCurrentValid", currentValid);
+-	putBool("SweetBatterySOCEstimated", measured);
+-	putBool("SweetBatteryTemperatureEstimated", true);
++	putBool("SweetBatterySOCEstimated", socEstimated);
++	putBool("SweetBatteryTemperatureEstimated", tempEstimated);
+ 	putBool("SweetBatteryFallback", !measured);
+ 	putNumber("SweetBatteryPercent", percent);
+ 
+@@ -137,7 +511,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 		const char *keys[] = {kIOBatteryCurrentChargeKey, kIOBatteryCapacityKey,
+ 		    kIOBatteryVoltageKey, kIOBatteryAmperageKey, kIOBatteryCycleCountKey,
+ 		    kIOBatteryFlagsKey};
+-		UInt32 values[] = {capacity, 5020, mv, (UInt32)ma, 0,
++		UInt32 values[] = {rawCurrent, rawMax, mv, (UInt32)ma, 0,
+ 		    (UInt32)(kIOBatteryInstalled | (external ? kIOBatteryChargerConnect : 0) |
+ 		    (charging ? kIOBatteryCharge : 0))};
+ 		for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+@@ -153,8 +527,13 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	updateStatus(); /* Flush PS properties and send 0xe0024100 on change. */
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
++#if SWEET_HOTDOGB
++		const char *source = "bq27411 fuel gauge";
++#else
++		const char *source = "PM6150 / estimated SOC";
++#endif
+ 		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+-		    measured ? "PM6150 / estimated SOC" : "static fallback",
++		    measured ? source : "static fallback",
+ 		    percent, mv, external, charging);
+ 		fLastMode = mode;
+ 	}
+@@ -203,9 +582,109 @@ SweetBattery::estimatePercent(unsigned mv)
+ 	return 100;
+ }
+ 
++#if SWEET_HOTDOGB
++/*
++ * One gauge sample (workloop thread). SOC, voltage, average current (mA,
++ * positive = charging, as IOPMPowerSource), remaining / full charge capacity
++ * and temperature come from the bq27411. Plugged in / charging / done: the
++ * PM8150B SMB5 (SID 2; the PM6150 decoding below, same SMB5 registers), else
++ * the sign of the gauge current. A failed read keeps the last good sample.
++ */
++void
++SweetBattery::pollGauge(void)
++{
++	if (!bq.tried) {
++		(void)bq_start();
++	}
++	uint16_t temp = 0, volt = 0, flags = 0, rm = 0, fcc = 0, ai = 0, soc = 0;
++	bool ok = bq.up && !bq.dead &&
++	    !bq_cmd(bq.map->soc, &soc) && !bq_cmd(bq.map->volt, &volt) &&
++	    !bq_cmd(bq.map->ai, &ai) && !bq_cmd(bq.map->flags, &flags) &&
++	    !bq_cmd(bq.map->rm, &rm) && !bq_cmd(bq.map->fcc, &fcc) &&
++	    !bq_cmd(bq.map->temp, &temp);
++	/* Implausible data (bus noise, a gauge in reset) never becomes 0%. */
++	ok = ok && soc <= 100 && volt >= 2800 && volt <= 4600 && fcc <= 10000;
++	if (!ok) {
++		if (bq.up && ++fFailures == 3) {
++			IOLog("#### BATTERY GAUGE READS FAILING (keeping %u%%)\n", fLastPercent);
++		}
++		if (!fHaveSample) {
++			publish(100, 4200, 0, true, true, false, true, false, false);
++		}
++		return;
++	}
++	if (fFailures >= 3) {
++		IOLog("#### BATTERY GAUGE READS OK AGAIN\n");
++	}
++	fFailures = 0;
++	int ma = (int)(int16_t)ai;
++	fRawRemaining = rm;
++	fRawFull = fcc;
++	/* 0.1 K -> 0.01 C, only when plausible (-40..100 C). */
++	fTempCenti = (temp >= 2331 && temp <= 3731) ? (int)temp * 10 - 27315 : 2500;
++
++	uint8_t usb = 0, path = 0, charger = 0, error = 0, chgTemp = 0;
++	bool smb = fSpmi &&
++	    !sweet_spmi_read(2, 0x1310, &usb) &&
++	    !sweet_spmi_read(2, 0x110b, &path) &&
++	    !sweet_spmi_read(2, 0x1006, &charger) &&
++	    !sweet_spmi_read(2, 0x1007, &error) &&
++	    !sweet_spmi_read(2, 0x100d, &chgTemp);
++	bool external, capable, charging, full;
++	if (smb) {
++		external = (usb & 0x10u) != 0;
++		capable = external && (path & 0x10u) && (path & 1u) && !(path & 0x40u);
++		unsigned state = charger & 7u;
++		charging = capable && state >= 1 && state <= 4 &&
++		    !(error & 2u) && !(chgTemp & 0x0cu);
++		full = external && (state == 5 || (flags & BQ_FLAG_FC)) && !(error & 2u);
++	} else {
++		charging = ma > 20;
++		external = capable = charging || ((flags & BQ_FLAG_FC) && ma >= 0 && soc >= 99);
++		full = external && (flags & BQ_FLAG_FC);
++	}
++	if (full) {
++		charging = false;
++	}
++	bool first = !fHaveSample;
++	fHaveSample = true;
++	publish(soc, volt, ma, external, capable, charging, full, true, true);
++	if (first) {
++		IOLog("#### FIRST BATTERY READING: %u%% %u MV %d MA %d.%d C %u/%u MAH%s\n",
++		    soc, volt, ma, fTempCenti / 100, (fTempCenti < 0 ? -fTempCenti : fTempCenti) % 100 / 10,
++		    rm, fcc, smb ? "" : " (NO CHARGER STATUS)");
++	}
++	if (first || soc != fLastPercent || external != fLastExternal ||
++	    charging != fLastCharging || full != fLastFull) {
++		IOLog("SWEET BATTERY: gauge %u%% %umV %dmA %u/%umAh flags=%#x temp=%d "
++		    "usb=%#x path=%#x chg=%#x -> external=%d charging=%d full=%d\n",
++		    soc, volt, ma, rm, fcc, flags, fTempCenti, usb, path, charger,
++		    external, charging, full);
++	}
++	if (external != fLastExternal && !first) {
++		IOLog("#### CHARGER %s (%u%%)\n", external ? "CONNECTED" : "DISCONNECTED", soc);
++	}
++	fLastPercent = soc;
++	fLastExternal = external;
++	fLastCharging = charging;
++	fLastFull = full;
++}
++#endif /* SWEET_HOTDOGB */
++
+ void
+ SweetBattery::poll(void)
+ {
++#if SWEET_HOTDOGB
++	if (fReal && fGaugeDue) {
++		pollGauge();
++		return;
++	}
++	if (fReal) {
++		/* Before the first gauge read (timer, 15 s after start). */
++		publish(100, 4200, 0, true, true, false, true, false, false);
++		return;
++	}
++#endif
+ 	uint8_t type, present, usb, path, charger, error, temperature;
+ 	uint16_t rawVoltage;
+ 	bool valid = fReal &&
+@@ -251,8 +730,14 @@ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (self && self->fRunning) {
++#if SWEET_HOTDOGB
++		self->fGaugeDue = true;
++		self->poll();
++		sender->setTimeoutMS(20000);
++#else
+ 		self->poll();
+ 		sender->setTimeoutMS(30000);
++#endif
+ 	}
+ }
+ 
+@@ -262,9 +747,22 @@ SweetBattery::start(IOService *provider)
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
++#if SWEET_HOTDOGB
++	/* The bq27411 gauge, default on; the first I2C access waits for the timer. */
++	int real = 1;
++	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
++	fReal = real != 0;
++	fSpmi = fReal && sweet_spmi_init() == 0;
++	const unsigned firstMs = 15000;
++	if (!fReal) {
++		IOLog("#### BATTERY GAUGE OFF (sweetbattery=0): STATIC 100%%\n");
++	}
++#else
+ 	int real = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++	const unsigned firstMs = 30000;
++#endif
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
+@@ -273,7 +771,7 @@ SweetBattery::start(IOService *provider)
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
+-			fTimer->setTimeoutMS(30000);
++			fTimer->setTimeoutMS(firstMs);
+ 		} else {
+ 			fReal = false;
+ 			poll();

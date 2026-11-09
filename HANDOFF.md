@@ -5,6 +5,23 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernel 0166 (2026-11-09, not run yet)
+- Before: SweetBattery on the 7T was the ios-sweet (Redmi Note 10, PM6150 QG) driver. Without `sweetbattery=1` it
+  publishes a fixed 100% / AC; with it, it reads PM6150 registers the 7T does not have -> the same fallback.
+  CurrentCapacity/MaxCapacity were mAh of a 5020 mAh battery.
+- The 7T's SOC source (stock Android, observed): the OPLUS charger stack uses an external TI gauge,
+  `bq27541-battery 3-0055: DEVICE_TYPE is 0x421` = **bq27411** family, on `/soc/i2c@a80000` (= qupv3_se8_i2c,
+  QUPv3 1 SE0; stock dtbo fragment@69) at 0x55. PM8150B's FG gen4 is `oem,use_external_fg`. Design 3800 mAh
+  (`qcom,batt_capacity_mah`); stock log: 100%, 4359 mV, 29.9 C, RM/FCC 3017 mAh.
+- 0166: GENI I2C FIFO mode on SE8 (same init as the S3706 driver), clocks voted (GCC 0x5200c bits 18-22, RCG
+  0x18148 XO/1, branches 0x18004/0x18008/0x18144), Control(DEVICE_TYPE) then standard commands SOC 0x1c, voltage
+  0x04, AverageCurrent 0x10, Flags 0x06, RM 0x0c, FCC 0x0e, temperature 0x02 (bq27541 map if the type is 0x0541).
+  Charger: PM8150B SMB5 at SPMI SID 2 (USBIN 0x1310, path 0x110b, CHGR 0x1006/0x1007/0x100d, the PM6150 decoding).
+  Guesses to confirm on the first run: XBL left SE8 with I2C firmware and FIFO mode allowed; pins 88/89 (stock DT:
+  function qup8, 2 mA, no pull in the active state) already muxed (the driver does not touch TLMM); the SID 2 SMB5 APIDs are visible to the observer.
+- Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
+  CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
+
 ### HOTDOGB: CELLULAR - how iOS reaches a baseband, and step 1 (CommCenter back) (2026-11-09)
 - iOS stack (20H392): CommCenter (CoreTelephony/Support) speaks **QMI** itself (qmi::Client, QMIClientPool, "Unified
   QMUX v2"), over QMUX channels qmux1..5 + qmux_control. AppleBasebandManager (in CommCenter/abm-helper) powers and

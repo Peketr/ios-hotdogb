@@ -34,3 +34,4 @@
 0163 SWEET BTUART: kernel control %s -> %d
 0164 bluetoothd skywalk user pipe privilege granted
 0165 #### BTUART CHIP SIDE UNIT %u (pid %d)
+0166 #### BATTERY GAUGE UP: %s (DEVICE TYPE %#x)
