@@ -544,8 +544,39 @@ struct h4host {
 	unsigned answered;
 };
 
+/*
+ * bluetoothd's vendor commands (OGF 0x3f) are Broadcom/Apple ones ("BD_VSC_*", the "Olympic" set on 0xfce2 with a
+ * sub-opcode first); the WCN3998 refuses them all (status 1, no return data). Most refusals bluetoothd logs and
+ * skips ("completed with status 701"), but BD_VSC_OLYMPIC_ANTENNA_PREF_B (0xfce2, 10 bytes) wants return data:
+ * "Invalid data size 0", 15 s timeout, restart (reason 3602, k0165-bt-10). btd answers every one of them: status 0,
+ * then the first parameter byte (the Olympic sub-opcode) echoed. btd's own Qualcomm vendor commands go straight to
+ * the UART (hci_cmd), not through here.
+ */
+static unsigned vendor_answered;
+
+static int answer_vendor(const uint8_t *p)
+{
+	unsigned op = p[1] | p[2] << 8;
+	if ((op >> 10) != 0x3f)
+		return 0;
+	uint8_t e[8] = { 4, 0x0e, 4, 1, p[1], p[2], 0 };
+	size_t n = 7;
+	if (p[3] > 0) {
+		e[2] = 5;
+		e[7] = p[4];
+		n = 8;
+	}
+	if (vendor_answered++ < 100)
+		LOG("host> vendor cmd %#06x len %u (first byte %#04x) answered by btd\n", op, p[3], p[3] ? p[4] : 0);
+	if (pipe_write(e, n))
+		LOG("host write of a vendor answer failed\n");
+	return 1;
+}
+
 static void host_pkt(const uint8_t *p, size_t len, struct h4host *h)
 {
+	if (p[0] == 1 && len >= 4 && answer_vendor(p))
+		return;
 	if (p[0] == 1 && len >= 4) {
 		unsigned op = p[1] | p[2] << 8;
 		for (size_t i = 0; i < sizeof(local_answers) / sizeof(local_answers[0]); i++) {

@@ -20,12 +20,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 - k0165-bt-9: answering 0x0c5b was not enough - bluetoothd never sends it: it checks the chip's Read Local
   Supported Commands mask first (octet 18 = 0x83, bit 3 clear) and fails locally. btd now also sets the mask bits of
   the commands it answers in the 0x1002 reply (patch_supported_commands; logs "<ctlr supported commands: set ...").
+- k0165-bt-10: **"Stack: STACK_BUSY -> STACK_READY", "Stack did start"**. Then Broadcom vendor commands: most refused
+  non-fatally (status 701: LE_META_ENA_FEATURES 0xfce9, CHANGE_LE_SETTINGS / SET_MIN_AFH_LE_CHANNELS 0xfce2,
+  ENABLE_EXTENDED_DUPLICATE_FILTER 0xfd47, 0xfd48), but BD_VSC_OLYMPIC_ANTENNA_PREF_B (0xfce2, 10 bytes) got no
+  return data -> "Invalid data size 0", timeout, restart (reason 3602). btd now answers every host vendor command
+  (OGF 0x3f) itself: status 0 + first parameter byte echoed (answer_vendor in btd.c); none reach the chip.
 - Fix: btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
   never sees it) and logs every refused command ("REFUSED") regardless of the 400-packet limit.
 - bluetoothd's own log: job org.iosonpixel.oslog-bluetoothd (`oslog -l bluetoothd`, /var/local/oslog-bluetoothd.log).
 - The k0165-bt-2 "freeze": SpringBoard started a shutdown at 298 s (after touches); halt is not implemented, so
   "Halt/Restart Timed Out" panic at 332 s. Not Bluetooth.
-- Next: new btd at /var/local/bin/btd4 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
+- Next: new btd at /var/local/bin/btd5 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
   log; extend local_answers until "Stack: STACK_BUSY -> STACK_READY". Then Settings > Bluetooth.
 
 ### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)
