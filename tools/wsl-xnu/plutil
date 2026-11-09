@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+# plutil stand-in for xnu's config/ and MakeInc.kernel uses: -lint and -convert.
+import plistlib, sys
+a = sys.argv[1:]
+fmt = out = None; lint = False; files = []
+i = 0
+while i < len(a):
+    x = a[i]
+    if x == '-convert': fmt = a[i + 1]; i += 2; continue
+    if x == '-o': out = a[i + 1]; i += 2; continue
+    if x == '-lint': lint = True
+    elif x in ('-s', '-r'): pass
+    else: files.append(x)
+    i += 1
+for f in files:
+    with open(f, 'rb') as fp:
+        d = plistlib.load(fp)
+    if fmt:
+        kind = {'binary1': plistlib.FMT_BINARY, 'xml1': plistlib.FMT_XML}[fmt]
+        with open(out or f, 'wb') as fp:
+            plistlib.dump(d, fp, fmt=kind)

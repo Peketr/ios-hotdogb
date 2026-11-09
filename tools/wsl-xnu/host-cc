@@ -1,0 +1,19 @@
+#!/bin/bash
+# HOST_CC for xnu's SETUP tools on Linux: gcc with Darwin-only flags dropped,
+# the Darwin compat headers first, and libmacho stand-ins added at link time.
+TC=$(cd "$(dirname "$0")/.." && pwd)
+args=() link=1
+while [ $# -gt 0 ]; do
+	case $1 in
+	-isysroot|-arch) shift 2; continue ;;
+	-mmacosx-version-min=*|-Wl,-no_adhoc_codesign) shift; continue ;;
+	-c|-E|-S|-M|-MM|-fsyntax-only) link=0 ;;
+	esac
+	args+=("$1"); shift
+done
+export PATH=/usr/bin:/bin   # toolchain/bin has ld64 as "ld"; gcc needs the system one
+inc=(-std=gnu11 -w -I"$TC/host-inc" -include darwin-compat.h)
+if [ $link = 1 ]; then
+	exec gcc "${inc[@]}" "${args[@]}" "$TC/lib/darwin-compat.o" -luuid -lstdc++
+fi
+exec gcc "${inc[@]}" "${args[@]}"

@@ -1,0 +1,25 @@
+#!/bin/bash
+# iig stand-in: Apple's IOKit Interface Generator only exists in Xcode, so the
+# DriverKit headers/impls it generated on the Mac are stored in share/iig with the
+# sha256 of the .iig they came from. If an .iig changes, regenerate on the Mac
+# (tools/wsl-xnu-setup.sh --refresh-iig explains how).
+TC=$(cd "$(dirname "$0")/.." && pwd)
+def= header= impl=
+while [ $# -gt 0 ]; do
+	case $1 in
+	--def) def=$2; shift 2 ;;
+	--header) header=$2; shift 2 ;;
+	--impl) impl=$2; shift 2 ;;
+	--) break ;;
+	*) shift ;;
+	esac
+done
+b=$(basename "$def" .iig); S=$TC/share/iig
+[ -f "$S/$b.h" ] || { echo "iig (linux stand-in): no stored output for $b.iig" >&2; exit 1; }
+want=$(cat "$S/$b.iig.sha256"); have=$(sha256sum < "$def" | cut -d' ' -f1)
+if [ "$want" != "$have" ]; then
+	echo "iig (linux stand-in): $def changed since its output was generated on the Mac;" >&2
+	echo "  regenerate share/iig on the Mac (see tools/wsl-xnu-setup.sh --help)" >&2
+	exit 1
+fi
+cp "$S/$b.h" "$header" && cp "$S/$b.iig.cpp" "$impl"

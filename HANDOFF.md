@@ -5,6 +5,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### BUILD: kernels build in WSL, no Mac (2026-11-09) - WSL KERNEL NOT BOOTED YET
+- `wsl.exe -- bash /mnt/c/Users/Peketr/ios-flame/src/tools/wsl-build.sh` (PowerShell) = tools/mac-build.sh on
+  ~/xnu-linux: applied 0166-0169, all mac-build-check strings ok, work/out/kernel-0169.sweet (sha256 e53c4bc2...).
+  Setup and details: HOTDOGB.md "Building in WSL".
+- Observed vs the Mac builds of 0165 and 0169: identical kalloc_type views (1554), kalloc_var views (465), global
+  symbols (24431 for 0169) and MIG sources (79 files); __TEXT_EXEC,__text 3.8% smaller (upstream clang 21.1.8).
+- Open: boot a WSL kernel on the phone once (not done); work/boot/kernel-0169 is still the Mac build.
+
 ### HOTDOGB: MOTION SENSORS step 1 - sensord: SLPI boot, FastRPC file server, SSC client (2026-11-09) - NOT RUN YET
 - New userland daemon phone/sensors/sensord (build: phone/sensors/build.sh on the Mac; install:
   `python tools/hotdogb-sensors-install.py`, boot job org.iosonpixel.sensord = `sensord auto`, log /var/local/sensord.log).
@@ -81,10 +89,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   STATUS_2 0x1007 = 0x08 (bit 3 not in the header). FCC 0x1061 = 0x0a (500 mA), FV 0x1070 = 0x4d.
   Under Android the OPLUS driver sets the enable bit and does the thermal policy (warm > 45 C: 4.13 V / 1050 mA,
   hot > 50 C: stop). Fix needs one SPMI **write** (0x1042 bit 0) plus a temperature gate; not done yet.
-- **0169** (not run yet): charging on through the one PMIC write (0x1042 bit 0, apps-owned channel, read back),
+- **0169**: charging on through the one PMIC write (0x1042 bit 0, apps-owned channel, read back),
   gated on the gauge temperature (on 3-43 C, off > 45 C / < 0 C / no data); FCC (500 mA) and FV untouched.
-  `sweetcharge=0` = no writes. Expect `#### CHARGING ENABLED (...)` and a positive gauge current on USB; or
-  `#### CHARGING DISABLED: BATTERY TOO HOT` (the battery was 47 C on the last run) / `#### CHARGING CONTROL UNAVAILABLE`.
+  `sweetcharge=0` = no writes. Same args as 0168, USB to the PC.
+  - k0169-charge-1109-2059 (44.2 C, 34%): `#### CHARGING HELD OFF: 43-45 C BAND` - the gate works as written.
+  - k0169-charge-1109-2143 / -2146 (29-33 C, 82%): **the write works**: `charge enable 1 -> APID 265 status 0x1
+    readback 0x1 rc 0`, `#### CHARGING ENABLED`, charger state 0x47 -> 0x03 (FULLON), iOS gets charging=1.
+    But the battery still discharges: gauge -354 mA (2143), -301 / -296 mA (2146), 2417 -> 2414 mAh in 40 s.
+  - Open: why the net current stays negative on the PC port (APSD = SDP; USBIN_ICL_OPTIONS 0x1366 = 0x03,
+    USBIN_CURRENT_LIMIT_CFG 0x1370 = 0x20, ICL status 0x1106-0x1109 = 0x20; the dump is from before the enable).
+    Guess, not checked: the real input is ~500 mA (SDP) and the load with the GUI is above it. Next: same run on a
+    wall charger (DCP), and a dump after the enable. Both 0169 GUI runs' live logs end at 100-136 s (cause not checked).
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 

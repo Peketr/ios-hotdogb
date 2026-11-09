@@ -1,0 +1,6 @@
+#!/bin/bash
+# BSD install(1) as xnu calls it ("install -c -S -m MODE SRC DST"): GNU install
+# reads -S as "-S SUFFIX", so drop -S (BSD: safe copy, the default here anyway).
+args=()
+for a in "$@"; do [ "$a" = -S ] || args+=("$a"); done
+exec /usr/bin/install "${args[@]}"

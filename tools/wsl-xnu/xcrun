@@ -1,0 +1,35 @@
+#!/bin/bash
+# xcrun stand-in for building XNU on Linux (tools/wsl-setup.sh installs it).
+# Supports what xnu's makedefs ask: -sdk X, -find TOOL, -show-sdk-path,
+# -show-sdk-version, -show-sdk-platform-path (also with -- spellings).
+TC=$(cd "$(dirname "$0")/.." && pwd)
+SDK=${XNU_LINUX_SDK:-$TC/../sdk/MacOSX.sdk}
+mode= tool=
+while [ $# -gt 0 ]; do
+	case $1 in
+	-sdk|--sdk) shift 2 ;;
+	-verbose|--verbose|-v|-l|-log|--log|-n|-no-cache|--no-cache|-k|--kill-cache) shift ;;
+	-find|--find|-f) tool=$2; mode=find; shift 2 ;;
+	-show-sdk-path|--show-sdk-path) mode=path; shift ;;
+	-show-sdk-version|--show-sdk-version) mode=version; shift ;;
+	-show-sdk-platform-path|--show-sdk-platform-path) mode=platform; shift ;;
+	-show-sdk-build-version|--show-sdk-build-version) mode=build; shift ;;
+	-*) echo "xcrun (linux shim): unsupported option $1" >&2; exit 64 ;;
+	*) tool=$1; shift; exec "$("$0" -find "$tool")" "$@" ;;
+	esac
+done
+case $mode in
+path) (cd "$SDK" && pwd -P) ;;
+version) python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["Version"])' "$SDK/SDKSettings.json" ;;
+build) python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("BuildVersion",""))' "$SDK/SDKSettings.json" 2>/dev/null ;;
+platform) echo "$TC/../sdk/MacOSX.platform" ;;
+find)
+	case $tool in
+	cc|gcc) tool=clang ;;
+	gm4) tool=m4 ;;
+	esac
+	if [ -x "$TC/bin/$tool" ]; then echo "$TC/bin/$tool"
+	elif p=$(PATH=/usr/bin:/bin command -v "$tool"); then echo "$p"
+	else echo "xcrun (linux shim): tool '$tool' not found" >&2; exit 72; fi ;;
+*) echo "xcrun (linux shim): nothing to do" >&2; exit 64 ;;
+esac

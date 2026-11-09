@@ -1,0 +1,10 @@
+#!/bin/sh
+# Linux clang driving the Darwin toolchain: -arch/-isysroot/-mmacosx-version-min
+# work as on the Mac; links go through ld64 (cctools-port, from Theos). The compiler is
+# clang with Apple's XNU kalloc_type builtins (clang-xnu-builtins.py).
+# __apple_build_version__ as Xcode 27.2's clang-2100.4.1.1: xnu only tests it to
+# pick Apple's crypto assembler syntax (osfmk/arm64/corecrypto) and in KASAN.
+# -disable-atexit-based-global-dtor-lowering: upstream turns static destructors
+# (libsa/bootstrap.cpp's LIBKERN_ALWAYS_DESTROY object) into __cxa_atexit calls on
+# Mach-O; Apple clang keeps them in __mod_term_func, which the kernel has.
+exec @CLANG@ --target=arm64-apple-darwin -fuse-ld=@TC@/bin/ld -mlinker-version=609 -Qunused-arguments -D__apple_build_version__=21000401 -mllvm -disable-atexit-based-global-dtor-lowering "$@"

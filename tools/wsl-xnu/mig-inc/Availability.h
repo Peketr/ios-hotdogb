@@ -1,0 +1,12 @@
+#define __API_AVAILABLE(...)
+#define __API_DEPRECATED(...)
+#define __API_UNAVAILABLE(...)
+#define __OSX_AVAILABLE(...)
+#define __IOS_AVAILABLE(...)
+#define __TVOS_AVAILABLE(...)
+#define __WATCHOS_AVAILABLE(...)
+#define API_AVAILABLE(...)
+#define __OSX_AVAILABLE_STARTING(...)
+#define __WATCHOS_PROHIBITED
+#define __TVOS_PROHIBITED
+#define __API_DEPRECATED_WITH_REPLACEMENT(...)

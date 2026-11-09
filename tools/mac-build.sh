@@ -17,8 +17,9 @@
 # applied patch NNNN, the kernel must contain <string>.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TREE=$ROOT/work/dxb/xnu
-STATE=$ROOT/work/dxb/applied-patches
+DXB=${DXB:-$ROOT/work/dxb}   # tools/wsl-build.sh points this at ~/xnu-linux/dxb
+TREE=$DXB/xnu
+STATE=$DXB/applied-patches
 CHECKS=$ROOT/tools/mac-build-check.txt
 OUT=$ROOT/work/out
 
@@ -90,10 +91,14 @@ done
 last=$(tail -1 "$STATE"); num=${last%%-*}
 LOG=$ROOT/work/build-$num.log
 echo "building (log: $LOG) ..."
-tools/build-xnu.sh "$LOG"
+if [ "$(uname -s)" = Linux ]; then
+	tools/wsl-build-xnu.sh "$LOG"
+else
+	tools/build-xnu.sh "$LOG"
+fi
 
-K=$ROOT/work/dxb/build/xnu.obj/kernel.development.sweet
-K2=$ROOT/work/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+K=$DXB/build/xnu.obj/kernel.development.sweet
+K2=$DXB/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
 if [ -f "$K2" ] && { [ ! -f "$K" ] || [ "$K2" -nt "$K" ]; }; then
 	K=$K2   # the newer of the two build outputs
 fi
@@ -123,5 +128,5 @@ mkdir -p "$OUT"
 cp "$K" "$OUT/kernel-$num.sweet"
 echo
 echo "kernel with patches through $num:"
-shasum -a 256 "$OUT/kernel-$num.sweet"
-echo "upload this file: $OUT/kernel-$num.sweet"
+if command -v shasum >/dev/null; then shasum -a 256 "$OUT/kernel-$num.sweet"; else sha256sum "$OUT/kernel-$num.sweet"; fi
+[ "$(uname -s)" = Linux ] || echo "upload this file: $OUT/kernel-$num.sweet"

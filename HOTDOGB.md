@@ -161,6 +161,32 @@ the file to upload. `--dry-run` shows what it would apply. Add a check line for 
 
 (0127-0128 are already in a tree built for kernel 0128; a fresh tree needs 0127 0128 0129. A clean `build.sh` run copies every patch from xnu/patches.)
 
+### Building in WSL (tools/wsl-build.sh, no Mac)
+
+From PowerShell:
+
+    wsl.exe -- bash /mnt/c/Users/Peketr/ios-flame/src/tools/wsl-build.sh
+
+The same tools/mac-build.sh run (pending patches, build, check strings) on the ~/xnu-linux tree,
+cross-compiled on Linux. The kernel lands in work/out/kernel-NNNN.sweet and work/boot/kernel-NNNN
+(an existing, different work/boot file is kept; `WSL_BUILD_FORCE=1` replaces it). A full build takes
+about 2 minutes; the full make log is ~/xnu-linux/dxb/build-NNNN.log (work/build-NNNN.log is a summary).
+
+One-time setup: `tools/wsl-xnu-setup.sh` (see `--help`: apt packages, Theos' Linux ld64/cctools, and
+four seed tarballs made once on the Mac: SDK, fakeroot, xnu tree, build tree for the iig outputs).
+It builds clang (the apt LLVM version) with Apple's XNU kalloc_type builtins and the
+`xnu_usage_semantics` attribute added (tools/wsl-xnu/clang-xnu-builtins.py, ~40 min), mig from
+bootstrap_cmds-129 (Xcode 27.2's), unifdef, compiler-rt's cc_kext profile runtime, and stand-ins for
+xcrun, iig, plutil. iig is Xcode-only: its outputs come from the seed, and the build stops if a patch
+changes an .iig (then refresh dxb-obj.tgz from a Mac build and rerun setup with `--tools`).
+
+Checked against Mac builds of 0165 and 0169: identical kalloc_type views (1554: type signatures,
+flags, sizes), kalloc_var views (465), global symbols and MIG sources (79 files); data sections
+match in size. The code differs (upstream clang, not Apple's fork): __TEXT_EXEC,__text is 3.8%
+smaller. `tools/wsl-xnu/kalloc-type-sigs.py MAC_KERNEL WSL_KERNEL` repeats the allocator check;
+run it after a clang or toolchain update, since a wrong signature puts types in other heaps than
+a Mac build would. Not yet booted on the phone.
+
 ### Running a kernel from the Windows PC (WSL)
 
 Copy the kernel to `work/boot/kernel-NNNN`, then from WSL Ubuntu:
