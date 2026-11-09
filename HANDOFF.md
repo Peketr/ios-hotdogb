@@ -20,6 +20,20 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   (harmless).
 - On the phone (already set during k0164-bt-1): `hotdogb-launchd-job.py env com.apple.bluetoothd
   BT_HCI_TRANSPORT=H4:POSIX:com.apple.uart.bluetooth,3000000` (hotdogb-bt-install.py now does it too).
+- k0165-bt-2: btd claimed the chip side ("#### BTUART CHIP SIDE UNIT 1 (pid 30)" at 77.6 s); bluetoothd never
+  connected: it launches the launchd job com.apple.BlueTool every 31 s (XPC "script" request) and waits for its
+  result. BlueTool never connected to the bridge.
+- BlueTool (iOS 16.7 disassembly): the override /etc/bluetool/<HWModel>.<boot|init|deepsleep>.script runs only
+  when MGCopyAnswer("ReleaseType") is "Vendor" or "Internal" (0x100016054); HWModel is gestalt key
+  /YYygAofPDbhrwToVsXdeA = D22AP here (ADT target-sub-type). bluetoothd's HWRepair/BlueToolBTResult override only
+  forces a nonzero (failed) result, so it cannot skip BlueTool.
+- Done (not run yet): phone/bt/bluetool-shim.c (dylib interposing MGCopyAnswer: ReleaseType = Vendor),
+  phone/bt/bluetool/D22AP.{boot,init}.script (`device -D -S`, `hci info`); hotdogb-bt-install.py puts them in
+  /var/local/lib and /private/etc/bluetool and sets DYLD_INSERT_LIBRARIES on com.apple.BlueTool (sweet AMFI allows
+  DYLD_* for unrestricted processes). btd now lives at /var/local/bin/btd2; the installer leaves it alone if
+  unchanged.
+- Gotcha: from Git Bash, run hotdogb-launchd-job.py with MSYS_NO_PATHCONV=1 or program paths become
+  "C:/Program Files/Git/var/..." (k0165-bt-1 lost btd that way).
 - Next: kernel 0165 + new btd (install, THEN reboot), look for "SWEET BTUART: connect unit N (pid <bluetoothd>)",
   "#### FIRST BLUETOOTH H4 BYTES FROM THE HOST" and the HCI log in /var/local/btd.log. If bluetoothd still waits:
   BlueTool job + script, then stage 3 (Broadcom vendor commands).

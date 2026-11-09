@@ -1,0 +1,5 @@
+# BlueTool boot script for hotdogb (HWModel D22AP; run because bluetool-shim.dylib answers ReleaseType = Vendor).
+# btd has already powered the WCN3998 and loaded its firmware; BlueTool only opens the kernel bridge
+# com.apple.uart.bluetooth at the device-tree speed and checks that the controller answers.
+device -D -S
+hci info

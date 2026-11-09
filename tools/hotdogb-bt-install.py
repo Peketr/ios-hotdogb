@@ -11,7 +11,10 @@ not in git) -> /var/local/fw/bt. btd: phone/bt/out/btd (built on the Mac with ph
 `btd serve` (stage 2, KeepAlive): brings the controller up ~20 s after boot and serves bluetoothd through the
 kernel bridge "com.apple.uart.bluetooth" (kernel 0165); bluetoothd's job gets
 BT_HCI_TRANSPORT=H4:POSIX:com.apple.uart.bluetooth,3000000 so it opens that instead of Apple's Skywalk channel.
-Needs an ADT with /arm-io/bluetooth (tools/adt-add-bluetooth.py). Log /var/local/btd.log; idle: /var/local/btd.off.
+Needs an ADT with /arm-io/bluetooth (tools/adt-add-bluetooth.py).
+bluetoothd waits for BlueTool's boot script: bluetool-shim.dylib (DYLD_INSERT_LIBRARIES in com.apple.BlueTool)
+answers ReleaseType = Vendor, so BlueTool runs /etc/bluetool/D22AP.{boot,init}.script (phone/bt/bluetool).
+btd goes to /var/local/bin/btd2: never replace the binary of the KeepAlive job in the boot that runs it. Log /var/local/btd.log; idle: /var/local/btd.off.
 The job is replaced on every run of this script. Reboot afterwards.
 """
 import os, subprocess, sys
@@ -22,6 +25,8 @@ FILES = [PY, os.path.join(ROOT, 'tools', 'flame-files.py')]
 JOB = [PY, os.path.join(ROOT, 'tools', 'hotdogb-launchd-job.py')]
 ENV = dict(os.environ, FLAME_FILES_HOST=os.environ.get('FLAME_FILES_HOST', '192.168.7.2'), MSYS_NO_PATHCONV='1')
 FW = os.path.join(ROOT, '..', 'hotdogb', 'fw', 'bluetooth', 'image')
+BTD = '/var/local/bin/btd2'
+SHIM = '/var/local/lib/bluetool-shim.dylib'
 TRANSPORT = 'H4:POSIX:com.apple.uart.bluetooth,3000000'
 FW_FILES = ['crbtfw21.tlv', 'crnv21.bin', 'crbtfw20.tlv', 'crnv20.bin']
 
@@ -44,7 +49,21 @@ def main():
         sys.exit(f'{btd} missing: build it on the Mac (phone/bt/build.sh) and copy phone/bt/out over')
     for d in ('/var/local/bin', '/var/local/fw', '/var/local/fw/bt'):
         run(FILES + ['mkdir', d, '755'], check=False)
-    run(FILES + ['put', btd, '/var/local/bin/btd', '755'])
+    import filecmp, tempfile
+    cur = os.path.join(tempfile.mkdtemp(), 'btd')
+    same = subprocess.run(FILES + ['get', BTD, cur], env=ENV, capture_output=True).returncode == 0 and         filecmp.cmp(btd, cur, shallow=False)
+    if same:
+        print(f'{BTD} unchanged, not replaced')
+    else:
+        print(f'replacing {BTD}: if its job runs in this boot, reboot right after this script (no restart)')
+        run(FILES + ['put', btd, BTD, '755'])
+    shim = os.path.join(ROOT, 'phone', 'bt', 'out', 'bluetool-shim.dylib')
+    run(FILES + ['mkdir', '/var/local/lib', '755'], check=False)
+    run(FILES + ['put', shim, SHIM, '755'])
+    run(FILES + ['mkdir', '/private/etc/bluetool', '755'], check=False)
+    for k in ('boot', 'init'):
+        run(FILES + ['put', os.path.join(ROOT, 'phone', 'bt', 'bluetool', f'D22AP.{k}.script'),
+                     f'/private/etc/bluetool/D22AP.{k}.script', '644'])
     for f in FW_FILES:
         p = os.path.join(FW, f)
         if not os.path.isfile(p):
@@ -53,11 +72,12 @@ def main():
     if '--no-job' not in a:
         run(JOB + ['remove', 'btd'], check=False)
         if '--scan' in a:
-            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--', '/var/local/bin/btd', 'auto'])
+            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--', BTD, 'auto'])
         else:
-            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--keep', '--', '/var/local/bin/btd', 'serve'])
+            run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--keep', '--', BTD, 'serve'])
     if '--no-job' not in a and '--scan' not in a:
         run(JOB + ['env', 'com.apple.bluetoothd', 'BT_HCI_TRANSPORT=' + TRANSPORT])
+        run(JOB + ['env', 'com.apple.BlueTool', 'DYLD_INSERT_LIBRARIES=' + SHIM])
     print('next: python tools/flame-cmd.py reboot, boot again; see /var/local/btd.log')
 
 
