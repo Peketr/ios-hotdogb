@@ -25,7 +25,19 @@
 #define LOC_INJECT_TIME_REQ_IND		0x0028
 #define LOC_ENGINE_STATE_IND		0x002b
 #define LOC_FIX_SESSION_STATE_IND	0x002c
+#define LOC_SET_ENGINE_LOCK		0x003a
+#define LOC_GET_ENGINE_LOCK		0x003b
+#define LOC_SET_NMEA_TYPES		0x003e
 #define LOC_SET_OPERATION_MODE		0x004a
+
+#define ENGINE_LOCK_NONE	1	/* 2 = mobile-initiated sessions locked (refuses START), 3 = MT, 4 = all */
+#define NMEA_GGA 0x1
+#define NMEA_RMC 0x2
+#define NMEA_GSV 0x4
+#define NMEA_GSA 0x8
+#define NMEA_VTG 0x10
+#define NMEA_GLGSV 0x80
+#define NMEA_GNGSA 0x100
 
 #define EV_POSITION_REPORT	0x001ull
 #define EV_NMEA			0x004ull
@@ -53,7 +65,7 @@ static struct {
 	int have_alt, have_vacc, have_speed, have_course;
 	uint64_t utc_ms;
 	uint32_t status, tech;
-	unsigned reports, fixes;
+	unsigned reports, fixes, by_status[8];
 } fix;
 static int sats_view[8], sats_used;
 static const char *talkers[8] = { "GP", "GL", "GA", "GB", "BD", "GQ", "QZ", "GN" };
@@ -104,11 +116,25 @@ static void next_step(void)
 		send_req(&q, "register events (position, NMEA, engine, session)");
 		break;
 	case 2:
+		qmi_start(&q, QMI_REQUEST, 0, LOC_GET_ENGINE_LOCK);
+		send_req(&q, "get engine lock");
+		break;
+	case 3:
+		qmi_start(&q, QMI_REQUEST, 0, LOC_SET_ENGINE_LOCK);
+		qmi_tlv_u32(&q, 0x01, ENGINE_LOCK_NONE);
+		send_req(&q, "engine lock none (Android clears it at start; a set lock refuses sessions)");
+		break;
+	case 4:
+		qmi_start(&q, QMI_REQUEST, 0, LOC_SET_NMEA_TYPES);
+		qmi_tlv_u32(&q, 0x01, NMEA_GGA | NMEA_RMC | NMEA_GSV | NMEA_GSA | NMEA_VTG | NMEA_GLGSV | NMEA_GNGSA);
+		send_req(&q, "NMEA types GGA RMC GSV GSA VTG GLGSV GNGSA");
+		break;
+	case 5:
 		qmi_start(&q, QMI_REQUEST, 0, LOC_SET_OPERATION_MODE);
 		qmi_tlv_u32(&q, 0x01, OPER_MODE_STANDALONE);
 		send_req(&q, "operation mode standalone");
 		break;
-	case 3:
+	case 6:
 		qmi_start(&q, QMI_REQUEST, 0, LOC_START);
 		qmi_tlv_u8(&q, 0x01, SESSION_ID);
 		qmi_tlv_u32(&q, 0x10, 1);	/* fix recurrence: periodic */
@@ -221,6 +247,7 @@ static void on_position(const struct qmi_msg *m)
 	qmi_get_u32(m, 0x01, &status);	/* 0 success, 1 in progress, 2 failure, 3 timeout, ... */
 	fix.reports++;
 	fix.status = status;
+	fix.by_status[status < 7 ? status : 7]++;
 	if (!get_f64(m, 0x10, &lat) || !get_f64(m, 0x11, &lon) || !isfinite(lat) || !isfinite(lon))
 		return;
 	if (status != 0 && status != 1)
@@ -285,6 +312,17 @@ void gnss_handle(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
 		qmi_get_u32(&m, 0x01, &v);
 		printf("gnss: < fix session %s\n", v == 1 ? "STARTED" : v == 2 ? "FINISHED" : "state ?");
 		break;
+	case LOC_GET_ENGINE_LOCK:
+		v = 0;
+		qmi_get_u32(&m, 0x10, &v);
+		printf("gnss: < engine lock is %u (%s)\n", v, v == 1 ? "none" : v == 2 ? "MI locked" : v == 3 ? "MT locked" : v == 4 ? "ALL locked" : "?");
+		break;
+	case LOC_SET_ENGINE_LOCK:
+	case LOC_SET_NMEA_TYPES:
+	case LOC_SET_OPERATION_MODE:
+		qmi_get_u32(&m, 0x01, &v);
+		printf("gnss: < %#x status %u%s\n", m.id, v, v ? " (FAILED)" : "");
+		break;
 	case LOC_INJECT_TIME_REQ_IND:
 		printf("gnss: < engine asks for time injection (not done: cold start)\n");
 		break;
@@ -339,7 +377,7 @@ void gnss_poll(void)
 	if (!srv_up || disabled)
 		return;
 	uint64_t now = link_ms();
-	if (step < 4 && now >= srv_ms + START_DELAY_MS) {
+	if (step < 7 && now >= srv_ms + START_DELAY_MS) {
 		if (waiting && now > sent_ms + 2000) {
 			printf("gnss: no response in 2 s, going on\n");
 			waiting = 0;
@@ -351,7 +389,7 @@ void gnss_poll(void)
 		last_write_ms = now;
 		write_files(now);
 	}
-	if (step >= 4 && now >= last_log_ms + 15000) {
+	if (step >= 7 && now >= last_log_ms + 15000) {
 		int view = 0;
 		for (int t = 0; t < 8; t++)
 			view += sats_view[t];
@@ -359,6 +397,8 @@ void gnss_poll(void)
 		printf("gnss: %u reports, %u fixes, %u NMEA; satellites in view %d (GPS %d GLO %d GAL %d BDS %d), used %d",
 		       fix.reports, fix.fixes, nmea_count, view, sats_view[0], sats_view[1], sats_view[2], sats_view[3] + sats_view[4],
 		       sats_used);
+		printf("; report status 0/1/2/3/other: %u/%u/%u/%u/%u", fix.by_status[0], fix.by_status[1], fix.by_status[2],
+		       fix.by_status[3], fix.by_status[4] + fix.by_status[5] + fix.by_status[6] + fix.by_status[7]);
 		if (fix.valid)
 			printf("; last %.6f %.6f +-%.0f m\n", fix.lat, fix.lon, fix.hacc);
 		else

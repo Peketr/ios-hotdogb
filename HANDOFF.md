@@ -25,6 +25,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   (`oslog -l CommCenter` -> /var/local/oslog-commcenter.log). Expect: CoreTelephony answers (Settings > Privacy shows
   Location Services, the getSubscriptionInfo check below) - or the old crash loop. Undo:
   `hotdogb-launchd-job.py disable com.apple.CommCenter` + `remove oslog-commcenter`.
+- **Step 1 result (run k0165-cc-1109-1919)**: CommCenter starts in **cellular** mode even under the non-cellular job
+  (MobileGestalt says iPhone with a 'mav17' baseband): "Using Baseband Command Driver", "Could not find AppleBaseband
+  service", "TelephonyBasebandController: Failed to find AppleBaseband service, registering for matching notification",
+  "Baseband Ready: False", publishes a slot-one subscription, then is gone ~6 s after start - 12 times in 2 min, no exit
+  or error line (last line always "(ApplePDPHelper) Could not find AppleIPAppender service"). Not jetsam as far as the
+  live log shows (4 ReportMemoryException in the whole boot; D22 limits: 36 MB active soft, 20 MB inactive hard).
+  Cause unknown: job oslog-reportcrash added (`oslog -l ReportCrash`) for the next CommCenter run. The jobs were
+  removed again afterwards (undo). What cellular needs first is clear: an `AppleBaseband` IOService (kernel) for
+  TelephonyBasebandController to match, then the PCI transport/QMUX behind it.
+- **GPS run 2**: same as run 1 - no engine-state or fix-session indication at all, the $PQWP1 sentence frozen (same
+  time every time, 9999 km uncertainty): the engine never starts. gnss.c now also reads + clears the **engine lock**
+  (QMI_LOC_GET/SET_ENGINE_LOCK 0x3b/0x3a, none = 1; Android clears it at start), sets the NMEA types (0x3e: GGA RMC GSV
+  GSA VTG GLGSV GNGSA) before the operation mode, logs those answers and a position-report status histogram.
 
 ### HOTDOGB: GPS, accelerometer, gyro - plan, and GPS step 1 (QMI LOC client in wland) (2026-11-09)
 - **Hardware** (strings in ../hotdogb/fw/modem-image/image/slpi.b*): IMU = ST **LSM6DSM** (accel + gyro), magnetometer
