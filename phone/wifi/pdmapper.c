@@ -14,7 +14,11 @@
 #define PFR		0x24	/* protection domain failure report */
 
 static const struct { const char *service, *domain; uint32_t instance; } db[] = {
-#ifdef PDMAPPER_ADSP
+#if defined(PDMAPPER_SLPI)
+	/* the 7T's slpir.jsn + slpius.jsn: the sensors run in the SLPI's sensor PD */
+	{ "tms/servreg", "msm/slpi/root_pd", 90 },
+	{ "tms/servreg", "msm/slpi/sensor_pd", 90 },
+#elif defined(PDMAPPER_ADSP)
 	/* the 7T's adspr.jsn + adspua.jsn (modem partition image/): audio runs in the ADSP's audio PD */
 	{ "tms/servreg", "msm/adsp/root_pd", 74 },
 	{ "tms/servreg", "msm/adsp/audio_pd", 74 },

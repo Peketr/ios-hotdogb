@@ -5,6 +5,42 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: MOTION SENSORS step 1 - sensord: SLPI boot, FastRPC file server, SSC client (2026-11-09) - NOT RUN YET
+- New userland daemon phone/sensors/sensord (build: phone/sensors/build.sh on the Mac; install:
+  `python tools/hotdogb-sensors-install.py`, boot job org.iosonpixel.sensord = `sensord auto`, log /var/local/sensord.log).
+  No kernel change: runs on 0167. Covers plan steps 1-3 of "Accel/gyro plan" below; the iOS side (step 4) is next.
+- From the stock DT (dtb_idx 8) and dtbo overlay 3 (observed): qcom,ssc@5c00000 PAS id 12, firmware "slpi", LCX/LMX
+  (pm8150_l8/l4 level) votes, signal-aop; smp2p-dsps qcom,smem <481 430> (in/out), APCS IPC bit 26, entries
+  master-kernel / slave-kernel / sleepstate; glink dsps remote-pid 3, IPC bit 24, channels IPCRTR,
+  fastrpcglink-apps-dsp, glink_ssr; sdsprpc compute banks SMMU 0x5a1-0x5a3; pil_slpi_mem 0x98100000 + 0x1400000
+  (overlay fragment@87; base DTB 0x97300000 overlaps the moved modem region). slpi.mdt is linked at 0x97300000-0x98700000
+  and relocatable (flag bit 27): loaded at 0x98100000. slpir.jsn/slpius.jsn: msm/slpi/root_pd + sensor_pd, instance 90.
+- Sensor configs: the 7T's vendor_a.img /etc/sensors (extracted to ../hotdogb/sensors/etc, not in git): lsm6dsm_0,
+  msmnile_lsm6dsm (bus_type 1, bus_instance 2, irq 132, rails /pmic/client/sensor_vdd(io)), mmc5603nj_0,
+  msmnile_mmc5603nj, sx932x, tcs3701, ...; sns_reg_config (version 8) selects on /sys/devices/soc0 hw_platform +
+  soc_id and writes its registry to /mnt/vendor/persist/sensors/registry/registry. The installer serves soc_id 339 +
+  hw_platform MTP (guess: what OnePlus' SM8150 reports; every msmnile_* file accepts that pair).
+- sensord: PAS boot as audiod (+ relocation); SMP2P out with sleepstate bit 12 = apps awake (downstream
+  smp2p_sleepstate.c PROC_AWAKE_ID, from memory); GLINK host 3; QRTR node learned from the SLPI's HELLO
+  (link.h QRTR_NODE_REMOTE_VAR); pd-mapper (pdmapper.c PDMAPPER_SLPI); servreg listener for msm/slpi/sensor_pd.
+- FastRPC (phone/sensors/fastrpc.c) without a kernel driver, after Linux drivers/misc/fastrpc.c + linux-msm/hexagonrpc:
+  40-byte fastrpc_msg on fastrpcglink-apps-dsp, payload at 0x9e200000 (+1 MB, top of cont_splash below audiod's block;
+  0xe1000000+ is the GPU pool) with DSP addresses 1:PA (context bank 1 in bits 32+, as downstream adsprpc), streams
+  0x5a0/mask 3 on a translation-off bank. Attach = handle 1 method 0 (pd 2 = sensors PD in ctx), then remotectl open
+  "adsp_default_listener" + register, adsp_listener (handle 3) init2 + next2 loop. Reverse calls: remotectl (0),
+  apps_std (1): fopen/fopen_with_env/fread/fwrite/fseek/ftell/flen/fclose/fflush/fsync/fileExists/fremove/
+  opendir/readdir/closedir/mkdir/stat/ftrunc/frename, writes allowed (the registry); apps_mem (2) is not implemented
+  (logged as "#### FASTRPC REVERSE CALL NOT IMPLEMENTED"). Paths: /mnt/vendor/persist/sensors -> /var/local/sensors/persist,
+  /vendor/etc/sensors -> .../etc, /sys/devices/soc0 -> .../socinfo, anything else -> .../other (logged).
+- SSC client (phone/sensors/ssc.c): QMI 400 request 0x20 (TLV 1 = u16 length + protobuf, 0x10 jumbo), reports 0x21/0x22;
+  libssc's protobuf layout; SUID lookup (suid 0xabab...) of the default "accel", "gyro", "mag", enable at 50/50/25 Hz
+  (msg 513), samples (msg 1025) -> /var/local/imu.txt (`t= accel=x,y,z gyro=... mag=... n=`, 5 Hz). Units (libssc,
+  unverified): m/s^2, rad/s, uT; gyro/mag uncalibrated (no gyro_cal/mag_cal yet).
+- Host-tested (phone/sensors/test_sensord.c, WSL cc): listener blob encode/decode, invoke payload layout, the SSC
+  request bytes ("0a 12 ..." as libssc's notes show). Nothing of it ran on the phone yet.
+- Unverified guesses to check first in the log: the SLPI's QRTR node, whether attach needs pid 0, the fileExists
+  out size (1 byte), whether the registry wants apps_mem, the sleepstate bit.
+
 ### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernels 0166-0167 (2026-11-09) - WORKS with 0167
 - Before: SweetBattery on the 7T was the ios-sweet (Redmi Note 10, PM6150 QG) driver. Without `sweetbattery=1` it
   publishes a fixed 100% / AC; with it, it reads PM6150 registers the 7T does not have -> the same fallback.
@@ -34,6 +70,8 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   draining 150 mA, gauge flags 0x109 (DSG, BAT_DET, CHG allowed). iOS gets external=1 charging=0 (correct). Open:
   why SMB5 disables charging under iOS (guess: the SMB5 charger watchdog / no software enabling it, or the 43 C
   battery near the 45 C warm limit) - the phone does not charge on iOS. Not checked yet: the status bar number.
+- **0168** (not run yet): read-only SMB5 register dump (`#### CHARGER REGISTER DUMP (...)` + `SWEET SMB5 xxyy: 16 bytes`) at
+  the first reading and on each plug/unplug, to decode the state-7 cause against smb5-reg.h.
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 

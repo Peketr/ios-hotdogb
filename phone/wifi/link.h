@@ -5,6 +5,11 @@
 #define QRTR_NODE_APPS		1
 #define QRTR_NODE_MODEM		0
 #define QRTR_NODE_ADSP		5
+#ifdef QRTR_NODE_REMOTE_VAR
+/* phone/sensors: the remote's QRTR node is learned from its HELLO (the SLPI's number is not in any DT) */
+extern uint32_t qrtr_node_remote;
+#define QRTR_NODE_REMOTE	qrtr_node_remote
+#endif
 #ifndef QRTR_NODE_REMOTE
 #define QRTR_NODE_REMOTE	QRTR_NODE_MODEM	/* phone/audio: QRTR_NODE_ADSP */
 #endif

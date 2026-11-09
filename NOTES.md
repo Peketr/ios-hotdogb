@@ -210,3 +210,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   = the old static 100%.
 - 0167 hotdogb battery: GPIO 88/89 (NORTH tile) muxed to qup8 (function 2), pull-up, 2 mA, before the first gauge
   transfer (0166 timed out: XBL never touches SE8, the pins were GPIOs); I2C timeouts log irq/status/FIFO counts.
+- 0168 hotdogb charger: read-only dump of PM8150B SMB5 CHGR/DCDC/BATIF/USBIN/MISC (SID 2, 0x00-0x7f each) at the first
+  gauge reading and on every plug/unplug (sweet_spmi.c also allows SID 2 0x12, 0x16): why charging is disabled (state 7).

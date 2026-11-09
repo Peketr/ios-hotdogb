@@ -1,0 +1,84 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 0b6d067..b639cb7 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -5,7 +5,8 @@
+  * Init is serialized by the single built-in SweetBattery personality.
+  * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
+  * Also the PM8150 RTC (peripheral 0x60) for the time of day (SweetPlatformExpert.cpp),
+- * and on hotdogb the PM8150B charger status (SID 2: SMB5 CHGR 0x10, DCDC 0x11, USBIN 0x13).
++ * and on hotdogb the PM8150B charger status (SID 2: SMB5 CHGR 0x10, DCDC 0x11, BATIF 0x12,
++ * USBIN 0x13, MISC 0x16; reads only).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -99,7 +100,8 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 			return -1;
+ 		}
+ 	} else if (sid != 2 ||
+-	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x13)) {
++	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
++	    peripheral != 0x13 && peripheral != 0x16)) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 4f0eb68..83ae396 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -420,6 +420,7 @@ private:
+ 	unsigned fLastPercent;
+ 	bool fLastExternal, fLastCharging, fLastFull;
+ 	void pollGauge(void);
++	void smbDump(const char *why);
+ #endif
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+@@ -627,6 +628,37 @@ SweetBattery::estimatePercent(unsigned mv)
+ }
+ 
+ #if SWEET_HOTDOGB
++/*
++ * Read-only dump of the PM8150B SMB5 blocks (SID 2): CHGR 0x10, DCDC 0x11,
++ * BATIF 0x12, USBIN 0x13, MISC 0x16, 0x00-0x7f of each (status, interrupt
++ * status, config). For working out why the charger reports state 7 (charging
++ * disabled) under iOS. "--" = read failed.
++ */
++void
++SweetBattery::smbDump(const char *why)
++{
++	if (!fSpmi) {
++		return;
++	}
++	static const uint8_t blocks[] = {0x10, 0x11, 0x12, 0x13, 0x16};
++	IOLog("#### CHARGER REGISTER DUMP (%s)\n", why);
++	for (unsigned b = 0; b < sizeof(blocks); ++b) {
++		for (unsigned row = 0; row < 0x80; row += 16) {
++			char line[16 * 3 + 1];
++			for (unsigned i = 0; i < 16; ++i) {
++				uint8_t v = 0;
++				static const char hex[] = "0123456789abcdef";
++				bool ok = !sweet_spmi_read(2, ((unsigned)blocks[b] << 8) | (row + i), &v);
++				line[i * 3] = ' ';
++				line[i * 3 + 1] = ok ? hex[v >> 4] : '-';
++				line[i * 3 + 2] = ok ? hex[v & 15] : '-';
++			}
++			line[sizeof(line) - 1] = 0;
++			IOLog("SWEET SMB5 %02x%02x:%s\n", blocks[b], row, line);
++		}
++	}
++}
++
+ /*
+  * One gauge sample (workloop thread). SOC, voltage, average current (mA,
+  * positive = charging, as IOPMPowerSource), remaining / full charge capacity
+@@ -705,6 +737,9 @@ SweetBattery::pollGauge(void)
+ 		    soc, volt, ma, rm, fcc, flags, fTempCenti, usb, path, charger,
+ 		    external, charging, full);
+ 	}
++	if (first || external != fLastExternal) {
++		smbDump(first ? "first reading" : external ? "charger connected" : "charger disconnected");
++	}
+ 	if (external != fLastExternal && !first) {
+ 		IOLog("#### CHARGER %s (%u%%)\n", external ? "CONNECTED" : "DISCONNECTED", soc);
+ 	}
