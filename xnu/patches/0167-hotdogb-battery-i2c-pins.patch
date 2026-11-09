@@ -1,0 +1,69 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 8b6c19f..4f0eb68 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -284,6 +284,9 @@ bq_msg(bool rd, uint8_t *buf, unsigned len, bool stretch)
+ 	}
+ 	bq_wr(bq.se, SE_IRQ_CLR, irq);
+ 	if (!(irq & (SE_DONE | SE_ERRORS))) {
++		IOLog("SWEET BATTERY: i2c %s %u timeout irq=%#x status=%#x tx=%#x rx=%#x\n",
++		    rd ? "read" : "write", len, irq, bq_rd(bq.se, SE_STATUS),
++		    bq_rd(bq.se, SE_TX_COUNT), bq_rd(bq.se, SE_RX_COUNT));
+ 		bq_abort();
+ 		return -3;
+ 	}
+@@ -316,6 +319,44 @@ bq_cmd(uint8_t code, uint16_t *value)
+ 	return rc;
+ }
+ 
++/*
++ * SDA 88 / SCL 89 to qup8. XBL never uses this SE (the wrap1 clocks were off,
++ * kernel 0166: vote 0x40243c0), so the pins are still GPIOs. pinctrl-sm8150.c:
++ * both NORTH tile, funcs {gpio, tsif1, qup8, ...} -> mux 2. Stock DT active
++ * state: 2 mA. TLMM cfg: [1:0] pull (3 up), [5:2] function, [8:6] drive
++ * (mA/2 - 1), [9] output enable. Internal pull-up kept as a backup for the
++ * board's own pull-ups (the stock sleep state also pulls up).
++ */
++#define BQ_NORTH_PA     0x03900000u
++#define BQ_PIN_SDA      88u
++#define BQ_PIN_SCL      89u
++#define BQ_PIN_FUNC     2u
++
++static bool
++bq_pins(void)
++{
++	vm_offset_t tlmm = ml_io_map(BQ_NORTH_PA + BQ_PIN_SDA * 0x1000u, 0x2000);
++	if (!tlmm) {
++		IOLog("#### BATTERY GAUGE FAILED: TLMM MAPPING\n");
++		return false;
++	}
++	for (unsigned i = 0; i < 2; ++i) {
++		uint32_t off = i * 0x1000u;
++		uint32_t cfg = bq_rd(tlmm, off), io = bq_rd(tlmm, off + 4u);
++		IOLog("SWEET BATTERY: gpio%u cfg=%#x (func %u pull %u) level=%u\n",
++		    BQ_PIN_SDA + i, cfg, (cfg >> 2) & 0xfu, cfg & 3u, io & 1u);
++		uint32_t want = (cfg & ~0x3ffu) | (BQ_PIN_FUNC << 2) | 3u | (0u << 6);
++		if (cfg != want) {
++			bq_wr(tlmm, off, want);
++		}
++	}
++	IODelay(50);
++	uint32_t sda = bq_rd(tlmm, 4u) & 1u, scl = bq_rd(tlmm, 0x1004u) & 1u;
++	IOLog("#### BATTERY I2C PINS 88/89 SET TO QUP8 (cfg %#x/%#x, SDA %u SCL %u)\n",
++	    bq_rd(tlmm, 0), bq_rd(tlmm, 0x1000u), sda, scl);
++	return true;
++}
++
+ static bool
+ bq_start(void)
+ {
+@@ -334,6 +375,9 @@ bq_start(void)
+ 	if (!bq_se_init()) {
+ 		return false;
+ 	}
++	if (!bq_pins()) {
++		return false;
++	}
+ 	/* Control(DEVICE_TYPE): a read-only query, as the stock driver does at probe. */
+ 	uint8_t ctl[3] = {0x00, 0x01, 0x00};
+ 	uint16_t type = 0;

@@ -5,7 +5,7 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
-### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernel 0166 (2026-11-09, not run yet)
+### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernels 0166-0167 (2026-11-09)
 - Before: SweetBattery on the 7T was the ios-sweet (Redmi Note 10, PM6150 QG) driver. Without `sweetbattery=1` it
   publishes a fixed 100% / AC; with it, it reads PM6150 registers the 7T does not have -> the same fallback.
   CurrentCapacity/MaxCapacity were mAh of a 5020 mAh battery.
@@ -19,6 +19,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   Charger: PM8150B SMB5 at SPMI SID 2 (USBIN 0x1310, path 0x110b, CHGR 0x1006/0x1007/0x100d, the PM6150 decoding).
   Guesses to confirm on the first run: XBL left SE8 with I2C firmware and FIFO mode allowed; pins 88/89 (stock DT:
   function qup8, 2 mA, no pull in the active state) already muxed (the driver does not touch TLMM); the SID 2 SMB5 APIDs are visible to the observer.
+- **Run k0166-batt-1109-2018**: clocks and SE fine - GCC vote 0x40243c0 -> 0x47e43c0 (wrap1 bits 18-22 were OFF:
+  XBL never used SE8), RCG DFS on (0x21, level 0 = XO/1), SE fw 0x303 (I2C), FIFO allowed, 32-bit x16 FIFOs, status 0.
+  Then `#### BATTERY GAUGE FAILED: NO ANSWER AT 0x55 (TIMEOUT)`: the first write never finished. Likely cause: pins
+  88/89 still GPIOs (nobody muxed them; Linux's pinctrl does it at probe).
+- **0167**: muxes GPIO 88/89 to qup8 before the first transfer (pinctrl-sm8150.c: NORTH tile 0x03900000, funcs
+  {gpio, tsif1, qup8, ...} -> mux 2; 2 mA; pull-up), logs their cfg and SDA/SCL levels before and after
+  (`#### BATTERY I2C PINS 88/89 SET TO QUP8 (cfg, SDA, SCL)`: both should read 1 = idle bus with pull-ups), and
+  logs irq/status/FIFO counts on an I2C timeout.
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 

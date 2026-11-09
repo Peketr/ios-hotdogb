@@ -35,3 +35,4 @@
 0164 bluetoothd skywalk user pipe privilege granted
 0165 #### BTUART CHIP SIDE UNIT %u (pid %d)
 0166 #### BATTERY GAUGE UP: %s (DEVICE TYPE %#x)
+0167 #### BATTERY I2C PINS 88/89 SET TO QUP8 (cfg %#x/%#x, SDA %u SCL %u)

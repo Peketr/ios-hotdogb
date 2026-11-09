@@ -208,3 +208,5 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   over SPMI SID 2 (sweet_spmi.c now allows SID 2 peripherals 0x10/0x11/0x13), else the sign of the current.
   CurrentCapacity = percent, MaxCapacity = 100 (as real iPhones), mAh in AppleRaw*. Default on; `sweetbattery=0`
   = the old static 100%.
+- 0167 hotdogb battery: GPIO 88/89 (NORTH tile) muxed to qup8 (function 2), pull-up, 2 mA, before the first gauge
+  transfer (0166 timed out: XBL never touches SE8, the pins were GPIOs); I2C timeouts log irq/status/FIFO counts.
