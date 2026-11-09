@@ -17,12 +17,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   "Searching for transport: H4 / driver: POSIX", "DeviceTree speed = 3000000") and ~30 HCI commands all get status 0.
 - It stops at `OI_HCICMD_WriteDefaultErroneousDataReporting (status=628)` -> "HCI initialization failed",
   "Bluetooth error - restarting { reason=108 }"; bluetoothd restarts every ~31 s.
-- Fix (built? not yet): btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
+- k0165-bt-9: answering 0x0c5b was not enough - bluetoothd never sends it: it checks the chip's Read Local
+  Supported Commands mask first (octet 18 = 0x83, bit 3 clear) and fails locally. btd now also sets the mask bits of
+  the commands it answers in the 0x1002 reply (patch_supported_commands; logs "<ctlr supported commands: set ...").
+- Fix: btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
   never sees it) and logs every refused command ("REFUSED") regardless of the 400-packet limit.
 - bluetoothd's own log: job org.iosonpixel.oslog-bluetoothd (`oslog -l bluetoothd`, /var/local/oslog-bluetoothd.log).
 - The k0165-bt-2 "freeze": SpringBoard started a shutdown at 298 s (after touches); halt is not implemented, so
   "Halt/Restart Timed Out" panic at 332 s. Not Bluetooth.
-- Next: new btd at /var/local/bin/btd3 (installer path bumped; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
+- Next: new btd at /var/local/bin/btd4 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
   log; extend local_answers until "Stack: STACK_BUSY -> STACK_READY". Then Settings > Bluetooth.
 
 ### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)

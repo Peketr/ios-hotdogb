@@ -513,9 +513,29 @@ static const struct local_answer {
 	uint16_t op;
 	uint8_t ret_len;
 	uint8_t ret[8];
+	uint8_t octet, bit;	/* its bit in the Read Local Supported Commands mask (Core spec vol 4 part E 6.27) */
 } local_answers[] = {
-	{ 0x0c5b, 0, { 0 } },
+	{ 0x0c5b, 0, { 0 }, 18, 3 },
 };
+
+/*
+ * bluetoothd checks that mask before it sends a command and fails its HCI init when one it needs is missing, without
+ * sending it (k0165-bt-9: "WriteDefaultErroneousDataReporting (status=628)", the chip's octet 18 is 0x83). Set the
+ * bits of the commands btd answers in the chip's reply: 04 0e 44 <ncmd> 02 10 <status> <64 octets>. Only replies
+ * that arrive whole in one read are patched (they do: 68 bytes at 3 Mbaud).
+ */
+static void patch_supported_commands(uint8_t *d, size_t len)
+{
+	for (size_t i = 0; i + 71 <= len; i++) {
+		if (d[i] != 4 || d[i + 1] != 0x0e || d[i + 2] != 0x44 || d[i + 4] != 0x02 || d[i + 5] != 0x10 || d[i + 6])
+			continue;
+		uint8_t *mask = d + i + 7;
+		for (size_t k = 0; k < sizeof(local_answers) / sizeof(local_answers[0]); k++)
+			mask[local_answers[k].octet] |= (uint8_t)(1u << local_answers[k].bit);
+		LOG("<ctlr supported commands: set the bits of %zu commands btd answers\n",
+		    sizeof(local_answers) / sizeof(local_answers[0]));
+	}
+}
 
 /* the host's H4 stream, cut into packets: answered here or passed to the UART */
 struct h4host {
@@ -594,6 +614,7 @@ static int bt_serve(void)
 		n = uart_read(buf, sizeof(buf));
 		if (n) {
 			busy = 1;
+			patch_supported_commands(buf, n);
 			h4log(&down, buf, n);
 			if (pipe_write(buf, n))
 				LOG("host write of %zu bytes failed (no host, or it is not reading)\n", n);
