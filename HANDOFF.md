@@ -72,6 +72,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   battery near the 45 C warm limit) - the phone does not charge on iOS. Not checked yet: the status bar number.
 - **0168** (not run yet): read-only SMB5 register dump (`#### CHARGER REGISTER DUMP (...)` + `SWEET SMB5 xxyy: 16 bytes`) at
   the first reading and on each plug/unplug, to decode the state-7 cause against smb5-reg.h.
+- **Run k0168-sensors-chg-1109-2031 (dump at the first reading; decoded with LineageOS sm8150 smb5-reg.h)**:
+  37%, 3794 mV, -105 mA, **47.3 C**. Charging is off **by software command**: CHARGING_ENABLE_CMD 0x1042 = 0x00
+  (CHGR_CFG2 0x1051 = 0x2c: enable source = command, inhibit off). Everything else would allow charging: USB
+  SDP (0x1308 = 0x01, APSD done), not suspended (0x1340 = 0, power path 0x95 = USBIN valid, not suspended), ICL
+  0x20 (1.6 A cfg) and AICL done, no JEITA/temperature limit (0x100d = 0, MISC 0x1606 = 0x02), charger watchdog
+  off (WD_CFG 0x1651 = 0, bite does not disable charging). STATUS_5 0x100b = 0x80 (trickle/pre/full-on all off),
+  STATUS_2 0x1007 = 0x08 (bit 3 not in the header). FCC 0x1061 = 0x0a (500 mA), FV 0x1070 = 0x4d.
+  Under Android the OPLUS driver sets the enable bit and does the thermal policy (warm > 45 C: 4.13 V / 1050 mA,
+  hot > 50 C: stop). Fix needs one SPMI **write** (0x1042 bit 0) plus a temperature gate; not done yet.
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 
