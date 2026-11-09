@@ -16,6 +16,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   `#### GPS SESSION STARTED`, `#### FIRST GPS NMEA SENTENCE`, `#### FIRST GPS FIX`; a "gnss:" summary every 15 s.
   `WLAND_NO_GPS=1` turns it off. Parsing host-tested with fake indications. Test outdoors: no time/XTRA injection, so
   a cold start takes minutes. If the engine never turns on: check the START response error and the engine indication.
+- **GPS run 1 (2026-11-09)**: all four requests ok, "#### GPS SESSION STARTED"; ~1 position report/s without lat/lon,
+  and only one proprietary sentence ($PQWP1, about every 10 s), no GSV/GGA (not tested outdoors yet). If no fix
+  outdoors: QMI_LOC_SET_NMEA_TYPES (0x3e) for GGA/RMC/GSV, log the report status, inject time (the iOS clock is in 1971).
+- **Location Services were off**: /var/root/Library/Preferences/com.apple.locationd.plist had no
+  LocationServicesEnabledIn7.0 (Setup Assistant sets it; our roots skip it), so locationd authorizes no client
+  (none in clients.plist) and Settings has no per-app Location rows. tools/sweet-root-tweaks.py now sets it (and
+  LocationServicesEnabled) on new roots; on the running phone put the edited plist + reboot (backup in /var/local).
 - **GPS step 2 (iOS side)**: an injector daemon that reads gps.fix and feeds locationd (candidate: CoreLocation's
   private CLSimulationManager, the path Xcode's location simulation uses - to be checked against this root's locationd).
 - **Accel/gyro plan**: (1) SLPI PAS boot (like the ADSP's in audiod: pil_slpi carve-out from dtbo overlay 3, its

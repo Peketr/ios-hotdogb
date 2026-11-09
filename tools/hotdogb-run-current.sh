@@ -9,7 +9,9 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-08): kernel 0158 (sweet90=3: panel at 90 Hz + INTF_1 tear check rescaled + 11.1 ms vsync; 1 = panel only, 2 = vsync only) on 0157 (90 Hz switch) on 0156.
+# Current (2026-11-09): GPS test - same kernel, new /var/local/bin/wland with the QMI LOC client (phone/wifi/gnss.c;
+# watch for "#### FIRST GPS FIX", then get /var/local/wland.log and /var/local/gps.fix). Run it outdoors.
+# Before (2026-11-08): kernel 0158 (sweet90=3: panel at 90 Hz + INTF_1 tear check rescaled + 11.1 ms vsync; 1 = panel only, 2 = vsync only) on 0157 (90 Hz switch) on 0156.
 # 0156 (brightness slider -> panel; backlight service on by default, sweetbl=1 = panel
 # off/on only) on 0155 (backlight IODisplayParameters + /backlight panel description) on 0154 (panel dark while the display is off; sweetbl=2 adds the backlight service, which
 # stalls backboardd) on 0153 (logs and accepts display/backlight property keys) on 0152 (panel brightness: DCS 0x51 + AppleARMBacklight, sweetbl=0 = off) on 0151 (GPU present fills the panel, sweetfb_fill=0 = bars; a client's first 3
@@ -23,7 +25,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KERNEL=work/boot/kernel-0165
-TAG=k0162
+TAG=k0165-gps
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3"

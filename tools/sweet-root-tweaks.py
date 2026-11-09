@@ -59,6 +59,16 @@ def merge_pref(root, name, values):
     print('pref', name, sorted(values))
 
 
+def location(root):
+    """Location Services on (Setup Assistant normally sets this; without it locationd authorizes nobody,
+    apps never ask and Settings lists no per-app Location rows)."""
+    path = os.path.join(root, 'private/var/root/Library/Preferences/com.apple.locationd.plist')
+    data = load(path) if os.path.exists(path) else {}
+    data.update({'LocationServicesEnabledIn7.0': True, 'LocationServicesEnabled': True})
+    save(path, data, 0, 0, 0o600)
+    print('pref com.apple.locationd (root): Location Services on')
+
+
 def launchd(root):
     path = os.path.join(root, 'System/Library/xpc/launchd.plist')
     st = os.stat(path)
@@ -178,6 +188,7 @@ def main():
     activation(root)
     audio(root)
     network(root)
+    location(root)
     merge_pref(root, 'com.apple.migration', {
         'LastSystemVersion': BUILD,
         'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}})
