@@ -5,6 +5,27 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: GPS, accelerometer, gyro - plan, and GPS step 1 (QMI LOC client in wland) (2026-11-09)
+- **Hardware** (strings in ../hotdogb/fw/modem-image/image/slpi.b*): IMU = ST **LSM6DSM** (accel + gyro), magnetometer
+  MEMSIC **MMC5603**, SAR sx932x; all on the **SLPI** (sensor DSP, sensor_pd per slpius.jsn), not reachable from apps.
+  GNSS is in the **modem**, which wland already boots: it announces QMI LOC (service 0x10, instance 2, k0148-wifi-1).
+- **GPS step 1 (untested on the phone)**: phone/wifi/gnss.c. 20 s after LOC appears: inform client revision 2, register
+  events (position, NMEA, engine, session state), operation mode standalone, START session 1 (periodic 1 s, high
+  accuracy, intermediate reports). Writes /var/local/gps.fix (one key=value line: utc_ms lat lon hacc alt vacc speed
+  course sats_used sats_view) and /var/local/gps.nmea (last 32 sentences), 1/s. Milestones `#### STARTING GPS`,
+  `#### GPS SESSION STARTED`, `#### FIRST GPS NMEA SENTENCE`, `#### FIRST GPS FIX`; a "gnss:" summary every 15 s.
+  `WLAND_NO_GPS=1` turns it off. Parsing host-tested with fake indications. Test outdoors: no time/XTRA injection, so
+  a cold start takes minutes. If the engine never turns on: check the START response error and the engine indication.
+- **GPS step 2 (iOS side)**: an injector daemon that reads gps.fix and feeds locationd (candidate: CoreLocation's
+  private CLSimulationManager, the path Xcode's location simulation uses - to be checked against this root's locationd).
+- **Accel/gyro plan**: (1) SLPI PAS boot (like the ADSP's in audiod: pil_slpi carve-out from dtbo overlay 3, its
+  SMP2P/IPC bits, QRTR node of its own); (2) a FastRPC apps_std file server: the SLPI's sns_registry reads
+  /vendor/etc/sensors/config/*.json and /mnt/vendor/persist/sensors/registry over FastRPC (what Android's sscrpcd
+  serves) - **the same gap that is blocking audio** (audio PD, fastrpcglink-apps-dsp); (3) an SSC client: QMI service
+  400 (SNS_CLIENT) carrying sns_client.proto protobuf: SUID lookup for "accel"/"gyro"/"mag", then std sensor config
+  (postmarketOS libssc does this); (4) the iOS side: kernel/HID accelerometer + gyro events for backboardd (rotation)
+  and CoreMotion. Needs from Android first: /vendor/etc/sensors and /mnt/vendor/persist/sensors (pull with root).
+
 ### HOTDOGB: Bluetooth - bluetoothd runs its HCI init on the WCN3998; one refused command left (k0165-bt-7/8, 2026-11-09)
 - The MobileGestalt shim never loaded into BlueTool (DYLD_PRINT_LIBRARIES worked, DYLD_INSERT_LIBRARIES was
   dropped silently; also from world-readable /usr/local/lib; k0165-bt-4..6). Instead com.apple.BlueTool runs a
