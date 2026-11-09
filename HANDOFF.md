@@ -38,6 +38,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   time every time, 9999 km uncertainty): the engine never starts. gnss.c now also reads + clears the **engine lock**
   (QMI_LOC_GET/SET_ENGINE_LOCK 0x3b/0x3a, none = 1; Android clears it at start), sets the NMEA types (0x3e: GGA RMC GSV
   GSA VTG GLGSV GNGSA) before the operation mode, logs those answers and a position-report status histogram.
+- **GPS run 3 (k0165-cc-1109-1931): THE GPS ENGINE RUNS.** Engine lock was **4 (ALL locked)**; cleared (status 0), NMEA
+  types + standalone ok, "fix session STARTED", "engine ON", standard NMEA every second (GGA/RMC/GSA/GSV/VTG). In ~110 s
+  (indoors) it tracked one GPS satellite (PRN 21, C/N0 24-29 dB-Hz), no GLONASS, no fix (GGA quality 0, RMC V).
+  The "#### FIRST GPS FIX" it printed was wrong: in-progress reports (status 1) carry lat/lon 0/0 without an
+  accuracy TLV; gnss.c now ignores 0/0 and status-1 reports without a horizontal uncertainty (host-tested). The
+  gps.fix left on the phone from that run holds 0/0. Next: a longer run outdoors; if it stays at 0-1 satellites,
+  inject UTC time (0x38) and check the GNSS antenna/LNA path.
+- ReportCrash log works (oslog-reportcrash): 74 corpses that boot, mostly speech synthesizer AUs (SiriTTS, Kona,
+  MacinTalk ~12 each), Spotlight index extensions, driverkitd x4. CommCenter was off.
 
 ### HOTDOGB: GPS, accelerometer, gyro - plan, and GPS step 1 (QMI LOC client in wland) (2026-11-09)
 - **Hardware** (strings in ../hotdogb/fw/modem-image/image/slpi.b*): IMU = ST **LSM6DSM** (accel + gyro), magnetometer

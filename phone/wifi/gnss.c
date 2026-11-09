@@ -252,6 +252,11 @@ static void on_position(const struct qmi_msg *m)
 		return;
 	if (status != 0 && status != 1)
 		return;
+	/* in-progress reports (status 1) carry 0/0 and no accuracy until the engine has a position */
+	float hunc;
+	int have_hunc = get_f32(m, 0x12, &hunc) && hunc > 0;
+	if ((lat == 0 && lon == 0) || (status == 1 && !have_hunc))
+		return;
 	fix.lat = lat;
 	fix.lon = lon;
 	if (!get_f32(m, 0x12, &fix.hacc))
