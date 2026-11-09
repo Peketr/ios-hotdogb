@@ -449,6 +449,10 @@ struct h4log {
 static void h4log_pkt(struct h4log *l, const uint8_t *p, size_t len)
 {
 	l->pkts++;
+	/* refused commands are logged always: each is a candidate for the local answers below */
+	if (p[0] == 4 && len >= 7 && ((p[1] == 0x0e && p[6]) || (p[1] == 0x0f && p[3])))
+		LOG("%s REFUSED %#06x status %#x (%s)\n", l->dir, p[1] == 0x0e ? p[4] | p[5] << 8 : p[5] | p[6] << 8,
+		    p[1] == 0x0e ? p[6] : p[3], p[1] == 0x0e ? "cmd complete" : "cmd status");
 	if (l->logged >= 400)
 		return;
 	if (p[0] == 1 && len >= 4) {
@@ -499,8 +503,78 @@ static void h4log(struct h4log *l, const uint8_t *d, size_t len)
 	}
 }
 
+/*
+ * Commands bluetoothd sends that the WCN3998 does not take; btd answers them itself (Command Complete, status 0,
+ * plus any return bytes) and they never reach the chip. bluetoothd aborts its HCI init on any refusal
+ * ("HCI initialization failed", reason 108).
+ *   0x0c5b Write Default Erroneous Data Reporting: refused (k0165-bt-8, OI status 628); setting only.
+ */
+static const struct local_answer {
+	uint16_t op;
+	uint8_t ret_len;
+	uint8_t ret[8];
+} local_answers[] = {
+	{ 0x0c5b, 0, { 0 } },
+};
+
+/* the host's H4 stream, cut into packets: answered here or passed to the UART */
+struct h4host {
+	uint8_t b[1100];
+	size_t n;
+	unsigned answered;
+};
+
+static void host_pkt(const uint8_t *p, size_t len, struct h4host *h)
+{
+	if (p[0] == 1 && len >= 4) {
+		unsigned op = p[1] | p[2] << 8;
+		for (size_t i = 0; i < sizeof(local_answers) / sizeof(local_answers[0]); i++) {
+			const struct local_answer *a = &local_answers[i];
+			if (a->op != op)
+				continue;
+			uint8_t e[16] = { 4, 0x0e, (uint8_t)(4 + a->ret_len), 1, p[1], p[2], 0 };
+			memcpy(e + 7, a->ret, a->ret_len);
+			if (h->answered++ < 50)
+				LOG("host> cmd %#06x answered by btd (not supported by the chip)\n", op);
+			if (pipe_write(e, 7u + a->ret_len))
+				LOG("host write of a local answer failed\n");
+			return;
+		}
+	}
+	if (uart_write(p, len, 2000))
+		LOG("UART write of %zu bytes failed\n", len);
+}
+
+static void host_feed(struct h4host *h, const uint8_t *d, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (h->n == 0 && (d[i] < 1 || d[i] > 4))
+			continue;	/* junk between packets: dropped (counted by h4log) */
+		if (h->n >= sizeof(h->b)) {
+			uart_write(h->b, h->n, 2000);	/* longer than any packet we cut: pass through */
+			h->n = 0;
+		}
+		h->b[h->n++] = d[i];
+		size_t need = 0;
+		uint8_t *b = h->b;
+		if (b[0] == 1 && h->n >= 4)
+			need = 4u + b[3];
+		else if (b[0] == 2 && h->n >= 5)
+			need = 5u + (b[3] | b[4] << 8);
+		else if (b[0] == 3 && h->n >= 4)
+			need = 4u + b[3];
+		else if (b[0] == 4 && h->n >= 3)
+			need = 3u + b[2];
+		if (need && h->n >= need) {
+			host_pkt(b, need, h);
+			h->n = 0;
+		}
+	}
+}
+
 static int bt_serve(void)
 {
+	static struct h4host host;
 	static uint8_t buf[64 * 1024];
 	struct h4log up = { .dir = "host>", .n = 0 }, down = { .dir = "<ctlr", .n = 0 };
 	uint64_t speed = 0, last_speed = 0, next_stat = ms_now() + 10000;
@@ -515,8 +589,7 @@ static int bt_serve(void)
 		if (n) {
 			busy = 1;
 			h4log(&up, buf, n);
-			if (uart_write(buf, n, 2000))
-				LOG("UART write of %zu bytes failed\n", n);
+			host_feed(&host, buf, n);
 		}
 		n = uart_read(buf, sizeof(buf));
 		if (n) {

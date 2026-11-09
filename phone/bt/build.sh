@@ -1,11 +1,8 @@
 #!/bin/sh
-# Build btd and bluetool-shim.dylib (Bluetooth: WCN3998 bring-up, scan, and stage 2 serve for bluetoothd) for iOS 16 arm64 into phone/bt/out (signed ad hoc).
+# Build btd (Bluetooth: WCN3998 bring-up, scan, and serving bluetoothd through the kernel bridge) for iOS 16 arm64 into phone/bt/out (signed ad hoc).
 set -e
 cd "$(dirname "$0")"
 mkdir -p out
 ../../work/userland/bin/ios-cc -O2 -Wall -Wextra -Wno-unused-parameter -o out/btd btd.c uart.c pipe.c ../wifi/pmem.c
-# BlueTool's MobileGestalt shim (ReleaseType = Vendor; see bluetool-shim.c)
-../../work/userland/bin/ios-cc -O2 -Wall -dynamiclib -framework CoreFoundation -undefined dynamic_lookup -o out/bluetool-shim.dylib bluetool-shim.c
 codesign -f -s - out/btd 2>/dev/null
-codesign -f -s - out/bluetool-shim.dylib 2>/dev/null
-ls -la out/btd out/bluetool-shim.dylib
+ls -la out/btd

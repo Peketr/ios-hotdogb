@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Bluetooth - bluetoothd runs its HCI init on the WCN3998; one refused command left (k0165-bt-7/8, 2026-11-09)
+- The MobileGestalt shim never loaded into BlueTool (DYLD_PRINT_LIBRARIES worked, DYLD_INSERT_LIBRARIES was
+  dropped silently; also from world-readable /usr/local/lib; k0165-bt-4..6). Instead com.apple.BlueTool runs a
+  patched copy /usr/local/bin/BlueTool: `mov w25, #1` at 0x10001607c and 0x1000160b0 (w25 = "ReleaseType is
+  Vendor"), re-signed ad hoc on the Mac with --preserve-metadata=entitlements. Kept as
+  ../hotdogb/bt/BlueTool.vendor-signed (Apple's file, outside git); hotdogb-bt-install.py installs it. Shim removed.
+- k0165-bt-7: BlueTool opens the bridge ("Opening com.apple.uart.bluetooth @ 3000000 baud") and reads the chip
+  (LMP 0x0A, subversion 0x02BE, its address); "#### FIRST BLUETOOTH H4 BYTES FROM/TO THE HOST" at 89.9 s.
+  bluetoothd then connects ("Booting chipset", "Powering on chipset", "Stack: STACK_OFF -> STACK_BUSY",
+  "Searching for transport: H4 / driver: POSIX", "DeviceTree speed = 3000000") and ~30 HCI commands all get status 0.
+- It stops at `OI_HCICMD_WriteDefaultErroneousDataReporting (status=628)` -> "HCI initialization failed",
+  "Bluetooth error - restarting { reason=108 }"; bluetoothd restarts every ~31 s.
+- Fix (built? not yet): btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
+  never sees it) and logs every refused command ("REFUSED") regardless of the 400-packet limit.
+- bluetoothd's own log: job org.iosonpixel.oslog-bluetoothd (`oslog -l bluetoothd`, /var/local/oslog-bluetoothd.log).
+- The k0165-bt-2 "freeze": SpringBoard started a shutdown at 298 s (after touches); halt is not implemented, so
+  "Halt/Restart Timed Out" panic at 332 s. Not Bluetooth.
+- Next: new btd at /var/local/bin/btd3 (installer path bumped; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
+  log; extend local_answers until "Stack: STACK_BUSY -> STACK_READY". Then Settings > Bluetooth.
+
 ### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)
 - k0164-bt-1 (kernel 0164): "bluetoothd skywalk user pipe privilege granted" at 22 s, then "bluetoothd
   privilege 1002 denied" (PRIV_GLOBAL_PROC_INFO); btd claimed the pipe at 71 s; bluetoothd never connected to
