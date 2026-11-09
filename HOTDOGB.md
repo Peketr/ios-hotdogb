@@ -185,7 +185,7 @@ flags, sizes), kalloc_var views (465), global symbols and MIG sources (79 files)
 match in size. The code differs (upstream clang, not Apple's fork): __TEXT_EXEC,__text is 3.8%
 smaller. `tools/wsl-xnu/kalloc-type-sigs.py MAC_KERNEL WSL_KERNEL` repeats the allocator check;
 run it after a clang or toolchain update, since a wrong signature puts types in other heaps than
-a Mac build would. Not yet booted on the phone.
+a Mac build would. Kernel 0169 built this way boots to the same milestones as the Mac build.
 
 ### Running a kernel from the Windows PC (WSL)
 

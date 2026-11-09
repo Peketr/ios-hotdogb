@@ -5,13 +5,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
-### BUILD: kernels build in WSL, no Mac (2026-11-09) - WSL KERNEL NOT BOOTED YET
+### BUILD: kernels build in WSL, no Mac (2026-11-09) - WSL KERNEL BOOTS
 - `wsl.exe -- bash /mnt/c/Users/Peketr/ios-flame/src/tools/wsl-build.sh` (PowerShell) = tools/mac-build.sh on
   ~/xnu-linux: applied 0166-0169, all mac-build-check strings ok, work/out/kernel-0169.sweet (sha256 e53c4bc2...).
   Setup and details: HOTDOGB.md "Building in WSL".
 - Observed vs the Mac builds of 0165 and 0169: identical kalloc_type views (1554), kalloc_var views (465), global
   symbols (24431 for 0169) and MIG sources (79 files); __TEXT_EXEC,__text 3.8% smaller (upstream clang 21.1.8).
-- Open: boot a WSL kernel on the phone once (not done); work/boot/kernel-0169 is still the Mac build.
+- Booted (run k0169-wsl-1109-2208, work/boot/kernel-0169-wsl, same args as the Mac run k0169-charge-1109-2146):
+  the same 18 milestone lines in the same order with the same spacing (HID opened -> TOUCHSCREEN RUNNING 16.6 s in
+  both), battery gauge BQ27411 81%, no panic; process crashes are a subset of the Mac run's (driverkitd, assetsd,
+  FitnessWidget, Spotlight extensions). Touch works too (FIRST TOUCH: FINGER 0 AT 574,2397, sent to iOS HID).
+- work/boot/kernel-0169 is still the Mac build; tools/hotdogb-run-current.sh boots kernel-0169-wsl.
 
 ### HOTDOGB: MOTION SENSORS step 1 - sensord: SLPI boot, FastRPC file server, SSC client (2026-11-09) - NOT RUN YET
 - New userland daemon phone/sensors/sensord (build: phone/sensors/build.sh on the Mac; install:

@@ -9,6 +9,9 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
+# Current (2026-11-09, build check): the same 0169, built in WSL (tools/wsl-build.sh, kernel-0169-wsl) instead of on the Mac.
+# Expect the same milestones as the Mac 0169 run k0169-charge-1109-2146 (touch, battery gauge, charging, GPU).
+# Back to the Mac build: KERNEL=work/boot/kernel-0169.
 # Also (2026-11-09, charging): kernel 0169 = 0168 + charging switched on (PM8150B 0x1042) while the gauge reads 3-43 C,
 # off above 45 C ("#### CHARGING ENABLED/DISABLED", "#### CHARGING CONTROL UNAVAILABLE"; sweetcharge=0 = never write).
 # Plugged in, the current in "SWEET BATTERY: gauge ..." should turn positive. 0168 = 0167 + a read-only PM8150B charger register dump ("#### CHARGER REGISTER DUMP"
@@ -40,8 +43,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=work/boot/kernel-0169
-TAG=k0169-charge
+KERNEL=${KERNEL:-work/boot/kernel-0169-wsl}
+TAG=k0169-wsl
 if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0168 ]; then
 	echo "no $KERNEL yet: using kernel-0168 (no charge enable)" >&2
 	KERNEL=work/boot/kernel-0168 TAG=k0168-sensors-chg
