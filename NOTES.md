@@ -212,3 +212,7 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   transfer (0166 timed out: XBL never touches SE8, the pins were GPIOs); I2C timeouts log irq/status/FIFO counts.
 - 0168 hotdogb charger: read-only dump of PM8150B SMB5 CHGR/DCDC/BATIF/USBIN/MISC (SID 2, 0x00-0x7f each) at the first
   gauge reading and on every plug/unplug (sweet_spmi.c also allows SID 2 0x12, 0x16): why charging is disabled (state 7).
+- 0169 hotdogb charging: the first PMIC write - sweet_spmi_charge_enable() sets/clears PM8150B CHARGING_ENABLE_CMD
+  (SID 2 0x1042 bit 0; the bootloader leaves it 0) through the apps-owned arbiter channel only, read back. SweetBattery
+  turns charging on at 3-43 C gauge battery temperature, off above 45 C / below 0 C / without gauge data; FCC 500 mA
+  and FV left as found. `sweetcharge=0` = never write.

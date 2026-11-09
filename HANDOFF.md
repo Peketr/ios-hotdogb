@@ -81,6 +81,10 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   STATUS_2 0x1007 = 0x08 (bit 3 not in the header). FCC 0x1061 = 0x0a (500 mA), FV 0x1070 = 0x4d.
   Under Android the OPLUS driver sets the enable bit and does the thermal policy (warm > 45 C: 4.13 V / 1050 mA,
   hot > 50 C: stop). Fix needs one SPMI **write** (0x1042 bit 0) plus a temperature gate; not done yet.
+- **0169** (not run yet): charging on through the one PMIC write (0x1042 bit 0, apps-owned channel, read back),
+  gated on the gauge temperature (on 3-43 C, off > 45 C / < 0 C / no data); FCC (500 mA) and FV untouched.
+  `sweetcharge=0` = no writes. Expect `#### CHARGING ENABLED (...)` and a positive gauge current on USB; or
+  `#### CHARGING DISABLED: BATTERY TOO HOT` (the battery was 47 C on the last run) / `#### CHARGING CONTROL UNAVAILABLE`.
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 

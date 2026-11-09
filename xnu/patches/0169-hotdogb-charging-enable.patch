@@ -1,0 +1,250 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index b639cb7..fe7597d 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -1,12 +1,14 @@
+ /*
+  * Battery-only adaptation of input/sweet_keys.c, observer EXT_READL.
+- * PMIC READ ONLY. The only MMIO store issues a one-byte read command.
++ * PMIC READ ONLY, except sweet_spmi_charge_enable() (hotdogb, one bit).
+  * No interrupt clear, peripheral enable, charger config, or PMIC writes.
+  * Init is serialized by the single built-in SweetBattery personality.
+  * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
+  * Also the PM8150 RTC (peripheral 0x60) for the time of day (SweetPlatformExpert.cpp),
+  * and on hotdogb the PM8150B charger status (SID 2: SMB5 CHGR 0x10, DCDC 0x11, BATIF 0x12,
+  * USBIN 0x13, MISC 0x16; reads only).
++ * ONE write exists, sweet_spmi_charge_enable(): PM8150B CHARGING_ENABLE_CMD
++ * (SID 2, 0x1042) bit 0, through the apps-owned channel only, read back.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -20,6 +22,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define SP_CORE_PA 0x0c440000u
+ #define SP_OBS_PA  0x0e600000u
+ #define SP_CFG_PA  0x0c40a000u
++#define SP_CHNLS_PA 0x0c600000u /* owner channels, 0x10000 per APID (PMIC arb v5) */
+ #define SP_NO_APID 0xffffu
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
+@@ -134,4 +137,72 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	IOLockUnlock(sp_lock);
+ 	return -1;
+ }
++/*
++ * hotdogb: turn PM8150B charging on or off (CHARGING_ENABLE_CMD, SID 2
++ * 0x1042, bit 0; CHGR_CFG2 0x1051 selects the command as the enable source).
++ * The only PMIC write in this file. Linux spmi-pmic-arb v5: writes go through
++ * the owner channel (chnls + 0x10000 * APID) and only when the APID's owner
++ * EE is ours (apps = 0): WDATA0 (+0x10), then CMD (+0x00) EXT_WRITEL (opcode
++ * 0) BC=0, then STATUS (+0x08) done bit 0, errors bits 1-3. Read back.
++ * Returns 0, -1 (bad state/denied/timeout), -2 (not owned by apps).
++ */
++int sweet_spmi_charge_enable(int on);
++
++int
++sweet_spmi_charge_enable(int on)
++{
++	const unsigned ppid = (2u << 8) | 0x10u, addr = 0x42u;
++	if (!sp_ready) {
++		return -1;
++	}
++	IOLockLock(sp_lock);
++	uint16_t apid = SP_NO_APID;
++	for (unsigned i = 0; i < sp_count; ++i) {
++		uint32_t map = sp_rd(sp_core, 0x900u + 4u * i);
++		if (map && ((map >> 8) & 0xfffu) == ppid && (sp_rd(sp_cfg, 0x700u + 4u * i) & 7u) == 0) {
++			apid = (uint16_t)i;
++			break;
++		}
++	}
++	if (apid == SP_NO_APID || sp_poisoned[apid]) {
++		IOLockUnlock(sp_lock);
++		printf("SWEET BATTERY: PM8150B CHGR (SID 2 0x10) not owned by apps; no charge enable\n");
++		return -2;
++	}
++	static vm_offset_t ch;
++	static uint16_t ch_apid = SP_NO_APID;
++	if (!ch || ch_apid != apid) {
++		ch = ml_io_map(SP_CHNLS_PA + 0x10000u * apid, 0x1000);
++		ch_apid = apid;
++	}
++	if (!ch) {
++		IOLockUnlock(sp_lock);
++		return -1;
++	}
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(ch + 0x10u) = on ? 1u : 0u;       /* WDATA0 */
++	*(volatile uint32_t *)(ch + 0x00u) = (0u << 27) | (addr << 4); /* EXT_WRITEL, BC=0 */
++	__asm__ volatile("dsb osh" ::: "memory");
++	int rc = -1;
++	uint32_t status = 0;
++	for (unsigned i = 0; i < 1000; ++i) {
++		status = sp_rd(ch, 0x08u);
++		if (status & 1u) {
++			rc = (status & 0x0eu) ? -1 : 0;
++			break;
++		}
++		delay(1);
++	}
++	if (!(status & 1u)) {
++		sp_poisoned[apid] = true;
++	}
++	IOLockUnlock(sp_lock);
++	uint8_t back = 0xff;
++	if (rc == 0 && (sweet_spmi_read(2, 0x1042, &back) || (back & 1u) != (on ? 1u : 0u))) {
++		rc = -1;
++	}
++	printf("SWEET BATTERY: charge enable %d -> APID %u status %#x readback %#x rc %d\n",
++	    on, apid, status, back, rc);
++	return rc;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 83ae396..f55aca3 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -8,6 +8,10 @@
+  * gauge, a TI bq27411 (DEVICE_TYPE 0x0421; stock DT "bq27541-battery@55" on
+  * i2c@a80000 = QUPv3 1 SE0), read over GENI I2C in FIFO mode, polled, every
+  * 20 s from 15 s after boot. Charger state: PM8150B SMB5 over SPMI (SID 2).
++ * Charging: XBL/ABL leave CHARGING_ENABLE_CMD at 0 and nothing under iOS sets
++ * it; chargePolicy() turns it on while the gauge reads the battery at 3-43 C
++ * and off above 45 C, below 0 C or without gauge data (the stock OPLUS
++ * policy: > 45 C warm, > 50 C stop). sweetcharge=0 = never write.
+  * Default on; sweetbattery=0 = the static 100% source.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -22,6 +26,7 @@
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++extern "C" int sweet_spmi_charge_enable(int on);   /* hotdogb: PM8150B 0x1042 bit 0 */
+ 
+ #if SWEET_HOTDOGB
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -414,13 +419,15 @@ private:
+ 	int fLastMode;
+ #if SWEET_HOTDOGB
+ 	/* Gauge extras for publish(): remaining / full charge capacity (mAh), centidegrees C. */
+-	bool fSpmi, fGaugeDue, fHaveSample;
++	bool fSpmi, fGaugeDue, fHaveSample, fTempValid, fChgAllowed, fChgDead, fChgReported;
++	unsigned fChgFailures;
+ 	unsigned fRawRemaining, fRawFull, fFailures;
+ 	int fTempCenti;
+ 	unsigned fLastPercent;
+ 	bool fLastExternal, fLastCharging, fLastFull;
+ 	void pollGauge(void);
+ 	void smbDump(const char *why);
++	void chargePolicy(unsigned soc);
+ #endif
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+@@ -447,7 +454,8 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
+ #if SWEET_HOTDOGB
+-	fSpmi = fGaugeDue = fHaveSample = false;
++	fSpmi = fGaugeDue = fHaveSample = fTempValid = fChgAllowed = fChgDead = fChgReported = false;
++	fChgFailures = 0;
+ 	fRawRemaining = fRawFull = fFailures = 0;
+ 	fTempCenti = 2500;
+ 	fLastPercent = 100;
+@@ -659,6 +667,63 @@ SweetBattery::smbDump(const char *why)
+ 	}
+ }
+ 
++/*
++ * Charging on/off from the gauge's battery temperature, with hysteresis:
++ * on at 3.0-43.0 C, off above 45.0 C, below 0 C or without a valid gauge
++ * temperature, unchanged in between. The charge current (FCC 0x1061, 500 mA as
++ * left by the bootloader) and float voltage (0x1070) are not touched.
++ */
++void
++SweetBattery::chargePolicy(unsigned soc)
++{
++	if (!fChgAllowed || fChgDead || !fSpmi) {
++		return;
++	}
++	uint8_t cmd = 0;
++	if (sweet_spmi_read(2, 0x1042, &cmd)) {
++		return;
++	}
++	const bool on = (cmd & 1u) != 0;
++	const int t = fTempCenti;
++	bool want = on;
++	const char *why = NULL;
++	if (!fTempValid) {
++		want = false;
++		why = "NO GAUGE TEMPERATURE";
++	} else if (t > 4500) {
++		want = false;
++		why = "BATTERY TOO HOT";
++	} else if (t < 0) {
++		want = false;
++		why = "BATTERY TOO COLD";
++	} else if (t >= 300 && t <= 4300) {
++		want = true;
++	}
++	int whole = t / 100, tenth = (t < 0 ? -t : t) % 100 / 10;
++	if (want == on) {
++		if (!fChgReported) {
++			fChgReported = true;
++			IOLog("#### CHARGING %s: %s (%d.%d C, %u%%)\n", on ? "ALREADY ON" : "HELD OFF",
++			    why ? why : on ? "IN RANGE" : "43-45 C BAND", whole, tenth, soc);
++		}
++		return;
++	}
++	fChgReported = true;
++	int rc = sweet_spmi_charge_enable(want ? 1 : 0);
++	if (rc == 0) {
++		fChgFailures = 0;
++		if (want) {
++			IOLog("#### CHARGING ENABLED (BATTERY %d.%d C, %u%%)\n", whole, tenth, soc);
++		} else {
++			IOLog("#### CHARGING DISABLED: %s (%d.%d C, %u%%)\n", why ? why : "POLICY", whole, tenth, soc);
++		}
++	} else if (rc == -2 || ++fChgFailures >= 3) {
++		fChgDead = true;
++		IOLog("#### CHARGING CONTROL UNAVAILABLE (%s)\n",
++		    rc == -2 ? "CHARGER NOT OWNED BY APPS" : "WRITES FAIL");
++	}
++}
++
+ /*
+  * One gauge sample (workloop thread). SOC, voltage, average current (mA,
+  * positive = charging, as IOPMPowerSource), remaining / full charge capacity
+@@ -684,6 +749,10 @@ SweetBattery::pollGauge(void)
+ 		if (bq.up && ++fFailures == 3) {
+ 			IOLog("#### BATTERY GAUGE READS FAILING (keeping %u%%)\n", fLastPercent);
+ 		}
++		if (fFailures >= 3) {
++			fTempValid = false;     /* no temperature -> no charging */
++			chargePolicy(fLastPercent);
++		}
+ 		if (!fHaveSample) {
+ 			publish(100, 4200, 0, true, true, false, true, false, false);
+ 		}
+@@ -697,7 +766,9 @@ SweetBattery::pollGauge(void)
+ 	fRawRemaining = rm;
+ 	fRawFull = fcc;
+ 	/* 0.1 K -> 0.01 C, only when plausible (-40..100 C). */
+-	fTempCenti = (temp >= 2331 && temp <= 3731) ? (int)temp * 10 - 27315 : 2500;
++	fTempValid = temp >= 2331 && temp <= 3731;
++	fTempCenti = fTempValid ? (int)temp * 10 - 27315 : 2500;
++	chargePolicy(soc);
+ 
+ 	uint8_t usb = 0, path = 0, charger = 0, error = 0, chgTemp = 0;
+ 	bool smb = fSpmi &&
+@@ -832,6 +903,12 @@ SweetBattery::start(IOService *provider)
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real != 0;
+ 	fSpmi = fReal && sweet_spmi_init() == 0;
++	int charge = 1;
++	(void)PE_parse_boot_argn("sweetcharge", &charge, sizeof(charge));
++	fChgAllowed = charge != 0;
++	if (fSpmi && !fChgAllowed) {
++		IOLog("#### CHARGING CONTROL OFF (sweetcharge=0)\n");
++	}
+ 	const unsigned firstMs = 15000;
+ 	if (!fReal) {
+ 		IOLog("#### BATTERY GAUGE OFF (sweetbattery=0): STATIC 100%%\n");
