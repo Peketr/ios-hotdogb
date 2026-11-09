@@ -10,7 +10,7 @@
  *   btd regs           read-only register dump
  *   btd scan [SECS]    bring up, scan SECS each (default 10), power off
  *   btd auto           boot job: skip if /var/local/btd.off, wait 40 s, scan
- *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait 40 s, bring up (one retry), then
+ *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait for Wi-Fi (en0), bring up (one retry), then
  *                      serve bluetoothd through the kernel UART bridge (pipe.c, kernel 0165) and log its HCI
  */
 #include <stdio.h>
@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include "../wifi/pmem.h"
 #include "uart.h"
+#include <net/if.h>
 #include "pipe.h"
 
 #define FW_DIR "/var/local/fw/bt"
@@ -716,6 +717,25 @@ static void bt_off(void)
 	LOG("controller off\n");
 }
 
+/*
+ * The WCN3998 is one chip for Wi-Fi and Bluetooth. Powering the Bluetooth side up (the 0xC0/0xFC pulses) while the
+ * Wi-Fi firmware still boots on the modem crashed the modem (k0165-bt-10..14: "smp2p: modem state 7 ERR-FATAL"
+ * ~1 s after btd's first pulse; Wi-Fi never came up). A fixed 40 s wait was not enough (Wi-Fi is up at 77-132 s).
+ * Wait for en0: the kernel creates it when wland reports the radio up. After 180 s go on anyway (Wi-Fi off).
+ */
+static void wait_for_wifi(void)
+{
+	for (int s = 0; s < 180; s += 2) {
+		if (if_nametoindex("en0")) {
+			printf("btd: en0 is up after %d s, starting Bluetooth in 5 s\n", s);
+			sleep(5);
+			return;
+		}
+		sleep(2);
+	}
+	printf("btd: no en0 after 180 s (Wi-Fi off?), starting Bluetooth anyway\n");
+}
+
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -736,8 +756,7 @@ int main(int argc, char **argv)
 			printf("btd: /var/local/btd.off exists, idle\n");
 			sleep(600);
 		}
-		printf("btd: serve: waiting 40 s\n");
-		sleep(40);
+		wait_for_wifi();
 		t0 = ms_now();
 	} else if (!strcmp(argv[1], "auto")) {
 		struct stat sb;
@@ -745,8 +764,7 @@ int main(int argc, char **argv)
 			printf("btd: /var/local/btd.off exists, not starting\n");
 			return 0;
 		}
-		printf("btd: waiting 40 s for wland\n");
-		sleep(40);
+		wait_for_wifi();
 		t0 = ms_now();
 	} else if (!strcmp(argv[1], "scan")) {
 		if (argc > 2)
