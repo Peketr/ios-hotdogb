@@ -5,7 +5,7 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
-### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernels 0166-0167 (2026-11-09)
+### HOTDOGB: BATTERY FROM THE REAL FUEL GAUGE - kernels 0166-0167 (2026-11-09) - WORKS with 0167
 - Before: SweetBattery on the 7T was the ios-sweet (Redmi Note 10, PM6150 QG) driver. Without `sweetbattery=1` it
   publishes a fixed 100% / AC; with it, it reads PM6150 registers the 7T does not have -> the same fallback.
   CurrentCapacity/MaxCapacity were mAh of a 5020 mAh battery.
@@ -27,6 +27,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   {gpio, tsif1, qup8, ...} -> mux 2; 2 mA; pull-up), logs their cfg and SDA/SCL levels before and after
   (`#### BATTERY I2C PINS 88/89 SET TO QUP8 (cfg, SDA, SCL)`: both should read 1 = idle bus with pull-ups), and
   logs irq/status/FIFO counts on an I2C timeout.
+- **Run k0167-batt-1109-2024: WORKS.** gpio88/89 were cfg 0x1 (GPIO, pull-down) reading 1 (board pull-ups); after
+  the mux 0xb/0xb, SDA 1 SCL 1. `#### BATTERY GAUGE UP: BQ27411 (DEVICE TYPE 0x421)` 2 ms later, then
+  `#### FIRST BATTERY READING: 37% 3796 MV -150 MA 43.2 C 1069/2916 MAH` (RM/FCC = 36.7%, consistent).
+  SMB5 over SID 2 answers: usb=0x10 (plugged in), path=0x95, **chg=0x47 -> state 7 = charging DISABLED**: on USB but
+  draining 150 mA, gauge flags 0x109 (DSG, BAT_DET, CHG allowed). iOS gets external=1 charging=0 (correct). Open:
+  why SMB5 disables charging under iOS (guess: the SMB5 charger watchdog / no software enabling it, or the 43 C
+  battery near the 45 C warm limit) - the phone does not charge on iOS. Not checked yet: the status bar number.
 - Milestones: `#### STARTING BATTERY GAUGE`, `#### BATTERY GAUGE UP`, `#### FIRST BATTERY READING`, `#### CHARGER
   CONNECTED/DISCONNECTED`, `#### BATTERY GAUGE FAILED: <why>` (stops cleanly; static 100% stays).
 
