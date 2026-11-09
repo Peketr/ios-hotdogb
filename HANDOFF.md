@@ -45,6 +45,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   accuracy TLV; gnss.c now ignores 0/0 and status-1 reports without a horizontal uncertainty (host-tested). The
   gps.fix left on the phone from that run holds 0/0. Next: a longer run outdoors; if it stays at 0-1 satellites,
   inject UTC time (0x38) and check the GNSS antenna/LNA path.
+- **GPS run 4 (k0165-cc-1109-1942, 900 s, partly outdoors): FIRST REAL GPS FIX.** Engine lock read back as 1 (none:
+  the clear persists in the modem). ~12 min with 2-5 satellites in view (GPS + GLONASS, none used), then a coarse
+  status-1 position (+-10 km, tech 0x1), then 21 in view (GPS 11, GLONASS 10), 4 used, **17 status-0 fixes, +-8.8 m**
+  horizontal/vertical, altitude 87 m (gps.fix written). Cold start without time/XTRA: ~13 min. The modem ends and
+  restarts the fix session every few seconds (FINISHED/STARTED pairs, harmless so far). Logs pulled with a short
+  `sweetwifi=0` boot (wland stays off, so nothing is overwritten; it keeps the previous log as wland.log.prev).
+  Next: GPS step 2 (feed locationd); later time injection + XTRA for a faster first fix.
 - ReportCrash log works (oslog-reportcrash): 74 corpses that boot, mostly speech synthesizer AUs (SiriTTS, Kona,
   MacinTalk ~12 each), Spotlight index extensions, driverkitd x4. CommCenter was off.
 
