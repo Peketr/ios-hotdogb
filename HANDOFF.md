@@ -30,12 +30,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   parameter bytes. Later bluetoothd restarts failed HCI init again: the 0x1002 reply came split across reads, so the
   mask patch missed it -> chip-to-host bytes now go through a packet reassembler (ctlr_feed) and are patched whole.
   Once, between restarts, a bluetoothd ran with STACK_READY and no restart (PowerState 2, manager not powered on).
+- k0165-bt-12: ANTENNA_PREF_B passes; next BD_VSC_FACTORY_CAL_READ_TABLE (1 parameter byte) -> "Invalid data size 1",
+  restart. Vendor answers are now padded with zeros to >= 32 return bytes.
 - Fix: btd answers 0x0c5b itself (local_answers[] in btd.c: Command Complete, status 0; the chip
   never sees it) and logs every refused command ("REFUSED") regardless of the 400-packet limit.
 - bluetoothd's own log: job org.iosonpixel.oslog-bluetoothd (`oslog -l bluetoothd`, /var/local/oslog-bluetoothd.log).
 - The k0165-bt-2 "freeze": SpringBoard started a shutdown at 298 s (after touches); halt is not implemented, so
   "Halt/Restart Timed Out" panic at 332 s. Not Bluetooth.
-- Next: new btd at /var/local/bin/btd6 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
+- Next: new btd at /var/local/bin/btd7 (installer path bumped each build; never replace a running KeepAlive binary), reboot, read REFUSED lines and bluetoothd's
   log; extend local_answers until "Stack: STACK_BUSY -> STACK_READY". Then Settings > Bluetooth.
 
 ### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)

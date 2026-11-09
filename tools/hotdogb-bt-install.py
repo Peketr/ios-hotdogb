@@ -28,7 +28,7 @@ FILES = [PY, os.path.join(ROOT, 'tools', 'flame-files.py')]
 JOB = [PY, os.path.join(ROOT, 'tools', 'hotdogb-launchd-job.py')]
 ENV = dict(os.environ, FLAME_FILES_HOST=os.environ.get('FLAME_FILES_HOST', '192.168.7.2'), MSYS_NO_PATHCONV='1')
 FW = os.path.join(ROOT, '..', 'hotdogb', 'fw', 'bluetooth', 'image')
-BTD = '/var/local/bin/btd6'
+BTD = '/var/local/bin/btd7'
 BLUETOOL = '/usr/local/bin/BlueTool'
 TRANSPORT = 'H4:POSIX:com.apple.uart.bluetooth,3000000'
 FW_FILES = ['crbtfw21.tlv', 'crnv21.bin', 'crbtfw20.tlv', 'crnv20.bin']

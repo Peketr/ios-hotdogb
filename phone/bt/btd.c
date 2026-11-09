@@ -560,9 +560,13 @@ static int answer_vendor(const uint8_t *p)
 		return 0;
 	/* return data: the parameters echoed whole. _BCM_ByteStreamEventParser wants more than 1 byte after the
 	 * status (0x10012617c: cmp #1, b.gt; "Invalid data size 1" with only the sub-opcode, k0165-bt-11) */
+	/* ...and padded with zeros to at least 32 bytes: BD_VSC_FACTORY_CAL_READ_TABLE has one parameter byte and
+	 * failed the same way (k0165-bt-12); zeros read as empty tables / features off */
 	uint8_t e[7 + 255] = { 4, 0x0e, 4, 1, p[1], p[2], 0 };
 	size_t plen = p[3] > 251 ? 251 : p[3];
 	memcpy(e + 7, p + 4, plen);
+	if (plen < 32)
+		plen = 32;
 	e[2] = (uint8_t)(4 + plen);
 	size_t n = 7 + plen;
 	if (vendor_answered++ < 100)
