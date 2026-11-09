@@ -521,21 +521,20 @@ static const struct local_answer {
 /*
  * bluetoothd checks that mask before it sends a command and fails its HCI init when one it needs is missing, without
  * sending it (k0165-bt-9: "WriteDefaultErroneousDataReporting (status=628)", the chip's octet 18 is 0x83). Set the
- * bits of the commands btd answers in the chip's reply: 04 0e 44 <ncmd> 02 10 <status> <64 octets>. Only replies
- * that arrive whole in one read are patched (they do: 68 bytes at 3 Mbaud).
+ * bits of the commands btd answers in the chip's reply: 04 0e 44 <ncmd> 02 10 <status> <64 octets>. Applied to whole
+ * packets (ctlr_feed): k0165-bt-11 showed the reply split across reads after a bluetoothd restart.
  */
 static void patch_supported_commands(uint8_t *d, size_t len)
 {
-	for (size_t i = 0; i + 71 <= len; i++) {
-		if (d[i] != 4 || d[i + 1] != 0x0e || d[i + 2] != 0x44 || d[i + 4] != 0x02 || d[i + 5] != 0x10 || d[i + 6])
-			continue;
-		uint8_t *mask = d + i + 7;
-		for (size_t k = 0; k < sizeof(local_answers) / sizeof(local_answers[0]); k++)
-			mask[local_answers[k].octet] |= (uint8_t)(1u << local_answers[k].bit);
-		LOG("<ctlr supported commands: set the bits of %zu commands btd answers\n",
-		    sizeof(local_answers) / sizeof(local_answers[0]));
-	}
+	if (len < 71 || d[0] != 4 || d[1] != 0x0e || d[2] != 0x44 || d[4] != 0x02 || d[5] != 0x10 || d[6])
+		return;
+	uint8_t *mask = d + 7;
+	for (size_t k = 0; k < sizeof(local_answers) / sizeof(local_answers[0]); k++)
+		mask[local_answers[k].octet] |= (uint8_t)(1u << local_answers[k].bit);
+	LOG("<ctlr supported commands: set the bits of %zu commands btd answers\n",
+	    sizeof(local_answers) / sizeof(local_answers[0]));
 }
+
 
 /* the host's H4 stream, cut into packets: answered here or passed to the UART */
 struct h4host {
@@ -559,13 +558,13 @@ static int answer_vendor(const uint8_t *p)
 	unsigned op = p[1] | p[2] << 8;
 	if ((op >> 10) != 0x3f)
 		return 0;
-	uint8_t e[8] = { 4, 0x0e, 4, 1, p[1], p[2], 0 };
-	size_t n = 7;
-	if (p[3] > 0) {
-		e[2] = 5;
-		e[7] = p[4];
-		n = 8;
-	}
+	/* return data: the parameters echoed whole. _BCM_ByteStreamEventParser wants more than 1 byte after the
+	 * status (0x10012617c: cmp #1, b.gt; "Invalid data size 1" with only the sub-opcode, k0165-bt-11) */
+	uint8_t e[7 + 255] = { 4, 0x0e, 4, 1, p[1], p[2], 0 };
+	size_t plen = p[3] > 251 ? 251 : p[3];
+	memcpy(e + 7, p + 4, plen);
+	e[2] = (uint8_t)(4 + plen);
+	size_t n = 7 + plen;
 	if (vendor_answered++ < 100)
 		LOG("host> vendor cmd %#06x len %u (first byte %#04x) answered by btd\n", op, p[3], p[3] ? p[4] : 0);
 	if (pipe_write(e, n))
@@ -623,9 +622,40 @@ static void host_feed(struct h4host *h, const uint8_t *d, size_t len)
 	}
 }
 
+/* the chip's H4 stream, cut into packets (patched as needed) before they go to the host; bytes between packets are
+ * dropped (h4log counts them as junk) */
+static void ctlr_feed(struct h4host *c, const uint8_t *d, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (c->n == 0 && (d[i] < 1 || d[i] > 4))
+			continue;
+		if (c->n >= sizeof(c->b)) {
+			pipe_write(c->b, c->n);
+			c->n = 0;
+		}
+		c->b[c->n++] = d[i];
+		size_t need = 0;
+		uint8_t *b = c->b;
+		if (b[0] == 4 && c->n >= 3)
+			need = 3u + b[2];
+		else if (b[0] == 2 && c->n >= 5)
+			need = 5u + (b[3] | b[4] << 8);
+		else if (b[0] == 3 && c->n >= 4)
+			need = 4u + b[3];
+		else if (b[0] == 1 && c->n >= 4)
+			need = 4u + b[3];
+		if (need && c->n >= need) {
+			patch_supported_commands(b, need);
+			if (pipe_write(b, need))
+				LOG("host write of %zu bytes failed (no host, or it is not reading)\n", need);
+			c->n = 0;
+		}
+	}
+}
+
 static int bt_serve(void)
 {
-	static struct h4host host;
+	static struct h4host host, ctlr;
 	static uint8_t buf[64 * 1024];
 	struct h4log up = { .dir = "host>", .n = 0 }, down = { .dir = "<ctlr", .n = 0 };
 	uint64_t speed = 0, last_speed = 0, next_stat = ms_now() + 10000;
@@ -645,10 +675,8 @@ static int bt_serve(void)
 		n = uart_read(buf, sizeof(buf));
 		if (n) {
 			busy = 1;
-			patch_supported_commands(buf, n);
 			h4log(&down, buf, n);
-			if (pipe_write(buf, n))
-				LOG("host write of %zu bytes failed (no host, or it is not reading)\n", n);
+			ctlr_feed(&ctlr, buf, n);
 		}
 		if (ms_now() >= next_stat) {
 			next_stat = ms_now() + 10000;
