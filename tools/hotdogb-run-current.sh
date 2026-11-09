@@ -9,8 +9,8 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-09): cellular step 1 - same kernel; CommCenter (non-cellular job) back in launchd + oslog-commcenter
-# (/var/local/oslog-commcenter.log). Check Settings > Privacy & Security > Location Services, then pull the log.
+# Current (2026-11-09): GPS step 2 - same kernel; gpsfeed boot job (/var/local/gpsfeed.log) hands wland's fixes to
+# locationd. Outdoors, wait for "#### FIRST LOCATION SENT TO LOCATIOND", then open Maps. CommCenter stays off.
 # Also on the phone: GPS wland (phone/wifi/gnss.c, "#### FIRST GPS FIX", /var/local/gps.fix) and Location Services on.
 # Before (2026-11-08): kernel 0158 (sweet90=3: panel at 90 Hz + INTF_1 tear check rescaled + 11.1 ms vsync; 1 = panel only, 2 = vsync only) on 0157 (90 Hz switch) on 0156.
 # 0156 (brightness slider -> panel; backlight service on by default, sweetbl=1 = panel
@@ -26,7 +26,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KERNEL=work/boot/kernel-0165
-TAG=k0165-cc
+TAG=k0165-gpsfeed
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3"

@@ -52,6 +52,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   restarts the fix session every few seconds (FINISHED/STARTED pairs, harmless so far). Logs pulled with a short
   `sweetwifi=0` boot (wland stays off, so nothing is overwritten; it keeps the previous log as wland.log.prev).
   Next: GPS step 2 (feed locationd); later time injection + XTRA for a faster first fix.
+- **GPS step 2 (written, not built/run yet)**: phone/tools/gpsfeed.m (+ gpsfeed-ents.plist:
+  com.apple.locationd.simulation, which locationd checks: "unentitled client attempting to simulate location").
+  Reads /var/local/gps.fix each second; a fix is new only when its utc_ms advances (wland rewrites the file every
+  second with the last fix); good = not 0/0 and status 0, or accuracy 0-5 km. Each new fix: CLSimulationManager
+  clearSimulatedLocations / appendSimulatedLocation: (CLLocation, timestamp = phone clock now) / flush, and
+  startLocationSimulation once; 15 s without a new fix -> stopLocationSimulation. Milestones `#### GPS FEED STARTED`,
+  `#### FIRST LOCATION SENT TO LOCATIOND`, `#### GPS FEED STALE`; never logs coordinates. Parser host-tested.
+  Install: flame-files put out/gpsfeed /var/local/bin/gpsfeed 755 + `hotdogb-launchd-job.py add gpsfeed --keep --
+  /var/local/bin/gpsfeed` (log /var/local/gpsfeed.log). Apps see it as a simulated location (iOS 15+ flags it).
 - ReportCrash log works (oslog-reportcrash): 74 corpses that boot, mostly speech synthesizer AUs (SiriTTS, Kona,
   MacinTalk ~12 each), Spotlight index extensions, driverkitd x4. CommCenter was off.
 

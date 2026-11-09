@@ -8,6 +8,7 @@
 #   netsvc   SystemConfiguration network service for an IF    nettest  DNS, TCP, then HTTPS
 #   oslog    stream the unified log                           prefs    CFPreferences read/write (no defaults)
 #   imgtest  does ImageIO decode real pixels (HEIC: no)       membw    CPU memory bandwidth
+#   gpsfeed  GPS fixes from wland (/var/local/gps.fix) to locationd (CLSimulationManager)
 #   sysapps  install the staged factory apps (-n dry run, -u undo); boot job: tools/hotdogb-sysapps-install.py
 #   expt, exq, runmigrator: one-off probes of ExtensionFoundation and DataMigration (runmigrator needs
 #   com.apple.migrationpluginwrapper's entitlements, not in git)
@@ -30,4 +31,5 @@ for m in expt exq nettest openapp oslog prefs runmigrator; do build $m $m.m -fob
 build imgtest imgtest.m -fobjc-arc -framework Foundation -framework ImageIO -framework CoreGraphics
 build lsreg lsreg.m -fobjc-arc -framework Foundation -framework MobileCoreServices
 build netsvc netsvc.m -fobjc-arc -framework Foundation -framework SystemConfiguration
+build gpsfeed gpsfeed.m -fobjc-arc -framework Foundation -framework CoreLocation
 ls -l out
