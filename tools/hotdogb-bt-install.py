@@ -8,9 +8,10 @@
 
 Firmware: ../hotdogb/fw/bluetooth/image (from the bluetooth_a partition, `flame-files.py part bluetooth_a`;
 not in git) -> /var/local/fw/bt. btd: phone/bt/out/btd (built on the Mac with phone/bt/build.sh).
-`btd serve` (stage 2, KeepAlive): brings the controller up ~20 s after boot and serves bluetoothd through a
-Skywalk user pipe; needs kernel 0163 (the "com.apple.uart.sk.bluetooth" control) and an ADT with
-/arm-io/bluetooth (tools/adt-add-bluetooth.py). Log /var/local/btd.log; idle: /var/local/btd.off.
+`btd serve` (stage 2, KeepAlive): brings the controller up ~20 s after boot and serves bluetoothd through the
+kernel bridge "com.apple.uart.bluetooth" (kernel 0165); bluetoothd's job gets
+BT_HCI_TRANSPORT=H4:POSIX:com.apple.uart.bluetooth,3000000 so it opens that instead of Apple's Skywalk channel.
+Needs an ADT with /arm-io/bluetooth (tools/adt-add-bluetooth.py). Log /var/local/btd.log; idle: /var/local/btd.off.
 The job is replaced on every run of this script. Reboot afterwards.
 """
 import os, subprocess, sys
@@ -21,6 +22,7 @@ FILES = [PY, os.path.join(ROOT, 'tools', 'flame-files.py')]
 JOB = [PY, os.path.join(ROOT, 'tools', 'hotdogb-launchd-job.py')]
 ENV = dict(os.environ, FLAME_FILES_HOST=os.environ.get('FLAME_FILES_HOST', '192.168.7.2'), MSYS_NO_PATHCONV='1')
 FW = os.path.join(ROOT, '..', 'hotdogb', 'fw', 'bluetooth', 'image')
+TRANSPORT = 'H4:POSIX:com.apple.uart.bluetooth,3000000'
 FW_FILES = ['crbtfw21.tlv', 'crnv21.bin', 'crbtfw20.tlv', 'crnv20.bin']
 
 
@@ -54,6 +56,8 @@ def main():
             run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--', '/var/local/bin/btd', 'auto'])
         else:
             run(JOB + ['add', 'btd', '--log', '/var/local/btd.log', '--keep', '--', '/var/local/bin/btd', 'serve'])
+    if '--no-job' not in a and '--scan' not in a:
+        run(JOB + ['env', 'com.apple.bluetoothd', 'BT_HCI_TRANSPORT=' + TRANSPORT])
     print('next: python tools/flame-cmd.py reboot, boot again; see /var/local/btd.log')
 
 

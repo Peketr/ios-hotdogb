@@ -5,6 +5,25 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Bluetooth stage 2b - plain kernel bridge instead of Skywalk (0165, 2026-11-09)
+- k0164-bt-1 (kernel 0164): "bluetoothd skywalk user pipe privilege granted" at 22 s, then "bluetoothd
+  privilege 1002 denied" (PRIV_GLOBAL_PROC_INFO); btd claimed the pipe at 71 s; bluetoothd never connected to
+  com.apple.uart.sk.bluetooth at all; 0 packets.
+- The Galaxy S9 port (Scion-Project PR 171, iOS 16.5, Settings > Bluetooth scanning) needs no Skywalk: bluetoothd's
+  launchd job gets BT_HCI_TRANSPORT=H4:POSIX:com.apple.uart.bluetooth,4000000 (bare "H4" crashes it), and the
+  kernel control "com.apple.uart.bluetooth" is a plain stream socket (termios as sockopts, H4 by read/write; a new
+  connect takes over). Their BlueTool runs first with a MobileGestalt ReleaseType="Vendor" shim and a 2-line boot
+  script (`device -D -S`, `hci info`); not done here yet - try without it first.
+- 0165: sweet_btuart.c is now that control, a bridge: btd connects and claims the chip side (BTUART_CLAIM_CHIP,
+  root); any other connect is the host; bytes are copied between the two. btd (pipe.c) is a socket client now; its
+  10 s stats show the host unit/pid and drops. The Skywalk pipe code and the .sk. control are gone; 0164 stays
+  (harmless).
+- On the phone (already set during k0164-bt-1): `hotdogb-launchd-job.py env com.apple.bluetoothd
+  BT_HCI_TRANSPORT=H4:POSIX:com.apple.uart.bluetooth,3000000` (hotdogb-bt-install.py now does it too).
+- Next: kernel 0165 + new btd (install, THEN reboot), look for "SWEET BTUART: connect unit N (pid <bluetoothd>)",
+  "#### FIRST BLUETOOTH H4 BYTES FROM THE HOST" and the HCI log in /var/local/btd.log. If bluetoothd still waits:
+  BlueTool job + script, then stage 3 (Broadcom vendor commands).
+
 ### HOTDOGB: Bluetooth stage 2 - the pipe to bluetoothd is up, bluetoothd not connected yet (k0163-bt-*, 2026-11-09)
 - How iOS 16 bluetoothd finds its controller (usr/sbin/bluetoothd disassembly): it exits at start unless an
   IOService named "bluetooth" (or marconi-bt) exists; transport from that node: transport-encoding (0 USB, 1 H4,

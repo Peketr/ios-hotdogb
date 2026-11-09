@@ -11,7 +11,7 @@
  *   btd scan [SECS]    bring up, scan SECS each (default 10), power off
  *   btd auto           boot job: skip if /var/local/btd.off, wait 40 s, scan
  *   btd serve          stage 2 boot job (KeepAlive): skip if /var/local/btd.off, wait 40 s, bring up (one retry), then
- *                      serve bluetoothd through the Skywalk user pipe (pipe.c, kernel 0163) and log its HCI
+ *                      serve bluetoothd through the kernel UART bridge (pipe.c, kernel 0165) and log its HCI
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -431,7 +431,7 @@ static void bt_scan(unsigned secs)
 	    n_reports, junk);
 }
 
-/* ---- serve: bluetoothd <-> Skywalk user pipe <-> UART ---- */
+/* ---- serve: bluetoothd <-> kernel bridge <-> UART ---- */
 
 static const char *pkt_name(int t)
 {
@@ -523,7 +523,7 @@ static int bt_serve(void)
 			busy = 1;
 			h4log(&down, buf, n);
 			if (pipe_write(buf, n))
-				LOG("pipe write of %zu bytes failed (bluetoothd not reading?)\n", n);
+				LOG("host write of %zu bytes failed (no host, or it is not reading)\n", n);
 		}
 		if (ms_now() >= next_stat) {
 			next_stat = ms_now() + 10000;
@@ -531,8 +531,11 @@ static int bt_serve(void)
 				LOG("bluetoothd termios speed %llu\n", (unsigned long long)speed);
 				last_speed = speed;
 			}
-			LOG("stats: host> %u packets %u bytes, <ctlr %u packets %u bytes, junk %u/%u\n", up.pkts, up.bytes,
-			    down.pkts, down.bytes, up.junk, down.junk);
+			uint32_t hs[4] = { 0 };
+			pipe_host(hs);
+			LOG("stats: host> %u packets %u bytes, <ctlr %u packets %u bytes, junk %u/%u; host unit %u pid %u, "
+			    "drops %u/%u\n", up.pkts, up.bytes, down.pkts, down.bytes, up.junk, down.junk, hs[0], hs[1], hs[2],
+			    hs[3]);
 		}
 		if (!busy)
 			usleep(300);

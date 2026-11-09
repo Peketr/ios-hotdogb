@@ -199,3 +199,6 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   (tools/adt-add-bluetooth.py: transport-encoding 1 = H4, transport-speed 3000000).
 - 0164 bluetoothd is granted PRIV_SKYWALK_REGISTER_USER_PIPE (its entitlement; by name, the sweet AMFI keeps no
   entitlements): denied, it never opened the H4 transport (k0163-bt-4).
+- 0165 Bluetooth: sweet_btuart.c becomes a plain bridge on "com.apple.uart.bluetooth" (the Galaxy S9 port's
+  route): btd claims the chip side (BTUART_CLAIM_CHIP), bluetoothd (BT_HCI_TRANSPORT=H4:POSIX:...) is the host;
+  bytes are copied between the two sockets. No Skywalk; the .sk. control is gone.

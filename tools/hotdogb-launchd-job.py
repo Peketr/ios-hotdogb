@@ -9,6 +9,8 @@ Run with Windows Python from src while a kernel runs (192.168.7.1 on the phone's
   python tools/hotdogb-launchd-job.py disable LABEL   (any job, e.g. com.apple.fairplayd.H2: kept on the phone in
                                                     /var/local/launchd-disabled/LABEL.plist)
   python tools/hotdogb-launchd-job.py enable LABEL    (puts a disabled job back)
+  python tools/hotdogb-launchd-job.py env LABEL KEY=VALUE | KEY=   (any job: set or drop an environment variable,
+                                                    e.g. com.apple.bluetoothd BT_HCI_TRANSPORT=H4:POSIX:...)
 
 NAME becomes the label org.iosonpixel.NAME; the job runs once at boot as root (RunAtLoad; --keep: launchd
 restarts it when it exits, at most every 10 s), stdout + stderr to FILE (default /var/local/NAME.log). Edits /System/Library/xpc/launchd.plist through the
@@ -38,7 +40,7 @@ def key(name):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ('add', 'remove', 'list', 'disable', 'enable') or (a[0] != 'list' and len(a) < 2):
+    if not a or a[0] not in ('add', 'remove', 'list', 'disable', 'enable', 'env') or (a[0] != 'list' and len(a) < 2):
         sys.exit(__doc__)
     tmp = tempfile.mkdtemp()
     cur = os.path.join(tmp, 'launchd.plist')
@@ -62,6 +64,17 @@ def main():
             plistlib.dump({k: jobs.pop(k)}, f)
         files('mkdir', '/var/local/launchd-disabled', '755', check=False)
         files('put', one, saved, '644')
+    elif a[0] == 'env':
+        k = next((k for k, j in jobs.items() if j.get('Label') == name), None)
+        if k is None or len(a) != 3 or '=' not in a[2]:
+            sys.exit(f'no job labelled {name}' if k is None else __doc__)
+        var, val = a[2].split('=', 1)
+        env = jobs[k].setdefault('EnvironmentVariables', {})
+        if val:
+            env[var] = val
+        else:
+            env.pop(var, None)
+        print(f'{name}: EnvironmentVariables = {env}')
     elif a[0] == 'enable':
         one = os.path.join(tmp, 'one.plist')
         if files('get', saved, one, check=False).returncode:
@@ -99,7 +112,7 @@ def main():
     with open(new, 'wb') as f:
         plistlib.dump(p, f, fmt=plistlib.FMT_BINARY)
     files('put', new, CACHE, '644')
-    label = name if a[0] in ('disable', 'enable') else PREFIX + name
+    label = name if a[0] in ('disable', 'enable', 'env') else PREFIX + name
     print(f'{a[0]} {label}: {len(jobs)} jobs; reboot (python tools/flame-cmd.py reboot) and boot again')
 
 
