@@ -1,0 +1,68 @@
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -146,6 +146,7 @@
+ 	uint64_t fWinBase, fWinSize;    /* this connection's GPU addresses */
+ 	SweetV2BO *fBO;
+ 	uint32_t fBOCap;
++	uint32_t fBONext;       /* 0171: where the search for a free slot starts (after the last one handed out) */
+ 	uint64_t *fPageBuf;
+ 	uint64_t fEpoch, fFaults;       /* GPU resets seen; those that lost this client's work */
+ 	uint32_t fLosses;               /* 0151: resets that lost its work, forgiven or not */
+@@ -536,13 +537,32 @@
+ 	return handle >= 1 && handle <= fBOCap && fBO[handle - 1].md != NULL ? &fBO[handle - 1] : NULL;
+ }
+ 
+-/* With fLock held: the first free slot (the table doubles when full) */
++/*
++ * With fLock held: the next free slot after the last one handed out (the table doubles when full).
++ *
++ * 0171: not the first free slot. Turnip keeps its BO structs in an array indexed by handle and zeroes a
++ * struct only after BoFree returned. The first free slot handed the handle just freed to the next BoAlloc,
++ * so another thread could fill that struct for its new BO before the freeing thread zeroed it: a live
++ * command buffer with iova 0 and no CPU address, and its next submit carries "iova" = the low 32 bits of
++ * a CPU pointer (k0170-gov-1109-2238 at 534 s: 0x15570000; k0165-bt-1/-11, k0165-gps: the same shape).
++ * The kernel refuses it, Turnip calls the device lost and backboardd keeps swapping its last two frames.
++ * Going round the table, a freed handle comes back only after every other free slot was used.
++ */
+ IOReturn
+ SweetAcceleratorUserClient::v2NewSlot(IOMemoryDescriptor *md, uint64_t bytes, bool imported, uint64_t *handle)
+ {
+-	uint32_t i = 0;
+-	while (i < fBOCap && fBO[i].md != NULL) {
+-		i++;
++	static bool said;
++	if (!said) {
++		said = true;
++		IOLog("#### GPU BUFFER HANDLES ROTATE (NO IMMEDIATE REUSE)\n");
++	}
++	uint32_t i = fBOCap;
++	for (uint32_t n = 0; n < fBOCap; n++) {
++		uint32_t s = (fBONext + n) % fBOCap;
++		if (fBO[s].md == NULL) {
++			i = s;
++			break;
++		}
+ 	}
+ 	if (i == fBOCap) {
+ 		if (fBOCap >= SWEET_V2_MAX_BOS) {
+@@ -561,6 +581,7 @@
+ 	fBO[i].bytes = bytes;
+ 	fBO[i].iova = 0;
+ 	fBO[i].imported = imported;
++	fBONext = (i + 1) % fBOCap;
+ 	*handle = i + 1;
+ 	return kIOReturnSuccess;
+ }
+@@ -867,6 +888,12 @@
+ 					    fName, i, rq->buffer_count, b->iova, b->bytes,
+ 					    (b->bytes & 3) ? "not dwords" : b->bytes / 4 > 0xfffff ? "over 1M dwords" : "outside the window",
+ 					    (uint64_t)fWinBase, (uint64_t)fWinSize);
++					/* 0171: what the kernel knows about that IB's buffer (a live one = Turnip lost its struct) */
++					IOLockLock(fLock);
++					SweetV2BO *rbo = v2Find(b->handle);
++					IOLog("SWEET MTL: v2 %s refused IB: handle %llu is %s, kernel iova %#llx bytes %#llx\n", fName,
++					    b->handle, rbo ? "live" : "not a buffer", rbo ? rbo->iova : 0ULL, rbo ? rbo->bytes : 0ULL);
++					IOLockUnlock(fLock);
+ 				}
+ 				return kIOReturnBadArgument;
+ 			}

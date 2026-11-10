@@ -216,3 +216,15 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   (SID 2 0x1042 bit 0; the bootloader leaves it 0) through the apps-owned arbiter channel only, read back. SweetBattery
   turns charging on at 3-43 C gauge battery temperature, off above 45 C / below 0 C / without gauge data; FCC 500 mA
   and FV left as found. `sweetcharge=0` = never write.
+- 0170 hotdogb heat: CPU governor (sweet_cpufreq.c: every 40 ms, per OSM cluster the busiest CPU's load from its idle
+  time picks the lowest frequency leaving <= 70% load; `sweetcpugov=0` = fixed top as 0086) and GPU governor
+  (sweet_gpu.c: every 100 ms, GMU perf vote 257 MHz..`sweetgpufreq` from the GPU time of landed submits;
+  `sweetgpugov=0` = fixed as 0107). HFI ack poll in 100 us steps.
+- 0171 hotdogb display freeze (two frames blinking, OS alive): v2 BO handles go round the table instead of the
+  first free slot, so a handle just freed is not handed straight to the next BoAlloc (Turnip zeroes its
+  handle-indexed BO struct after BoFree: a race that wipes a live BO). A refused IB also logs what the kernel
+  knows about its handle ("refused IB: handle N is live/not a buffer, kernel iova ...").
+- 0172 hotdogb CPU top: sweet_sample.c takes two snapshots of every thread's CPU time (sweet_top_snapshot in
+  osfmk/kern/exception.c, global thread list) and logs the busiest processes and threads with user/system split and
+  per-core load ("#### CPU TOP ..." / "TOP proc" / "TOP thread" / "TOP --- done"). Every `sweettop` seconds (default
+  60, 0 = off) over 5 s; on demand `flame-cmd.py top [SECS] [N]`.

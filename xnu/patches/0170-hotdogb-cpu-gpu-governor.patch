@@ -1,0 +1,491 @@
+diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -568,7 +568,7 @@
+ 	wr32(h + 44, w);
+ 	wr32(GMU_REG(GMU_H2G_SET), 1);
+ 
+-	for (int t = 0; t < 1000; t++) {
++	for (int t = 0; t < 10000; t++) {	/* 1 s; 0170: 100 us steps (run-time votes hold the GPU lock) */
+ 		if (rd32(GMU_REG(GMU_G2H_INFO)) & 1) {
+ 			wr32(GMU_REG(GMU_G2H_CLR), 1);
+ 			uint64_t rh = QHDR(g, HFI_Q_RESP);
+@@ -585,7 +585,7 @@
+ 					return (int)buf[2];
+ 			}
+ 		}
+-		a6_delay_ms(1);
++		a6_delay_us(100);
+ 	}
+ 	a6_log("hfi: msg %u seq %u: no ack (info %x)\n", id, seq, rd32(GMU_REG(GMU_G2H_INFO)));
+ 	return -1;
+@@ -630,7 +630,10 @@
+ 	msg[1] = 1;
+ 	msg[2] = lvl;			/* index into gpu_khz */
+ 	msg[3] = 0;
+-	rc |= hfi_send(g, 30, msg, 4);
++	int vote = hfi_send(g, 30, msg, 4);
++	if (!vote)
++		g->perf_cur = lvl;
++	rc |= vote;
+ 	a6_log("hfi: perf/bw tables, core fw start, start, perf vote %u MHz -> %d\n", gpu_khz[lvl] / 1000, rc);
+ 
+ 	wr32(GMU_REG(GMU_H2G_SET), 1u << 30);	/* OOB GPU_SET */
+@@ -644,6 +647,23 @@
+ 	return 0;
+ }
+ 
++/* 0170: the power-up perf vote again with another level, for the governor in sweet_gpu.c */
++int a6_set_perf(struct a6_gpu *g, uint32_t lvl)
++{
++	uint32_t msg[4] = { 0, 1, lvl, 0 };
++	if (lvl < 1 || lvl > 5)
++		return -1;
++	int rc = hfi_send(g, 30, msg, 4);
++	if (!rc)
++		g->perf_cur = lvl;
++	return rc;
++}
++
++uint32_t a6_perf_khz(uint32_t lvl)
++{
++	return lvl <= 5 ? gpu_khz[lvl] : 0;
++}
++
+ /* ---- zap shader through TrustZone PAS ---- */
+ 
+ #define PAS_GPU		13
+diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -69,8 +69,13 @@
+ 	uint32_t hfi_seq;
+ 	uint32_t pt_next;		/* next free table in the arena */
+ 	uint32_t perf_level;		/* GMU perf vote: 1 (257 MHz) .. 5 (585 MHz); 0 = 1 */
++	uint32_t perf_cur;		/* 0170: the level the GMU last acked (0 = none yet) */
+ };
+ 
++/* 0170: vote GPU frequency level 1..5 at run time (HFI GX_BW_PERF_VOTE, as at power-up); 0 = acked */
++int a6_set_perf(struct a6_gpu *g, uint32_t lvl);
++uint32_t a6_perf_khz(uint32_t lvl);
++
+ /* ---- environment ---- */
+ uint32_t a6_rd(uint64_t pa);
+ void a6_wr(uint64_t pa, uint32_t v);
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+--- a/bsd/dev/sweet_cpufreq.c
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -1,20 +1,35 @@
+ /*
+- * flame (SM8150) CPU frequency: the OSM hardware DCVS keeps a frequency
++ * flame/hotdogb (SM8150) CPU frequency: the OSM hardware DCVS keeps a frequency
+  * table per cluster and takes a desired table index per cluster; voltage
+  * (CPR) and thermal limits (LMh) stay in hardware. ABL leaves the clusters
+  * slow and nothing under XNU raises them. Linux: drivers/clk/qcom/
+  * clk-cpu-osm.c (msm-4.14), bases from the live DT qcom,cpucc node.
+  *
+- * Boot-arg flamecpufreq: 0 leave as is, 1 (default) highest all-core
+- * frequency, N > 1 the highest entry at or below N MHz.
++ * 0086 pinned every cluster at its top all-core frequency. 0170 adds a load
++ * governor: every 40 ms a kernel thread takes each CPU's idle time over the
++ * last interval, uses the busiest CPU of a cluster as the cluster's load and
++ * picks the lowest table entry that keeps that load at or below 70% (the
++ * load is measured at the current frequency, so the wanted frequency is
++ * current * load / 70). Up at once (straight to the top at 90% or more),
++ * down only after three intervals in a row asked for less.
++ *
++ * Boot-args: flamecpufreq: 0 leave everything as ABL set it (no governor),
++ * 1 (default) the full table, N > 1 nothing above N MHz.
++ * sweetcpugov: 1 (default) governor, 0 fixed at the top entry as in 0086.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern bool sweet_processor_idle_time(int cpu, uint64_t *idle_mach);    /* osfmk/kern/processor.c */
++extern int hz;
+ void sweet_cpufreq_init(void);
+ 
+ #define OSM_FREQ_REG    0x110u          /* + 32 * index */
+@@ -23,14 +38,29 @@
+ #define OSM_DESIRED     0x920u          /* + 4 * core in cluster; core 0 drives the policy */
+ #define OSM_XO_KHZ      19200u
+ 
+-static const struct {
+-	const char *name;
++#define GOV_TICK_MS     40u
++#define GOV_TARGET      70u             /* % load the chosen frequency should leave */
++#define GOV_JUMP        90u             /* % load that goes straight to the top */
++#define GOV_DOWN_TICKS  3u
++#define GOV_REPORT_S    30u
++#define GOV_CPUS        8
++
++static struct osm_cluster {
++	const char *name, *tag;
+ 	uint32_t pa;
++	uint8_t cpu0, ncpu;
++	vm_offset_t base;
++	uint8_t idx[OSM_ROWS];          /* usable entries, rising frequency: table index */
++	uint32_t khz[OSM_ROWS];
++	unsigned n, cur, down;
++	uint32_t switches, load;
++	uint64_t khz_ticks;
+ } osm_clusters[] = {
+-	{"pwrcl (A55 x4)", 0x18323000u},
+-	{"perfcl (A76 x3)", 0x18325800u},
+-	{"perfpcl (A76 prime)", 0x18327800u},
++	{.name = "pwrcl (A55 x4)", .tag = "pwrcl", .pa = 0x18323000u, .cpu0 = 0, .ncpu = 4},
++	{.name = "perfcl (A76 x3)", .tag = "perfcl", .pa = 0x18325800u, .cpu0 = 4, .ncpu = 3},
++	{.name = "perfpcl (A76 prime)", .tag = "prime", .pa = 0x18327800u, .cpu0 = 7, .ncpu = 1},
+ };
++#define OSM_NCLUSTERS   (sizeof(osm_clusters) / sizeof(osm_clusters[0]))
+ 
+ static uint32_t
+ osm_rd(vm_offset_t base, uint32_t off)
+@@ -40,30 +70,120 @@
+ 	return v;
+ }
+ 
++static void
++osm_set(struct osm_cluster *c, unsigned pos)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(c->base + OSM_DESIRED) = c->idx[pos];
++	__asm__ volatile("dsb osh" ::: "memory");
++	c->cur = pos;
++	c->switches++;
++}
++
++static void
++osm_gov_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	static int chan;
++	uint64_t idle[GOV_CPUS] = { 0 }, last = mach_absolute_time(), report = last;
++	int ticks = (int)(GOV_TICK_MS * (unsigned)hz / 1000u);
++	unsigned nticks = 0;
++	for (int cpu = 0; cpu < GOV_CPUS; ++cpu) {
++		(void)sweet_processor_idle_time(cpu, &idle[cpu]);
++	}
++	printf("#### CPU GOVERNOR RUNNING (every %u ms, aims at %u%% load, top at %u%%)\n", GOV_TICK_MS,
++	    GOV_TARGET, GOV_JUMP);
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "cpugov", ticks > 0 ? ticks : 1);
++		uint64_t now = mach_absolute_time(), dt = now - last, ns;
++		if (dt == 0) {
++			continue;
++		}
++		last = now;
++		nticks++;
++		for (unsigned i = 0; i < OSM_NCLUSTERS; ++i) {
++			struct osm_cluster *c = &osm_clusters[i];
++			uint32_t load = 0;
++			for (int cpu = c->cpu0; cpu < c->cpu0 + c->ncpu; ++cpu) {
++				uint64_t t = 0;
++				if (!sweet_processor_idle_time(cpu, &t)) {
++					continue;
++				}
++				uint64_t d = t - idle[cpu];
++				idle[cpu] = t;
++				uint32_t l = d >= dt ? 0 : (uint32_t)(100 - d * 100 / dt);
++				if (l > load) {
++					load = l;
++				}
++			}
++			c->load = load;
++			if (c->n < 2) {
++				continue;
++			}
++			c->khz_ticks += c->khz[c->cur];
++			unsigned want = c->n - 1;
++			if (load < GOV_JUMP) {
++				uint64_t khz = (uint64_t)c->khz[c->cur] * load / GOV_TARGET;
++				for (want = 0; want < c->n - 1 && c->khz[want] < khz; ++want) {
++				}
++			}
++			if (want > c->cur) {
++				osm_set(c, want);
++				c->down = 0;
++			} else if (want < c->cur) {
++				if (++c->down >= GOV_DOWN_TICKS) {
++					osm_set(c, want);
++					c->down = 0;
++				}
++			} else {
++				c->down = 0;
++			}
++		}
++		absolutetime_to_nanoseconds(now - report, &ns);
++		if (ns >= GOV_REPORT_S * 1000000000ULL) {
++			char line[240];
++			unsigned len = 0;
++			for (unsigned i = 0; i < OSM_NCLUSTERS && len < sizeof(line) - 1; ++i) {
++				struct osm_cluster *c = &osm_clusters[i];
++				if (c->n < 2) {
++					continue;
++				}
++				len += snprintf(line + len, sizeof(line) - len, " %s avg %llu now %u MHz load %u%% (%u changes)",
++				    c->tag, c->khz_ticks / nticks / 1000, c->khz[c->cur] / 1000, c->load, c->switches);
++				c->khz_ticks = 0;
++				c->switches = 0;
++			}
++			printf("SWEET CPUFREQ: %us:%s\n", GOV_REPORT_S, line);
++			report = now;
++			nticks = 0;
++		}
++	}
++}
++
+ void
+ sweet_cpufreq_init(void)
+ {
+-	unsigned want = 1;
++	unsigned want = 1, gov = 1, usable = 0;
+ 	(void)PE_parse_boot_argn("flamecpufreq", &want, sizeof(want));
+-	for (unsigned c = 0; c < sizeof(osm_clusters) / sizeof(osm_clusters[0]); ++c) {
+-		vm_offset_t base = ml_io_map(osm_clusters[c].pa, 0x1000);
+-		if (!base) {
+-			printf("SWEET CPUFREQ: %s: map failed\n", osm_clusters[c].name);
++	(void)PE_parse_boot_argn("sweetcpugov", &gov, sizeof(gov));
++	for (unsigned ci = 0; ci < OSM_NCLUSTERS; ++ci) {
++		struct osm_cluster *c = &osm_clusters[ci];
++		c->base = ml_io_map(c->pa, 0x1000);
++		if (!c->base) {
++			printf("SWEET CPUFREQ: %s: map failed\n", c->name);
+ 			continue;
+ 		}
+-		uint32_t cur = osm_rd(base, OSM_DESIRED);
+-		unsigned best = cur, best_khz = 0, prev_khz = 0, n = 0;
++		uint32_t cur = osm_rd(c->base, OSM_DESIRED);
++		unsigned prev_khz = 0;
+ 		char line[256];
+ 		unsigned len = 0;
+ 		for (unsigned i = 0; i < OSM_ROWS; ++i) {
+-			uint32_t data = osm_rd(base, OSM_FREQ_REG + i * OSM_ROW);
++			uint32_t data = osm_rd(c->base, OSM_FREQ_REG + i * OSM_ROW);
+ 			unsigned src = data >> 30, lval = data & 0xffu, cores = (data >> 16) & 7u;
+ 			unsigned khz = src ? OSM_XO_KHZ * lval : 300000u;
+ 			if (i > 0 && khz == prev_khz) {
+ 				break; /* a repeated frequency ends the table */
+ 			}
+ 			prev_khz = khz;
+-			n = i + 1;
+ 			if (len < sizeof(line) - 16) {
+ 				len += snprintf(line + len, sizeof(line) - len, " %u%s", khz / 1000,
+ 				    cores == 1 ? "*" : "");
+@@ -72,21 +192,32 @@
+ 			if (cores == 1 || (want > 1 && khz / 1000 > want)) {
+ 				continue;
+ 			}
+-			if (khz > best_khz) {
+-				best_khz = khz;
+-				best = i;
++			if (c->n == 0 || khz > c->khz[c->n - 1]) {
++				c->idx[c->n] = (uint8_t)i;
++				c->khz[c->n] = khz;
++				c->n++;
+ 			}
+ 		}
+-		printf("SWEET CPUFREQ: %s table (MHz, *=1-core boost):%s\n", osm_clusters[c].name, line);
+-		if (want == 0 || best_khz == 0 || best >= n) {
+-			printf("SWEET CPUFREQ: %s index %u kept\n", osm_clusters[c].name, cur);
++		printf("SWEET CPUFREQ: %s table (MHz, *=1-core boost):%s\n", c->name, line);
++		if (want == 0 || c->n == 0) {
++			printf("SWEET CPUFREQ: %s index %u kept\n", c->name, cur);
++			c->n = 0;
+ 			continue;
+ 		}
+-		__asm__ volatile("dmb oshst" ::: "memory");
+-		*(volatile uint32_t *)(base + OSM_DESIRED) = best;
+-		__asm__ volatile("dsb osh" ::: "memory");
++		osm_set(c, c->n - 1);
++		c->switches = 0;
++		usable += c->n > 1;
+ 		printf("SWEET CPUFREQ: %s index %u -> %u (%u MHz), reads back %u\n",
+-		    osm_clusters[c].name, cur, best, best_khz / 1000, osm_rd(base, OSM_DESIRED));
++		    c->name, cur, c->idx[c->cur], c->khz[c->cur] / 1000, osm_rd(c->base, OSM_DESIRED));
++	}
++	if (!gov || !usable) {
++		printf("SWEET CPUFREQ: no governor (%s): frequencies stay as set\n",
++		    gov ? "no cluster with a table to choose from" : "sweetcpugov=0");
++		return;
++	}
++	thread_t thread;
++	if (kernel_thread_start(osm_gov_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
+ 	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -252,6 +252,9 @@
+ 	}
+ }
+ 
++static uint64_t ggov_busy;      /* 0170: GPU ticks (19.2 MHz) of all landed submits, for the governor */
++static void gpu_gov_start(void);
++
+ static void
+ gpu_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+@@ -267,6 +270,9 @@
+ 	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+ 	a6_log("bring-up %s in %llu ms (pool 0x%llx)\n", rc ? "FAILED" : "done, GPU ready", ns / 1000000,
+ 	    gpu.pool_pa);
++	if (!rc) {
++		gpu_gov_start();
++	}
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+@@ -419,6 +425,7 @@
+ 		gstat_own[o].busy += t;
+ 		gstat_n++;
+ 		gstat_busy += t;
++		ggov_busy += t;
+ 		uint64_t us = t * 10 / 192;
+ 		gstat_hist[us < 1000 ? 0 : us < 4000 ? 1 : us < 8000 ? 2 : us < 16000 ? 3 : 4]++;
+ 		if (t > gstat_longest) {
+@@ -539,6 +546,108 @@
+ 	progress_abs = mach_absolute_time();
+ }
+ 
++/*
++ * ---- 0170: GPU frequency governor ----
++ * 0107 voted one level (sweetgpufreq, default 4 = 499 MHz) at power-up and kept it. Now a thread looks every
++ * 100 ms at the GPU time of the submits that landed in the interval (their CP_ALWAYS_ON stamps) and votes the
++ * lowest level 1..sweetgpufreq that would have kept the GPU at most 40% busy (load is measured at the current
++ * frequency: wanted = current * load / 40); 50% or more goes straight to the top. Up at once, down only after
++ * five intervals in a row asked for less and nothing is queued. The first vote the GMU does not ack stops the
++ * governor (the level stays). Boot-arg sweetgpugov=0: fixed level as before.
++ */
++#define GGOV_TICK_MS    100u
++#define GGOV_TARGET     40u
++#define GGOV_JUMP       50u
++#define GGOV_DOWN_TICKS 5u
++#define GGOV_REPORT_S   30u
++
++static void
++gpu_gov_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	static int chan;
++	extern int hz;
++	uint32_t top = gpu.perf_level >= 1 && gpu.perf_level <= 5 ? gpu.perf_level : 1;
++	uint64_t last = mach_absolute_time(), report = last, busy0 = 0, khz_sum = 0;
++	unsigned down = 0, changes = 0, nticks = 0, peak = 0;
++	int ticks = (int)(GGOV_TICK_MS * (unsigned)hz / 1000u);
++	a6_log("#### GPU GOVERNOR RUNNING (every %u ms, %u-%u MHz, aims at %u%% load)\n", GGOV_TICK_MS,
++	    a6_perf_khz(1) / 1000, a6_perf_khz(top) / 1000, GGOV_TARGET);
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "gpugov", ticks > 0 ? ticks : 1);
++		lck_mtx_lock(&sweet_gpu_lock);
++		uint32_t cur = gpu.perf_cur;
++		if (!gpu_ready || cur < 1 || cur > 5) {
++			lck_mtx_unlock(&sweet_gpu_lock);
++			continue;
++		}
++		gpu_stats_locked();
++		uint64_t now = mach_absolute_time(), dt, ns;
++		absolutetime_to_nanoseconds(now - last, &dt);
++		last = now;
++		uint64_t busy_ns = (ggov_busy - busy0) * 10000 / 192;
++		busy0 = ggov_busy;
++		unsigned load = dt == 0 || busy_ns >= dt ? 100 : (unsigned)(busy_ns * 100 / dt);
++		bool queued = (int32_t)(gpu.fence - a6_fence_read(&gpu)) > 0;
++		uint32_t want = top;
++		if (load < GGOV_JUMP) {
++			uint64_t khz = (uint64_t)a6_perf_khz(cur) * load / GGOV_TARGET;
++			for (want = 1; want < top && a6_perf_khz(want) < khz; want++) {
++			}
++		}
++		if (cur > top) {
++			want = top;
++			down = GGOV_DOWN_TICKS;
++		}
++		if (want < cur && (queued || ++down < GGOV_DOWN_TICKS)) {
++			want = cur;
++		} else if (want >= cur) {
++			down = 0;
++		}
++		nticks++;
++		khz_sum += a6_perf_khz(cur);
++		if (load > peak) {
++			peak = load;
++		}
++		int rc = 0;
++		if (want != cur) {
++			rc = a6_set_perf(&gpu, want);
++			down = 0;
++			changes++;
++		}
++		lck_mtx_unlock(&sweet_gpu_lock);
++		if (rc) {
++			a6_log("#### GPU GOVERNOR STOPPED: vote for %u MHz not acked (%d), staying at %u MHz\n",
++			    a6_perf_khz(want) / 1000, rc, a6_perf_khz(cur) / 1000);
++			break;
++		}
++		absolutetime_to_nanoseconds(now - report, &ns);
++		if (ns >= GGOV_REPORT_S * 1000000000ULL) {
++			a6_log("gov %us: avg %llu MHz, now %u MHz, %u changes, busiest 100 ms %u%%\n", GGOV_REPORT_S,
++			    khz_sum / nticks / 1000, a6_perf_khz(gpu.perf_cur) / 1000, changes, peak);
++			report = now;
++			khz_sum = 0;
++			nticks = changes = peak = 0;
++		}
++	}
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++gpu_gov_start(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetgpugov", &on, sizeof(on));
++	if (!on) {
++		a6_log("no governor (sweetgpugov=0): fixed at %u MHz\n", a6_perf_khz(gpu.perf_cur) / 1000);
++		return;
++	}
++	thread_t thread;
++	if (kernel_thread_start(gpu_gov_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* ---- the panel ---- */
+ 
+ #define MDP             0x0ae00000ULL
+diff --git a/osfmk/kern/processor.c b/osfmk/kern/processor.c
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -663,6 +663,23 @@
+ 	ticks[CPU_STATE_IDLE] += (uint32_t)(idle_time / hz_tick_interval);
+ }
+ 
++/*
++ * 0170: idle time (mach units, up to now) of a logical CPU, for the CPU frequency governor in
++ * bsd/dev/sweet_cpufreq.c. false: no such processor.
++ */
++bool sweet_processor_idle_time(int cpu, uint64_t *idle_mach);
++
++bool
++sweet_processor_idle_time(int cpu, uint64_t *idle_mach)
++{
++	if (cpu < 0 || cpu >= MAX_SCHED_CPUS || processor_array[cpu] == PROCESSOR_NULL) {
++		return false;
++	}
++	struct recount_usage usage = { 0 };
++	recount_processor_usage(&processor_array[cpu]->pr_recount, &usage, idle_mach);
++	return true;
++}
++
+ kern_return_t
+ processor_info(
+ 	processor_t     processor,

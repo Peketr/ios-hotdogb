@@ -1,0 +1,312 @@
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -130,6 +130,222 @@
+ 	}
+ }
+ 
++/*
++ * ---- 0172: CPU top ----
++ * Who keeps the cores busy: two snapshots of every thread's CPU time (sweet_top_snapshot, osfmk/kern/
++ * exception.c) SECS apart, and the difference as a report in the log:
++ *
++ *   #### CPU TOP: 5000 ms, 1234 threads, 3.42 cores busy; per cpu %: 100 12 3 5 40 2 1 99
++ *   TOP proc backboardd[57] 98.2% (user 20.1 sys 78.1) 3 threads
++ *   TOP thread backboardd[57] tid 1234 "name" 97.0% (user 19.0 sys 78.0) pri 47
++ *   TOP thread kernel_task[0] tid 300 "" 99.0% (user 0.0 sys 99.0) pri 81 cont 0xfffffe0007123456
++ *   TOP --- done
++ *
++ * 100% = one core for the whole interval. "per cpu" is each core's time out of idle (from the scheduler's
++ * idle accounting, the governor's source); the thread times are what the threads were charged. cont = where
++ * a blocked kernel thread resumes (unslid: look it up in the kernel file).
++ * On demand: "top [SECS] [N]" on the command server (defaults 5 s, 15 lines each). By itself: every sweettop
++ * seconds (boot-arg, default 60, 0 = never), 5 s long. Then "sample NAME 200 20" shows where a busy user
++ * process is (tools/sweet-profile.py).
++ */
++#include <kern/kalloc.h>
++#include <kern/clock.h>
++
++struct sweet_top_ent {
++	uint64_t tid, user, sys, cont;
++	int pid, pri;
++	char name[24];
++};
++extern unsigned sweet_top_snapshot(struct sweet_top_ent *v, unsigned max);
++extern bool sweet_processor_idle_time(int cpu, uint64_t *idle_mach);    /* osfmk/kern/processor.c */
++void sweet_top_request(int secs, int n);
++
++#define TOP_MAX         6000u
++#define TOP_PROCS       128u
++#define TOP_CPUS        8
++static int sweet_top_busy, sweet_top_secs, sweet_top_n;
++
++static void
++sweet_top_pname(int pid, char *name, size_t len)
++{
++	name[0] = 0;
++	if (pid == 0) {
++		strlcpy(name, "kernel_task", len);
++	} else if (pid > 0) {
++		proc_name(pid, name, (int)len);
++	}
++	if (name[0] == 0) {
++		strlcpy(name, pid == -2 ? "(other processes)" : "(gone)", len);
++	}
++}
++
++/* d out of dt as a percentage with one decimal: whole part, tenth */
++#define TOP_PCT(d, dt)  (unsigned)((d) * 1000 / (dt) / 10), (unsigned)((d) * 1000 / (dt) % 10)
++
++static void
++sweet_top_run(int secs, int lines)
++{
++	static int chan;
++	static struct { int pid; unsigned threads; uint64_t user, sys; } procs[TOP_PROCS + 1];
++	struct sweet_top_ent *a = kalloc_data(TOP_MAX * sizeof(*a), Z_WAITOK);
++	struct sweet_top_ent *b = kalloc_data(TOP_MAX * sizeof(*b), Z_WAITOK);
++	uint64_t idle0[TOP_CPUS] = { 0 }, idle1[TOP_CPUS] = { 0 };
++	bool cpu_ok[TOP_CPUS];
++	if (a == NULL || b == NULL) {
++		printf("SWEET CMD: top: no memory\n");
++		goto out;
++	}
++	unsigned na = sweet_top_snapshot(a, TOP_MAX);
++	uint64_t t0 = mach_absolute_time();
++	for (int c = 0; c < TOP_CPUS; c++) {
++		cpu_ok[c] = sweet_processor_idle_time(c, &idle0[c]);
++	}
++	(void)tsleep(&chan, PZERO, "sweettop", secs * hz);
++	unsigned nb = sweet_top_snapshot(b, TOP_MAX);
++	uint64_t dt = mach_absolute_time() - t0, ms, total = 0;
++	for (int c = 0; c < TOP_CPUS; c++) {
++		(void)sweet_processor_idle_time(c, &idle1[c]);
++	}
++	absolutetime_to_nanoseconds(dt, &ms);
++	ms /= 1000000;
++	if (dt == 0) {
++		goto out;
++	}
++	unsigned sa = na < TOP_MAX ? na : TOP_MAX, sb = nb < TOP_MAX ? nb : TOP_MAX;
++	bzero(procs, sizeof(procs));
++	/* b becomes the difference; a thread that is new counts with all its time */
++	for (unsigned i = 0; i < sb; i++) {
++		for (unsigned k = 0; k < sa; k++) {
++			unsigned j = (i + k) % sa;      /* the list order rarely changes: found at once */
++			if (a[j].tid == b[i].tid) {
++				b[i].user -= b[i].user < a[j].user ? b[i].user : a[j].user;
++				b[i].sys -= b[i].sys < a[j].sys ? b[i].sys : a[j].sys;
++				break;
++			}
++		}
++		if (b[i].user + b[i].sys == 0) {
++			continue;
++		}
++		total += b[i].user + b[i].sys;
++		unsigned p = 0;
++		while (p < TOP_PROCS && procs[p].threads != 0 && procs[p].pid != b[i].pid) {
++			p++;
++		}
++		procs[p].pid = p < TOP_PROCS ? b[i].pid : -2;
++		procs[p].threads++;
++		procs[p].user += b[i].user;
++		procs[p].sys += b[i].sys;
++	}
++	char cpus[80] = "", pname[32];
++	unsigned len = 0;
++	for (int c = 0; c < TOP_CPUS && len < sizeof(cpus) - 8; c++) {
++		uint64_t d = idle1[c] - idle0[c];
++		if (!cpu_ok[c]) {
++			len += snprintf(cpus + len, sizeof(cpus) - len, " -");
++		} else {
++			len += snprintf(cpus + len, sizeof(cpus) - len, " %u", d >= dt ? 0 : (unsigned)(100 - d * 100 / dt));
++		}
++	}
++	printf("#### CPU TOP: %llu ms, %u threads%s, %u.%02u cores busy; per cpu %%:%s\n", ms, nb,
++	    nb > TOP_MAX ? " (not all looked at)" : "", (unsigned)(total / dt), (unsigned)(total * 100 / dt % 100), cpus);
++	for (int l = 0; l < lines; l++) {
++		unsigned best = 0;
++		for (unsigned p = 1; p <= TOP_PROCS; p++) {
++			if (procs[p].user + procs[p].sys > procs[best].user + procs[best].sys) {
++				best = p;
++			}
++		}
++		uint64_t d = procs[best].user + procs[best].sys;
++		if (d * 1000 / dt == 0) {
++			break;          /* under 0.1% */
++		}
++		sweet_top_pname(procs[best].pid, pname, sizeof(pname));
++		printf("TOP proc %s[%d] %u.%u%% (user %u.%u sys %u.%u) %u threads\n", pname, procs[best].pid, TOP_PCT(d, dt),
++		    TOP_PCT(procs[best].user, dt), TOP_PCT(procs[best].sys, dt), procs[best].threads);
++		procs[best].user = procs[best].sys = 0;
++	}
++	for (int l = 0; l < lines; l++) {
++		unsigned best = 0;
++		for (unsigned i = 1; i < sb; i++) {
++			if (b[i].user + b[i].sys > b[best].user + b[best].sys) {
++				best = i;
++			}
++		}
++		uint64_t d = sb ? b[best].user + b[best].sys : 0;
++		if (d * 1000 / dt == 0) {
++			break;
++		}
++		char cont[40] = "";
++		if (b[best].cont) {
++			snprintf(cont, sizeof(cont), " cont 0x%llx", b[best].cont);
++		}
++		sweet_top_pname(b[best].pid, pname, sizeof(pname));
++		printf("TOP thread %s[%d] tid %llu \"%s\" %u.%u%% (user %u.%u sys %u.%u) pri %d%s\n", pname, b[best].pid,
++		    b[best].tid, b[best].name, TOP_PCT(d, dt), TOP_PCT(b[best].user, dt), TOP_PCT(b[best].sys, dt),
++		    b[best].pri, cont);
++		b[best].user = b[best].sys = 0;
++	}
++	printf("TOP --- done\n");
++out:
++	if (a != NULL) {
++		kfree_data(a, TOP_MAX * sizeof(*a));
++	}
++	if (b != NULL) {
++		kfree_data(b, TOP_MAX * sizeof(*b));
++	}
++}
++
++static void
++sweet_top_once_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	sweet_top_run(sweet_top_secs, sweet_top_n);
++	sweet_top_busy = 0;
++}
++
++/* "top [SECS] [N]" from the USB command server (bsd/dev/sweet_usb.c) */
++void
++sweet_top_request(int secs, int n)
++{
++	thread_t thread;
++	if (sweet_top_busy) {
++		printf("SWEET CMD: top already running\n");
++		return;
++	}
++	sweet_top_busy = 1;
++	sweet_top_secs = (secs <= 0 || secs > 120) ? 5 : secs;
++	sweet_top_n = (n <= 0 || n > 60) ? 15 : n;
++	printf("SWEET CMD: top over %d s, %d lines\n", sweet_top_secs, sweet_top_n);
++	if (kernel_thread_start(sweet_top_once_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		sweet_top_busy = 0;
++	}
++}
++
++static void
++sweet_top_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static int chan;
++	unsigned period = 60;
++	(void)PE_parse_boot_argn("sweettop", &period, sizeof(period));
++	if (period == 0) {
++		return;
++	}
++	if (period < 10) {
++		period = 10;
++	}
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "sweettopw", (int)(period - 5) * hz);
++		if (!sweet_top_busy) {
++			sweet_top_busy = 1;
++			sweet_top_run(5, 12);
++			sweet_top_busy = 0;
++		} else {
++			(void)tsleep(&chan, PZERO, "sweettopw", 5 * hz);
++		}
++	}
++}
++
+ void
+ sweet_sample_start(void)
+ {
+@@ -137,4 +353,7 @@
+ 	if (kernel_thread_start(sweet_sample_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	if (kernel_thread_start(sweet_top_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
+ }
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1251,6 +1251,14 @@
+ 			sweet_sample_burst(names, count, ms);
+ 			continue;
+ 		}
++		if (strncmp(cmd, "top", 3) == 0 && (cmd[3] == 0 || cmd[3] == ' ' || cmd[3] == '\n')) {
++			/* 0172: "top [SECS] [N]": who used the CPUs over SECS seconds (bsd/dev/sweet_sample.c) */
++			extern void sweet_top_request(int secs, int n);
++			const char *p = cmd + 3;
++			int secs = ud_num(&p), n = ud_num(&p);
++			sweet_top_request(secs, n);
++			continue;
++		}
+ 		if (strncmp(cmd, "rtc", 3) == 0) {
+ 			extern int sweet_rtc_seconds(uint32_t *secs);   /* SweetPlatformExpert.cpp */
+ 			uint32_t rtc = 0;
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1058,6 +1058,56 @@
+ 	task_unlock(task);
+ }
+ 
++/*
++ * 0172 CPU top (bsd/dev/sweet_sample.c): the CPU time of every thread in the system so far (user and
++ * system, mach units), with its process, name, priority and - for a blocked kernel thread - the
++ * unslid continuation it will resume in. Idle threads are left out. Returns the number of threads
++ * seen; at most max are stored.
++ */
++struct sweet_top_ent {
++	uint64_t tid, user, sys, cont;
++	int pid, pri;
++	char name[24];
++};
++unsigned sweet_top_snapshot(struct sweet_top_ent *v, unsigned max);
++extern boolean_t bsd_hasthreadname(void *uth);
++extern void bsd_getthreadname(void *uth, char *buffer);
++
++unsigned
++sweet_top_snapshot(struct sweet_top_ent *v, unsigned max)
++{
++	unsigned n = 0;
++	thread_t thread;
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&threads, thread, thread_t, threads) {
++		if (thread->state & TH_IDLE) {
++			continue;
++		}
++		if (n < max) {
++			struct sweet_top_ent *e = &v[n];
++			struct recount_usage usage = { 0 };
++			task_t task = get_threadtask(thread);
++			char name[64] = "";     /* bsd_getthreadname copies MAXTHREADNAMESIZE */
++			recount_thread_usage(thread, &usage);
++			e->tid = thread->thread_id;
++			e->user = usage.ru_user_time_mach;
++			e->sys = usage.ru_system_time_mach;
++			e->pid = (task == TASK_NULL || task == kernel_task) ? 0 : pid_from_task(task);
++			e->pri = thread->sched_pri;
++			e->cont = (e->pid == 0 && thread->continuation != NULL) ?
++			    VM_KERNEL_UNSLIDE((vm_offset_t)thread->continuation) : 0;
++			void *uth = get_bsdthread_info(thread);
++			if (uth != NULL && bsd_hasthreadname(uth)) {
++				bsd_getthreadname(uth, name);
++			}
++			strlcpy(e->name, name, sizeof(e->name));
++		}
++		n++;
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	return n;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ kern_return_t

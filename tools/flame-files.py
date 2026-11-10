@@ -13,12 +13,15 @@
 """
 import os, socket, stat, sys
 
-# FLAME_FILES_HOST: the phone directly, e.g. 192.168.7.2 from Windows on hotdogb (no FlameBridge)
-HOST, PORT = os.environ.get('FLAME_FILES_HOST', '127.0.0.1'), 2223
+import phonehost
+
+# FLAME_FILES_HOST: the phone directly, e.g. 192.168.7.2 from Windows on hotdogb (no FlameBridge); with the
+# USB cable out, 192.168.7.2 (or unset off the Mac) falls back to the phone's Wi-Fi address (tools/phonehost.py)
+PORT = 2223
 
 
 def conn():
-    s = socket.create_connection((HOST, PORT), timeout=30)
+    s = socket.create_connection((phonehost.resolve(), PORT), timeout=30)
     return s
 
 

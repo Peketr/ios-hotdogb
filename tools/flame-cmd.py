@@ -11,7 +11,10 @@ Results are the POKE:/SWEET CMD: lines the phone prints; all received log
 text is also appended to logs/live.txt. Don't run tools/flame-live.py at the
 same time (one listener gets the datagrams).
 """
-import argparse, socket, sys, time
+import argparse, os, socket, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import phonehost
 
 ap = argparse.ArgumentParser()
 ap.add_argument('cmd', nargs='*')
@@ -34,8 +37,11 @@ except OSError:
     rx = None
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+host = phonehost.resolve() if os.environ.get('FLAME_FILES_HOST', phonehost.USB) in (phonehost.USB, 'auto') else phonehost.USB
+if host != phonehost.USB:
+    print(f'(over Wi-Fi to {host}: the results stay in the phone\'s live log, which goes to USB only)', file=sys.stderr)
 try:
-    tx.sendto(text.encode(), ('192.168.7.2', 5141))
+    tx.sendto(text.encode(), (host, 5141))
 except OSError:
     # The Mac has no ARP entry for the phone yet: the subnet broadcast needs none.
     tx.sendto(text.encode(), ('192.168.7.255', 5141))
