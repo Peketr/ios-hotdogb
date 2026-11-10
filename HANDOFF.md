@@ -5,6 +5,120 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: swipebench is SLOWER without the background load: the render thread sits on the A55s (2026-11-10)
+- Three runs of kernel 0172, same args, unlock ~22 s after the live log starts (home screen checked: centre pixel
+  72b2d2ff), then `hotdogb-swipebench.py 30 --no-unlock` twice. fps / GPU busy / CPU TOP during the swipes:
+  - k0172-swipe-nolog-1110 (oslog job + vmd off): 27.0 and 22.8 fps, GPU 41% / 48%; 1.80 cores busy,
+    per cpu 49 45 43 33 | 23 19 20 13.
+  - k0172-swipe-withlog-1110 (both back on): **34.0 and 36.4 fps**, GPU 54% / 69%; 4.69 cores busy,
+    per cpu 93 88 91 90 | 74 69 66 62.
+  - k0172-swipe-nolog-nogov-1110 (off, plus sweetcpugov=0 sweetgpugov=0): 28.8 and 25.4 fps, GPU 44% / 53%;
+    1.58 cores busy, per cpu 41 50 43 42 | 17 14 8 7.
+- So the governors are not what costs the frames (27.0/22.8 -> 28.8/25.4 with them off). In all three the work is the
+  same: backboardd "com.apple.coreanimation" (pri 54) 61-73% of a core, SpringBoard main thread 16-21%.
+- Reading (inferred from the per-cpu figures; CPU TOP does not say which core a thread ran on): with the phone
+  otherwise idle the render thread runs on cpu0-3 (A55); with the junk load filling cpu0-3 it gets pushed to
+  cpu4-7 (A76) and paging is ~8 fps faster. The scheduler does not prefer the fast cores.
+- Next: (1) CPU TOP: add each thread's time per cluster (or last cpu) to prove it; (2) make the scheduler put
+  high-priority / UI threads on cpu4-7 first (how this tree picks a processor is not looked at yet); then repeat
+  the no-log swipebench: expect >= the 34-36 fps of the loaded run.
+- Phone state after these runs: oslog-reportcrash removed, vmd disabled (as after k0172-nolog-1110).
+- The first run's kernel timestamps started at ~11670 s instead of ~35 s (cause not checked; flamereboot still
+  worked relative to boot).
+
+### HOTDOGB: HEAT - A/B without the log stream and vmd: 0.45 cores busy instead of 5.1 (run k0172-nolog-1110, 2026-11-10)
+- Changed on the phone (setup boot k0172-setup-1110): boot job org.iosonpixel.oslog-reportcrash removed (the only
+  oslog job left), com.apple.voicemail.vmd disabled (plist kept in /var/local/launchd-disabled; undo:
+  `hotdogb-launchd-job.py enable com.apple.voicemail.vmd`). Same kernel 0172 and args, 660 s, phone untouched.
+- Observed, 11 reports: 0.31-0.78 cores busy, mean 0.45 (before: 4.0-6.3, mean 5.1). Top: audiod 10.7% (sys),
+  wland 6.8%, kernel_task 4.5%, btd9 3.6%, wifid 2.0%, SpringBoard 1.7%; diagnosticd, oslog, vmd, coreduetd absent.
+- The governor now drops: last 30 s pwrcl avg 451 MHz (load 13%), perfcl 724, prime 826 (before: 1785 / 2400 / up to 2956).
+- Battery: 32.9 -> 33.3 C and +187..287 mA (charging) over the run; the old run was at 42.9 C and -382 mA by 650 s.
+- coreduetd made 122 AKS calls in the whole run (before 7521) and never showed in the top: its loop came with the
+  log stream or with use of the phone (the old run was used by hand, this one was not) - not separated yet.
+- Still there: respawn churn (285 xpcproxy, BlueTool 21, the three TTS AUs 12 each = 36 CRASH lines each).
+- Not measured: the phone in use (scrolling, apps) without the log stream; fps against the old 35 fps figure.
+- Trap: `fastboot boot` answered "Failed to load/authenticate boot image: Load Error" for every image, also
+  yesterday's: slot a was unbootable with retry count 0. `fastboot set_active a` (retry 7 again) fixed it.
+
+### HOTDOGB: HEAT - CPU top result: our own log stream + vmd + coreduetd keep ~4 cores busy (run k0172-top-1109-2354, 2026-11-10)
+- Observed, 15 reports over 900 s (5 s each, every 60 s): 4.0-6.3 cores busy (mean 5.1); cpu0-3 at 60-100% always.
+  Average per process over all reports (100% = one core):
+  diagnosticd 140% (user 67 sys 73), oslog[76] 99% (one thread, user 46 sys 53), vmd 97% (two pri-4 threads),
+  coreduetd 67% (one thread ~84% from ~250 s on), backboardd 31% (10-16% untouched, 70-85% while used),
+  launchd 17% (sys 10), biomed 9.5%, SpringBoard 6.7%, kernel_task 4.3%, everything else < 3%.
+  The listed processes add up to the per-cpu total within ~0.3 core: interrupt time is not a large hidden part.
+- The kernel also flagged them: "caught burning CPU" for oslog (128 s), vmd (343 s), coreduetd (436 s).
+- oslog is our boot job (`oslog -l NAME`): -l asks diagnosticd for info+debug of EVERY process and oslog filters by
+  name only after receiving each event (phone/tools/oslog.m), so the pair costs ~2.4 cores whatever is filtered.
+- coreduetd: 7521 of the log's 10151 "SWEET AKS" lines, all `sel 17 ... out 0/4096 -> 0x0`, two per ~150 ms.
+- Respawns in 900 s: 340 xpcproxy, wifip2pd 77, BlueTool 30 (bluetoothd's 31 s retry), SiriTTS/Kona/MacinTalk AUs
+  12 each (36 CRASH lines each), 11 Spotlight extensions 6 each, assetsd 8.
+- Not known (guesses): why vmd spins (voicemail daemon with no CommCenter: a reconnect loop?), what coreduetd's
+  sel 17 loop is, whether launchd's 17% is those respawns or failed service lookups.
+- Next: (1) remove the oslog jobs + disable vmd, reboot, compare CPU TOP and the gauge mA/temperature;
+  (2) `flame-cmd.py sample vmd 200 20` and `sample coreduetd 200 20` + sweet-profile.py for their stacks;
+  (3) if oslog is needed again: start it by hand with -t SECS, never as a boot job with -l.
+
+### HOTDOGB: HEAT - the governor is not the cause; CPU top to find the busy threads, kernel 0172 (2026-11-09) - RUN, see above
+- Observed with 0170 (run k0170-gov-1109-2238, 900 s) and 0171 (k0171-bohandle-1109-2258): the CPU governor hardly
+  ever lowers anything - 30 s averages pwrcl 1784 MHz (top 1785), perfcl 2311/2405 (top 2419), prime 2748/2935 (top
+  2956), the busiest core of each cluster at 85-100% in nearly every report. The GPU governor works (average 273/298
+  MHz, bursts to 499, no "GOVERNOR STOPPED"). Battery gauge 23.45 C -> 45.15 C over the 0170 run.
+  So at least one core per cluster is busy almost all the time; which threads is not known.
+- 0172 (`xnu/patches/0172-hotdogb-cpu-top.patch`, WSL build work/boot/kernel-0172, sha256 cceaadef...): CPU top.
+  Every 60 s (`sweettop=N`, 0 = off) a 5 s measurement: "#### CPU TOP: 5000 ms, N threads, X cores busy; per cpu %: ..."
+  then the 12 busiest processes ("TOP proc name[pid] N% (user N sys N) N threads") and threads ("TOP thread name[pid]
+  tid N "thread name" N% (user N sys N) pri N [cont 0x...]"), "TOP --- done". 100% = one core. On demand:
+  `python tools\flame-cmd.py top [SECS] [N]`. cont = unslid continuation of a blocked kernel thread.
+- Next, depending on what tops the list: a user process -> `flame-cmd.py sample NAME 200 20` + tools/sweet-profile.py
+  (stacks; high "sys" = time in the kernel on its behalf, e.g. the GPU fence wait spin); kernel_task threads without
+  a name -> name the sweet_* driver threads, or add a per-CPU pc sampler.
+- Limits: a thread that never leaves its core is charged at interrupts/switches, so a 5 s figure can be a little off;
+  time in interrupt handlers is not attributed to a thread ("per cpu" higher than the threads' sum = that, or stale
+  figures); idle threads are left out.
+- Trap met while building: mac-build.sh tries a forward dry-run first, and a patch that only adds code applies a
+  second time to a tree that already has it (0172 doubled; fixed by `patch -R` once). Generate the patch, then
+  revert the tree before building, or check for doubles.
+
+### HOTDOGB: DISPLAY FREEZE (two frames blinking, OS alive) - kernel 0171 (2026-11-09) - BUILT, NOT RUN YET
+- Seen: k0170-gov-1109-2238 at 534 s (also k0165-bt-1, k0165-bt-11, k0165-gps-1109-1901; same as the 0160/0161
+  freezes of the 0162 entry). The picture alternates between two old frames; touch, brightness, the log go on.
+- In the log: `SWEET MTL: v2 backboardd submit refused: IB 12 of 14 iova 0x15570000 ... (outside the window)` +
+  `method 5 -> 0xe00002c2`. From then on "SWEET GPU: 5s" shows only `present` jobs (no backboardd IBs) while
+  "SWEET FB" still counts swaps: Turnip called the device lost, backboardd keeps swapping its last two surfaces.
+- Likely cause (read from UniXNU's turnip-darwin-kmd.patch, NOT proven on the phone): the bad "iova" is
+  0 + the low 32 bits of a CPU pointer (0x1_15570000), i.e. a command-buffer BO whose `tu_bo` struct is zero
+  (iova 0, map NULL) while in use. darwin_bo_finish zeroes the handle-indexed struct AFTER the kernel freed the
+  handle; the kernel handed out the first free slot, so another thread's BoAlloc got the same handle and filled
+  the struct, which the first thread then zeroed. Every case came in a burst of allocs/frees (pool MB jumping).
+- 0171 (`xnu/patches/0171-hotdogb-gpu-bo-handle-rotate.patch`): handles go round the table (no immediate reuse);
+  milestone `#### GPU BUFFER HANDLES ROTATE (NO IMMEDIATE REUSE)`. A refusal now also logs
+  `refused IB: handle N is live/not a buffer, kernel iova ...`: "live" with a window iova confirms the cause.
+- The real fix is in Turnip (zero the struct before the handle is released): needs the Mesa tree (not on the PC).
+- Once frozen: nothing recovers backboardd's device; restart backboardd or reboot.
+
+### HOTDOGB: HEAT - CPU and GPU frequency governors, kernel 0170 (2026-11-09) - BUILT, NOT RUN YET
+- Why the phone gets warm (from the code): 0086 pins all three OSM clusters at their top all-core frequency and
+  0107 keeps the GPU at 499 MHz. Idle CPUs do sit in WFI (idle_enable, wfi=1), but nothing deeper, and the GPU
+  never powers down. Not measured: how much each part contributes.
+- 0170 (`xnu/patches/0170-hotdogb-cpu-gpu-governor.patch`, WSL build work/boot/kernel-0170, sha256 cd614cc4...):
+  - CPU (bsd/dev/sweet_cpufreq.c + sweet_processor_idle_time() in osfmk/kern/processor.c): a thread every 40 ms;
+    cluster load = its busiest CPU (idle time from recount); wanted frequency = current * load / 70, lowest table
+    entry at or above it; 90%+ load -> top at once; down after 3 intervals. Boot starts at the top as before.
+    `sweetcpugov=0` = 0086 behaviour; `flamecpufreq=N` still caps at N MHz, `=0` leaves ABL's setting.
+  - GPU (bsd/dev/sweet_gpu.c, a6_set_perf() in sweet_a6xx.c): a thread every 100 ms; load = GPU time of the submits
+    that landed; levels 1 (257 MHz) .. sweetgpufreq (default 4 = 499); wanted = current * load / 40, 50%+ -> top;
+    down after 5 intervals with nothing queued. The run-time vote is the power-up HFI message 30 again;
+    a vote without ack stops the governor ("#### GPU GOVERNOR STOPPED"). `sweetgpugov=0` = fixed level.
+- Log: "#### CPU GOVERNOR RUNNING", "#### GPU GOVERNOR RUNNING", every 30 s "SWEET CPUFREQ: 30s: ..." and
+  "SWEET GPU: gov 30s: ...".
+- Unverified: that the GMU acks perf votes while the GPU is working (only ever sent once, at power-up); that the
+  OSM takes frequent index writes without trouble; whether 100 ms is quick enough for the first frames of a scroll
+  (GPU jobs of 16-37 ms at 499 MHz were already common in k0169 runs).
+- Not done, would save more: GPU power collapse when idle (GMU IFPC/slumber), CPU core power-down through PSCI
+  CPU_SUSPEND, sleeping instead of spinning in the GPU fence wait (sweetgpusleep, off since 0161).
+
 ### BUILD: kernels build in WSL, no Mac (2026-11-09) - WSL KERNEL BOOTS
 - `wsl.exe -- bash /mnt/c/Users/Peketr/ios-flame/src/tools/wsl-build.sh` (PowerShell) = tools/mac-build.sh on
   ~/xnu-linux: applied 0166-0169, all mac-build-check strings ok, work/out/kernel-0169.sweet (sha256 e53c4bc2...).

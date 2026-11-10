@@ -9,7 +9,41 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-09, build check): the same 0169, built in WSL (tools/wsl-build.sh, kernel-0169-wsl) instead of on the Mac.
+# Current (2026-11-10, in use without the log stream): same kernel 0172 and args. The idle A/B is done
+# (k0172-nolog-1110: 0.45 cores busy instead of 5.1; oslog-reportcrash removed and vmd disabled on the phone).
+# Swipebench done too (HANDOFF): 27/23 fps without the junk load, 34/36 fps with it, 29/25 with the governors off:
+# the render thread sits on the A55s when the phone is idle. Next kernel: fast cores first for UI threads.
+# Until then: USE the phone (scroll, open apps, Settings) and compare CPU TOP, heat and smoothness; watch whether
+# coreduetd comes back in the TOP list. If `fastboot boot` says "Load Error": fastboot set_active a.
+# Before (2026-11-10, A/B without the log stream): same kernel 0172 and args. k0172-top-1109-2354 showed diagnosticd
+# 140% + oslog 99% (our `oslog -l` boot job) + vmd 97% + coreduetd 67% of ~5 busy cores. Before this run, with the
+# phone up (PowerShell, in src): python tools\hotdogb-launchd-job.py list, then `remove NAME` for every oslog-* job,
+# `disable com.apple.voicemail.vmd`, python tools\flame-cmd.py reboot. Then this script: leave it untouched 3 minutes.
+# Compare "#### CPU TOP ... cores busy", the TOP proc list, and mA / temp in "SWEET BATTERY: gauge" with that run.
+# Then: python tools\flame-cmd.py sample coreduetd 200 20 (and vmd if it is still there) + tools\sweet-profile.py.
+# Before (2026-11-09, what keeps the cores busy): kernel 0172 (WSL build) = 0171 + CPU top. Every 60 s (sweettop=N
+# seconds, 0 = off) the log gets "#### CPU TOP: 5000 ms, N threads, X cores busy; per cpu %: ..." followed by
+# "TOP proc NAME[pid] N% (user N sys N) N threads" and "TOP thread NAME[pid] tid N "name" N% ..." lines, busiest first
+# (100% = one core), up to "TOP --- done". On demand, while it runs (PowerShell, in src):
+#   python tools\flame-cmd.py top 10 25          10 s, 25 lines each; the report lands in logs\runs\NAME\live.txt
+#   python tools\flame-cmd.py sample NAME 200 20 then python tools\sweet-profile.py: where a busy user process is
+# Let it sit on the home screen for 2-3 minutes untouched first (the idle picture is what heats the phone), then use it.
+# The 0171 test (GPU buffer handles) below still applies.
+# Before (2026-11-09, display freeze): kernel 0171 (WSL build) = 0170 + GPU buffer handles go round the table (no
+# immediate reuse). Aimed at the freeze where the picture blinks between two old frames while the OS runs on
+# (k0170-gov-1109-2238 at 534 s: "SWEET MTL: v2 backboardd submit refused: IB ... (outside the window)").
+# Expect "#### GPU BUFFER HANDLES ROTATE (NO IMMEDIATE REUSE)" at the GPU bring-up. Use the phone hard (app switcher,
+# many fingers, open/close apps): no "submit refused" line = good. If it still comes, the new line after it
+# "SWEET MTL: v2 backboardd refused IB: handle N is live/not a buffer, kernel iova ..." says which case it is.
+# Back to 0170: KERNEL=work/boot/kernel-0170.
+# Before (2026-11-09, heat): kernel 0170 (WSL build) = 0169 + CPU and GPU frequency governors (both were pinned high:
+# CPU clusters at their top frequency since 0086, GPU at 499 MHz since 0107). Expect "#### CPU GOVERNOR RUNNING" early
+# (before the live log starts: it may only show in a rawdump log) and "#### GPU GOVERNOR RUNNING" after the GPU bring-up,
+# then every 30 s "SWEET CPUFREQ: 30s: pwrcl avg N now N MHz load N% ..." and "SWEET GPU: gov 30s: avg N MHz ...".
+# Compare: how warm the phone gets, the battery temperature in "SWEET BATTERY: gauge ..." against a 0169 run, and
+# whether scrolling got slower. "#### GPU GOVERNOR STOPPED" = the GMU refused a vote (frequency stays where it was).
+# Old behaviour: -a "... sweetcpugov=0 sweetgpugov=0" (one or both). Back to 0169: KERNEL=work/boot/kernel-0169-wsl.
+# Before (2026-11-09, build check): the same 0169, built in WSL (tools/wsl-build.sh, kernel-0169-wsl) instead of on the Mac.
 # Expect the same milestones as the Mac 0169 run k0169-charge-1109-2146 (touch, battery gauge, charging, GPU).
 # Back to the Mac build: KERNEL=work/boot/kernel-0169.
 # Also (2026-11-09, charging): kernel 0169 = 0168 + charging switched on (PM8150B 0x1042) while the gauge reads 3-43 C,
@@ -43,11 +77,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0169-wsl}
-TAG=k0169-wsl
-if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0168 ]; then
-	echo "no $KERNEL yet: using kernel-0168 (no charge enable)" >&2
-	KERNEL=work/boot/kernel-0168 TAG=k0168-sensors-chg
+KERNEL=${KERNEL:-work/boot/kernel-0172}
+TAG=k0172-top
+if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0171 ]; then
+	echo "no $KERNEL yet: using kernel-0171 (no CPU top)" >&2
+	KERNEL=work/boot/kernel-0171 TAG=k0171-bohandle
 fi
 SECS=900
 OPTS=(-q -G)
