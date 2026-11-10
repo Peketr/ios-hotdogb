@@ -5,6 +5,79 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: choppy frames = one 27 ms GPU job per frame + the panel blit queued behind it (analysis of k0173-perf-1111, 2026-11-11)
+- Observed in the "SWEET GPU: 5s" / "5s jobs" lines while swiping (0173, 61.8 "fps"):
+  - backboardd's GPU jobs are two kinds: ~200-230 per 5 s take 1-4 ms, ~110-140 per 5 s take >= 16 ms. The long
+    one is always the same shape: 16 IBs, 203286-203375 dw, 27.1-27.7 ms; IB 1 = 17.5 ms, IB 11 = 7.5 ms, IB 3 =
+    1.1 ms, IB 13 = 0.8 ms (the rest < 0.2 ms). Same in k0172-swipe-nolog-nogov-1110 (GPU pinned at 499 MHz).
+  - backboardd GPU time 3.0-4.0 s of every 5 s (61-82% busy); the present blits themselves 99-135 ms per 5 s.
+  - So ~22-28 heavy frames per second at 27 ms each fill the GPU: the swap count (53-74 per second) is not the
+    number of new pictures.
+  - Panel: 178-198 panel copies per 5 s (36-40 per second) for 267-368 swaps: 30-45% of the swaps never reach the
+    panel. "avg copy" 23-34 ms and "present: GPU blit 15512 / 27009 us": the blit runs on the vsync timer
+    (AppleCLCD::vsyncFired -> present -> sweet_gpu_present) and present_wait_locked waits there for the blit two
+    presents back, which sits in the ring behind a 27 ms job. While it waits, the vsync notifications CA paces on
+    are late (the timer skips to now + period).
+  - Other jobs by shape (idle/animation frames): 22516 dw = 3.9 ms, 55-60k dw = 7.2-7.6 ms, 82926 dw = 13.8 ms:
+    GPU time grows with the command stream length (~0.13-0.17 us per dw).
+- Reading (guess): the page-swipe frame is drawn in passes that cost 17.5 + 7.5 ms on the GPU (what they are is
+  not known: wallpaper/dock/folder blur, tile load/store, sysmem vs GMEM, or per-draw overhead from metal2vulkan).
+  That caps new pictures at ~37 per second, and the late vsync + dropped panel copies make them uneven.
+- Kernel 0174 = 0173 + "gpuhist [MIN_DW] [JOBS]" on the command server: packet histogram of the next big v2 GPU
+  jobs (per top-level IB: dwords, draws, nested IBs, events, CP_SET_MARKER modes; whole job: CP opcodes, events,
+  most written registers, GRAS_SC_BIN_CNTL / RB_CNTL / RB_RESOLVE_OPERATION first/last). It maps the buffer
+  holding each IB for the read (md->map). The first version read pool memory with readBytes and killed the phone
+  (k0174-gpuhist-1111); the second found no buffers (k0174-gpuhist2-1111). Third works: k0174-gpuhist3-1111b.
+- Observed, 3 heavy backboardd jobs while swiping (179-203k dw, 16 IBs; decoded with the msm XML in
+  ~/src/wsl-kernel-6.18.54.1/drivers/gpu/drm/msm/registers/adreno/):
+  - CP_BLIT (op 0x2c, the 2D engine): 9204 / 10513 / 12033 per job. GRAS_A2D_SRC_XMIN, GRAS_A2D_DEST_TL and
+    TPL1_A2D_SRC_TEXTURE_INFO are each written once per blit (~9-12k), RB_A2D_BLT_CNTL / RB_A2D_DEST_BUFFER_INFO
+    only 128-157 times: ~150 copy setups with ~70 blits each, a new source each time, one destination.
+  - The 17.5 ms IB (137410 dw, 274-278k with nested) is a binned (GMEM) pass: markers 2 (BIN_VISIBILITY) then
+    4 5 6 7 (RENDER_START, END_OF_DRAWS, RESOLVE, RENDER_END) over and over (the 64-char marker buffer filled at
+    15+ bins). GRAS_SC_BIN_CNTL 0x40e12 = bins 576 x 224 -> 2 x 11 = 22 bins over 1125 x 2436. 1702-1748 draws
+    counted with the per-bin replays (68 nested IBs = draw IBs per bin), 157-160 resolves (RB_RESOLVE_*, BLIT
+    event 0x1e) = ~7 per bin.
+  - Second big IB (39-63k dw, 93-154k with nested): 736-1288 draws, 68 nested IBs, 281-371 events.
+  - Per job: CP_SET_DRAW_STATE 6166-8685 (45-61k groups), CP_DRAW_INDX_OFFSET 2092-3015, CACHE_INVALIDATE 160-194.
+- Reading (inferred from the packet pattern, Turnip source not on this PC): one destination + a new 2D source per
+  blit is Turnip's vkCmdCopyBufferToImage fallback when the buffer address or row pitch is not 64-byte aligned:
+  it copies ONE ROW PER BLIT. 9-12k rows per frame ~ 4-5 surfaces of 2436 rows. A 1125-pixel BGRA row is 4500 bytes
+  (4500 % 64 = 20). So: full-screen CPU/IOSurface images are re-uploaded every frame, row by row; the likely
+  source is metal2vulkan's buffer/IOSurface-backed textures (a VkImage shadow refreshed by a copy before use).
+  Next to that, the binned pass with 22 small bins replays every draw 22 times (bin size points at ~8 bytes per
+  pixel of attachments).
+- Next (userland; needs the Turnip / metal2vulkan trees from the Mac build: tools/build-turnip-ios.sh,
+  tools/build-m2v-bridge.sh): (1) confirm in metal2vulkan where buffer-backed / IOSurface textures get copied
+  and skip the copy when the surface did not change, or sample the linear memory directly; (2) make the copy
+  aligned (64-byte bytesPerRow for the surfaces CA creates, IOSurfaceAlignProperty) so Turnip takes one blit per
+  image; (3) see whether the main pass can render direct (sysmem) instead of 22 GMEM bins (TU_DEBUG=sysmem test).
+  Kernel side, independent: move the panel blit off the vsync timer so vsync stays regular.
+
+### HOTDOGB: 0173 idle warms up with the CPUs nearly idle: not a CPU-load problem any more (run k0173-perf-1111, 2026-11-11)
+- Kernel 0173, usual args + sweettop=30, 1500 s. Unlocked at the start, then untouched on the home screen for
+  ~17 min, display on the whole time (no auto-lock while unlocked; there is no remote power key, so NO screen-off
+  reading in this run).
+- Observed idle (22 reports from 250 s on): 0.27-0.42 cores busy. Summed top: audiod (one pri 4 thread, mostly
+  sys, ~6-9% all the time), wland 4-6%, wifid, kernel_task, SpringBoard, btd9. Governor at the floor: pwrcl
+  ~300-500 MHz, perfcl 710, prime 825; GPU 257 MHz, 0-5% busy.
+- Battery gauge temp over the run, USB in, charging at a constant 480 mA: 23.6 C (120 s) -> 26.8 (280) -> 28.9
+  (480) -> 30.2 (680) -> 31.2 (900) -> 31.9 (1100), flattening. Yesterday's idle run sat at ~33 C.
+- Reading (guess): ~9-10 C over the start temperature at 0.3 cores busy means the power goes somewhere other than
+  CPU load. Not measured, candidates: charging itself (480 mA), cores only in WFI (no PSCI CPU_SUSPEND / power
+  collapse), GPU rail + GMU always on, Wi-Fi without power save (wland), Bluetooth, SLPI, UFS never hibernating,
+  panel at 90 Hz, and whether "display off" stops the DSI/MDSS clocks or only darkens the panel. The system's own
+  draw cannot be read while USB feeds it (the input current is unknown).
+- In use, swipebench 30 s + top 20 + sample: 61.8 fps (53.4 58.4 73.6), GPU busy 74% at 499 MHz (governor at the
+  top, busiest 100 ms 100%), CPU 1.57 cores; coreanimation thread 63% on cpu 4. New observation:
+  "SWEET FB: 5s: 292 swaps (58.4 fps), 190 panel copies, avg copy 23927 us" and "368 swaps, 198 copies, avg copy
+  34485 us" - a panel copy takes 24-34 ms while swiping (1-2 ms when idle), against 11 ms per frame at 90 Hz.
+  Not looked at yet what the copy waits for. backboardd's hot user PCs are 0x1c5150ec8-0x1c51532a0 (shared cache,
+  not symbolised), under 0x1c5162b18 / 0x1d46da72c.
+- Next: (1) screen-off reading: boot, press the power key by hand, leave 10 min, read CPU TOP + temp; same again
+  with sweetcharge=0 to take the charging heat out. (2) Why panel copies take 24-34 ms under load. (3) Symbolise
+  the backboardd hot spot. (4) Idle power states (CPU_SUSPEND, GPU off when idle, Wi-Fi power save).
+
 ### HOTDOGB: kernel 0173 big cores first: swipebench 64 / 68 fps (was 27 / 23) (run k0173-swipe-big-1110, 2026-11-10)
 - Cause found in the source: the 8 cores are one processor set (MAX_CPU_CLUSTERS 1, clutch scheduler, no AMP) and
   choose_processor took the lowest-numbered idle core = cpu0-3, the A55s.

@@ -1,0 +1,249 @@
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -161,6 +161,8 @@
+ 	SweetV2BO *v2Find(uint64_t handle);
+ 	IOReturn v2NewSlot(IOMemoryDescriptor *md, uint64_t bytes, bool imported, uint64_t *handle);
+ 	void v2Release(SweetV2BO *bo);
++	void v2Hist(const uint64_t *iova, const uint32_t *dw, uint32_t nib);    /* 0174 */
++	void v2HistParse(struct SweetGpuHist *st, uint64_t iova, uint32_t dwords, int depth);
+ 
+ public:
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+@@ -531,6 +533,198 @@
+ 
+ /* ---- v2: the NativeAdreno ABI (SweetGPUABI.h) ---- */
+ 
++/*
++ * 0174: GPU job histogram. "gpuhist [MIN_DW] [JOBS]" on the command server arms it; the next JOBS v2 submits
++ * of at least MIN_DW dwords (defaults 100000, 1) get their command streams read back and counted before they
++ * run: per top-level IB its size, draws, nested IBs and render-mode markers; then for the whole job every
++ * CP opcode (type 7 packets), the CP_EVENT_WRITE events, the most written registers (type 4 packets) and the
++ * first/last value of the bin-control registers. Nested CP_INDIRECT_BUFFERs are followed (3 levels);
++ * CP_SET_DRAW_STATE groups are counted, not followed. Raw numbers: decode against Mesa's adreno_pm4.xml / a6xx.xml.
++ */
++extern "C" {
++volatile uint32_t sweet_gpu_hist_min, sweet_gpu_hist_left;
++}
++
++#define HIST_REGS       96
++#define HIST_WATCH      4
++struct SweetGpuHist {
++	uint32_t op[128], ev[128];
++	struct { uint32_t reg, n; } regs[HIST_REGS];
++	uint32_t watch_first[HIST_WATCH], watch_last[HIST_WATCH], watch_n[HIST_WATCH];
++	uint32_t groups, nested, other, cut, lost, parsed, budget;
++	char markers[64];
++	uint32_t nmark;
++};
++static const uint32_t hist_watch[HIST_WATCH] = { 0x80a1, 0x8800, 0x80f0, 0x88e3 };
++#define HIST_DRAWS(st)  ((st)->op[0x38] + (st)->op[0x22] + (st)->op[0x28] + (st)->op[0x29] + (st)->op[0x2a])
++
++void
++SweetAcceleratorUserClient::v2HistParse(struct SweetGpuHist *st, uint64_t iova, uint32_t dwords, int depth)
++{
++	if (dwords == 0 || dwords > st->budget) {
++		st->lost++;
++		return;
++	}
++	uint64_t bytes = 4ULL * dwords;
++	uint32_t *w = (uint32_t *)IOMallocData(bytes);
++	if (w == NULL) {
++		st->lost++;
++		return;
++	}
++	/* the buffers are GPU pool memory outside the kernel's physical map: map the one holding this IB */
++	bool ok = false;
++	IOMemoryDescriptor *md = NULL;
++	uint64_t off = 0;
++	IOLockLock(fLock);
++	for (uint32_t i = 0; i < fBOCap; i++) {
++		SweetV2BO *bo = &fBO[i];
++		if (bo->md != NULL && bo->iova != 0 && iova >= bo->iova && iova + bytes <= bo->iova + bo->bytes) {
++			md = bo->md;
++			md->retain();
++			off = iova - bo->iova;
++			break;
++		}
++	}
++	IOLockUnlock(fLock);
++	if (md != NULL) {
++		IOMemoryMap *km = md->map(kIOMapReadOnly);
++		if (km != NULL) {
++			if (off + bytes <= km->getLength()) {
++				memcpy(w, (const void *)(km->getVirtualAddress() + off), bytes);
++				ok = true;
++			}
++			km->release();
++		}
++		md->release();
++	}
++	if (!ok) {
++		st->lost++;
++		IOFreeData(w, bytes);
++		return;
++	}
++	st->budget -= dwords;
++	st->parsed += dwords;
++	for (uint32_t i = 0; i < dwords;) {
++		uint32_t h = w[i], type = h >> 28;
++		if (type == 7) {
++			uint32_t op = (h >> 16) & 0x7f, cnt = h & 0x3fff;
++			const uint32_t *p = &w[i + 1];
++			if (i + 1 + cnt > dwords) {
++				st->cut++;
++				break;
++			}
++			st->op[op]++;
++			if (op == 0x3f && cnt >= 3) {           /* CP_INDIRECT_BUFFER */
++				st->nested++;
++				if (depth < 3) {
++					v2HistParse(st, p[0] | ((uint64_t)p[1] << 32), p[2] & 0xfffff, depth + 1);
++				}
++			} else if (op == 0x65 && cnt >= 1) {    /* CP_SET_MARKER */
++				if (st->nmark < sizeof(st->markers) - 1) {
++					st->markers[st->nmark++] = "0123456789abcdef"[p[0] & 0xf];
++				}
++			} else if (op == 0x46 && cnt >= 1) {    /* CP_EVENT_WRITE */
++				st->ev[p[0] & 0x7f]++;
++			} else if (op == 0x43) {                /* CP_SET_DRAW_STATE */
++				st->groups += cnt / 3;
++			}
++			i += 1 + cnt;
++		} else if (type == 4) {
++			uint32_t reg = (h >> 8) & 0x7ffff, cnt = h & 0x7f;
++			if (i + 1 + cnt > dwords) {
++				st->cut++;
++				break;
++			}
++			for (uint32_t k = 0; k < HIST_REGS; k++) {
++				if (st->regs[k].n == 0 || st->regs[k].reg == reg) {
++					st->regs[k].reg = reg;
++					st->regs[k].n++;
++					break;
++				}
++			}
++			for (uint32_t k = 0; k < HIST_WATCH; k++) {
++				if (hist_watch[k] >= reg && hist_watch[k] < reg + cnt) {
++					uint32_t v = w[i + 1 + hist_watch[k] - reg];
++					if (st->watch_n[k]++ == 0) {
++						st->watch_first[k] = v;
++					}
++					st->watch_last[k] = v;
++				}
++			}
++			i += 1 + cnt;
++		} else {
++			st->other++;
++			i++;
++		}
++	}
++	IOFreeData(w, bytes);
++}
++
++void
++SweetAcceleratorUserClient::v2Hist(const uint64_t *iova, const uint32_t *dw, uint32_t nib)
++{
++	struct SweetGpuHist *st = IONewZero(struct SweetGpuHist, 1);
++	if (st == NULL) {
++		return;
++	}
++	uint32_t total = 0;
++	for (uint32_t i = 0; i < nib; i++) {
++		total += dw[i];
++	}
++	st->budget = 8u << 20;
++	IOLog("#### GPU JOB HISTOGRAM: %s, %u IBs, %u dw\n", fName, nib, total);
++	for (uint32_t i = 0; i < nib; i++) {
++		uint32_t d0 = HIST_DRAWS(st), n0 = st->nested, p0 = st->parsed, m0 = st->nmark, e0 = st->op[0x46];
++		v2HistParse(st, iova[i], dw[i], 0);
++		st->markers[st->nmark] = 0;
++		IOLog("GPUHIST IB %u: %u dw (%u with nested), %u draws, %u nested IBs, %u events, markers %s\n", i, dw[i],
++		    st->parsed - p0, HIST_DRAWS(st) - d0, st->nested - n0, st->op[0x46] - e0, &st->markers[m0]);
++	}
++	char line[200];
++	uint32_t len = 0;
++	for (uint32_t op = 0; op < 128; op++) {
++		if (st->op[op]) {
++			len += snprintf(line + len, sizeof(line) - len, " %#x:%u", op, st->op[op]);
++		}
++		if (len > 160 || (op == 127 && len)) {
++			IOLog("GPUHIST ops:%s\n", line);
++			len = 0;
++		}
++	}
++	for (uint32_t e = 0; e < 128; e++) {
++		if (st->ev[e]) {
++			len += snprintf(line + len, sizeof(line) - len, " %#x:%u", e, st->ev[e]);
++		}
++		if (len > 160 || (e == 127 && len)) {
++			IOLog("GPUHIST events:%s\n", line);
++			len = 0;
++		}
++	}
++	for (uint32_t l = 0; l < 24; l++) {
++		uint32_t best = 0;
++		for (uint32_t k = 1; k < HIST_REGS; k++) {
++			if (st->regs[k].n > st->regs[best].n) {
++				best = k;
++			}
++		}
++		if (st->regs[best].n) {
++			len += snprintf(line + len, sizeof(line) - len, " %#x:%u", st->regs[best].reg, st->regs[best].n);
++			st->regs[best].n = 0;
++		}
++		if (len > 160 || (l == 23 && len)) {
++			IOLog("GPUHIST regs:%s\n", line);
++			len = 0;
++		}
++	}
++	for (uint32_t k = 0; k < HIST_WATCH; k++) {
++		IOLog("GPUHIST reg %#x: %u writes, first %#x last %#x\n", hist_watch[k], st->watch_n[k], st->watch_first[k],
++		    st->watch_last[k]);
++	}
++	IOLog("GPUHIST --- done: %u dw read, %u draw-state groups, %u words not packets, %u cut, %u IBs not read\n",
++	    st->parsed, st->groups, st->other, st->cut, st->lost);
++	IODelete(st, struct SweetGpuHist, 1);
++}
++
+ SweetV2BO *
+ SweetAcceleratorUserClient::v2Find(uint64_t handle)
+ {
+@@ -912,6 +1106,17 @@
+ 		if (rq->wait_fence != 0 && sweet_gpu_wait_fence_ns((uint32_t)rq->wait_fence, rq->wait_timeout_ns)) {
+ 			return kIOReturnTimeout;
+ 		}
++		if (sweet_gpu_hist_left != 0) {         /* 0174 */
++			uint32_t total = 0;
++			for (uint32_t i = 0; i < nib; i++) {
++				total += dw[i];
++			}
++			uint32_t left = sweet_gpu_hist_left;
++			if (total >= sweet_gpu_hist_min && left != 0 &&
++			    OSCompareAndSwap(left, left - 1, (volatile UInt32 *)&sweet_gpu_hist_left)) {
++				v2Hist(iova, dw, nib);
++			}
++		}
+ 		bool busy = false;
+ 		uint32_t fence = sweet_gpu_submit_v2(iova, dw, nib, &busy);
+ 		if (fence == 0) {
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1259,6 +1259,16 @@
+ 			sweet_top_request(secs, n);
+ 			continue;
+ 		}
++		if (strncmp(cmd, "gpuhist", 7) == 0) {
++			/* 0174: "gpuhist [MIN_DW] [JOBS]": what is in the next big GPU jobs (SweetAccelerator.cpp) */
++			extern volatile uint32_t sweet_gpu_hist_min, sweet_gpu_hist_left;
++			const char *p = cmd + 7;
++			int min = ud_num(&p), jobs = ud_num(&p);
++			sweet_gpu_hist_min = min > 0 ? (uint32_t)min : 100000;
++			sweet_gpu_hist_left = (jobs > 0 && jobs <= 8) ? (uint32_t)jobs : 1;
++			printf("#### GPU JOB HISTOGRAM ARMED (>= %u DW, %u JOBS)\n", sweet_gpu_hist_min, sweet_gpu_hist_left);
++			continue;
++		}
+ 		if (strncmp(cmd, "rtc", 3) == 0) {
+ 			extern int sweet_rtc_seconds(uint32_t *secs);   /* SweetPlatformExpert.cpp */
+ 			uint32_t rtc = 0;
