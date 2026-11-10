@@ -1,0 +1,128 @@
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -5021,6 +5021,19 @@
+  *	The thread must be locked.  The pset must be locked,
+  *	and the resulting pset is locked on return.
+  */
++#ifdef ARM64_BOARD_CONFIG_SWEET
++/*
++ * 0173: big cores first. The SM8150's eight cores are one processor set here, and an idle core is taken
++ * lowest number first: cpu0-3, the Cortex-A55s. So on a quiet phone the render thread ran on a slow core
++ * while the A76s (cpu4-7) slept. Now a timeshare thread at sweetbig (boot-arg, default 37 = user
++ * initiated; 0 = old behaviour) or above takes an idle big core when there is one, and a thread below it
++ * an idle small core; with none of its kind idle the old choice stands (any idle core, then preemption).
++ * sweetbigmask = the big cores (default 0xf0).
++ */
++TUNABLE(int, sweet_big_pri, "sweetbig", 37);
++TUNABLE(uint32_t, sweet_big_mask, "sweetbigmask", 0xf0);
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ processor_t
+ choose_processor(
+ 	processor_set_t         starting_pset,
+@@ -5041,6 +5054,21 @@
+ 		processor = processor->processor_primary;
+ 	}
+ 
++#ifdef ARM64_BOARD_CONFIG_SWEET
++	if (sweet_big_pri != 0 && thread->sched_pri < BASEPRI_RTQUEUES) {
++		uint64_t sweet_idle = (pset->cpu_state_map[PROCESSOR_IDLE] &
++		    pset->primary_map &
++		    pset->recommended_bitmask);
++		sweet_idle &= (thread->sched_pri >= sweet_big_pri) ? (uint64_t)sweet_big_mask : ~(uint64_t)sweet_big_mask;
++		if (sweet_idle != 0) {
++			if (processor != PROCESSOR_NULL && bit_test(sweet_idle, processor->cpu_id)) {
++				return processor;       /* where it ran last: warm caches */
++			}
++			return processor_array[lsb_first(sweet_idle)];
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ 	/*
+ 	 * Only consult platform layer if pset is active, which
+ 	 * it may not be in some cases when a multi-set system
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1061,12 +1061,12 @@
+ /*
+  * 0172 CPU top (bsd/dev/sweet_sample.c): the CPU time of every thread in the system so far (user and
+  * system, mach units), with its process, name, priority and - for a blocked kernel thread - the
+- * unslid continuation it will resume in. Idle threads are left out. Returns the number of threads
++ * unslid continuation it will resume in, and the core it ran on last (0173). Idle threads are left out. Returns the number of threads
+  * seen; at most max are stored.
+  */
+ struct sweet_top_ent {
+ 	uint64_t tid, user, sys, cont;
+-	int pid, pri;
++	int pid, pri, cpu;
+ 	char name[24];
+ };
+ unsigned sweet_top_snapshot(struct sweet_top_ent *v, unsigned max);
+@@ -1094,6 +1094,8 @@
+ 			e->sys = usage.ru_system_time_mach;
+ 			e->pid = (task == TASK_NULL || task == kernel_task) ? 0 : pid_from_task(task);
+ 			e->pri = thread->sched_pri;
++			processor_t last = thread->last_processor;      /* 0173 */
++			e->cpu = last != PROCESSOR_NULL ? last->cpu_id : -1;
+ 			e->cont = (e->pid == 0 && thread->continuation != NULL) ?
+ 			    VM_KERNEL_UNSLIDE((vm_offset_t)thread->continuation) : 0;
+ 			void *uth = get_bsdthread_info(thread);
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -137,13 +137,14 @@
+  *
+  *   #### CPU TOP: 5000 ms, 1234 threads, 3.42 cores busy; per cpu %: 100 12 3 5 40 2 1 99
+  *   TOP proc backboardd[57] 98.2% (user 20.1 sys 78.1) 3 threads
+- *   TOP thread backboardd[57] tid 1234 "name" 97.0% (user 19.0 sys 78.0) pri 47
+- *   TOP thread kernel_task[0] tid 300 "" 99.0% (user 0.0 sys 99.0) pri 81 cont 0xfffffe0007123456
++ *   TOP thread backboardd[57] tid 1234 "name" 97.0% (user 19.0 sys 78.0) pri 47 cpu 5
++ *   TOP thread kernel_task[0] tid 300 "" 99.0% (user 0.0 sys 99.0) pri 81 cpu 2 cont 0xfffffe0007123456
+  *   TOP --- done
+  *
+  * 100% = one core for the whole interval. "per cpu" is each core's time out of idle (from the scheduler's
+  * idle accounting, the governor's source); the thread times are what the threads were charged. cont = where
+- * a blocked kernel thread resumes (unslid: look it up in the kernel file).
++ * a blocked kernel thread resumes (unslid: look it up in the kernel file). cpu = the core the thread ran
++ * on last, at the end of the interval (0173; 0-3 are the A55s, 4-7 the A76s).
+  * On demand: "top [SECS] [N]" on the command server (defaults 5 s, 15 lines each). By itself: every sweettop
+  * seconds (boot-arg, default 60, 0 = never), 5 s long. Then "sample NAME 200 20" shows where a busy user
+  * process is (tools/sweet-profile.py).
+@@ -153,7 +154,7 @@
+ 
+ struct sweet_top_ent {
+ 	uint64_t tid, user, sys, cont;
+-	int pid, pri;
++	int pid, pri, cpu;
+ 	char name[24];
+ };
+ extern unsigned sweet_top_snapshot(struct sweet_top_ent *v, unsigned max);
+@@ -280,9 +281,9 @@
+ 			snprintf(cont, sizeof(cont), " cont 0x%llx", b[best].cont);
+ 		}
+ 		sweet_top_pname(b[best].pid, pname, sizeof(pname));
+-		printf("TOP thread %s[%d] tid %llu \"%s\" %u.%u%% (user %u.%u sys %u.%u) pri %d%s\n", pname, b[best].pid,
++		printf("TOP thread %s[%d] tid %llu \"%s\" %u.%u%% (user %u.%u sys %u.%u) pri %d cpu %d%s\n", pname, b[best].pid,
+ 		    b[best].tid, b[best].name, TOP_PCT(d, dt), TOP_PCT(b[best].user, dt), TOP_PCT(b[best].sys, dt),
+-		    b[best].pri, cont);
++		    b[best].pri, b[best].cpu, cont);
+ 		b[best].user = b[best].sys = 0;
+ 	}
+ 	printf("TOP --- done\n");
+@@ -327,6 +328,13 @@
+ {
+ 	static int chan;
+ 	unsigned period = 60;
++	extern int sweet_big_pri;               /* 0173, osfmk/kern/sched_prim.c */
++	extern uint32_t sweet_big_mask;
++	if (sweet_big_pri != 0) {
++		printf("#### BIG CORES FIRST FOR PRIORITY %d AND UP (CPU MASK 0x%x)\n", sweet_big_pri, sweet_big_mask);
++	} else {
++		printf("#### BIG CORES FIRST IS OFF (sweetbig=0)\n");
++	}
+ 	(void)PE_parse_boot_argn("sweettop", &period, sizeof(period));
+ 	if (period == 0) {
+ 		return;

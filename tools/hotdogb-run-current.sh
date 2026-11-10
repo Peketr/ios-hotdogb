@@ -9,7 +9,16 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-10, in use without the log stream): same kernel 0172 and args. The idle A/B is done
+# Current (2026-11-10, big cores first): kernel 0173 (WSL build) = 0172 + the scheduler gives threads at priority 37
+# and up an idle A76 (cpu4-7) before an A55, lower ones an idle A55 first (sweetbig=N sets the priority, sweetbig=0 =
+# old behaviour; sweetbigmask=0xf0). Expect "#### BIG CORES FIRST FOR PRIORITY 37 AND UP (CPU MASK 0xf0)" (early: it
+# may be before the live log starts). "TOP thread" lines now end in "cpu N" = the core the thread ran on last.
+# Test: unlock, then (PowerShell, in src) python tools\hotdogb-swipebench.py 30 --no-unlock, twice; compare with
+# 27/23 fps (0172, services off) and 34/36 (0172 with the junk load). In CPU TOP during the swipes the
+# backboardd "com.apple.coreanimation" thread should say cpu 4-7 and the per cpu % should sit on the last four.
+# Measured (k0173-swipe-big-1110): 63.8 and 67.7 fps, render thread on cpu 7 / 5. Now: use the phone and
+# watch heat (SWEET BATTERY temp) against k0172-nolog-1110. A/B: -a "... sweetbig=0".
+# Before (2026-11-10, in use without the log stream): same kernel 0172 and args. The idle A/B is done
 # (k0172-nolog-1110: 0.45 cores busy instead of 5.1; oslog-reportcrash removed and vmd disabled on the phone).
 # Swipebench done too (HANDOFF): 27/23 fps without the junk load, 34/36 fps with it, 29/25 with the governors off:
 # the render thread sits on the A55s when the phone is idle. Next kernel: fast cores first for UI threads.
@@ -77,11 +86,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0172}
-TAG=k0172-top
-if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0171 ]; then
-	echo "no $KERNEL yet: using kernel-0171 (no CPU top)" >&2
-	KERNEL=work/boot/kernel-0171 TAG=k0171-bohandle
+KERNEL=${KERNEL:-work/boot/kernel-0173}
+TAG=k0173-big
+if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0172 ]; then
+	echo "no $KERNEL yet: using kernel-0172 (no big cores first)" >&2
+	KERNEL=work/boot/kernel-0172 TAG=k0172-top
 fi
 SECS=900
 OPTS=(-q -G)

@@ -5,6 +5,28 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0173 big cores first: swipebench 64 / 68 fps (was 27 / 23) (run k0173-swipe-big-1110, 2026-11-10)
+- Cause found in the source: the 8 cores are one processor set (MAX_CPU_CLUSTERS 1, clutch scheduler, no AMP) and
+  choose_processor took the lowest-numbered idle core = cpu0-3, the A55s.
+- 0173 (WSL build, sha256 fd933acb...): a timeshare thread at priority >= `sweetbig` (default 37; 0 = off) takes an
+  idle core of `sweetbigmask` (default 0xf0), a lower one an idle small core; none of its kind idle = old choice.
+  Realtime threads untouched. TOP thread lines end in "cpu N" (core the thread ran on last, at the end of the interval).
+- Observed, same args and same procedure as the 0172 runs (oslog job + vmd off, unlock, home screen checked,
+  `hotdogb-swipebench.py 30 --no-unlock` twice, `top 15 12` during each):
+  - **63.8 fps** (windows 54.6 75.4 61.4) and **67.7 fps** (78.8 79.2 45.0); GPU busy 75% / 78%; backboardd 1533 /
+    1612 submits (0172 without the load: 27.0 / 22.8 fps; with the load 34.0 / 36.4).
+  - CPU TOP: 1.73 / 1.63 cores busy, per cpu 30 21 16 15 | 43 42 34 24 and 36 25 17 17 | 45 39 34 23.
+    backboardd "com.apple.coreanimation" (pri 54) 63% on cpu 7 / cpu 5, SpringBoard main (pri 47) 17% on cpu 6,
+    metal2vulkan-queue-wait (pri 46) 13% on cpu 4 / 6; metal2vulkan-handlers (pri 31) 9% on cpu 4 / cpu 0.
+  - The "#### BIG CORES FIRST ..." line comes before the live log starts (not seen in live.txt; the kernel string
+    check passed and the placement shows it is on).
+- Not measured yet: heat and battery current in use against 0172; an idle run on 0173 (expect the same as
+  k0172-nolog-1110, the idle work is below priority 37 - not checked); sweetbig=0 on the same kernel as the A/B;
+  other thresholds (31 would move default-priority app work to the A76s too).
+- During this work the WSL disk went read-only (ext4 "emergency_ro"); `wsl --shutdown` brought it back, but the
+  kernel log says "mounting fs with errors, running e2fsck is recommended". That shutdown cut the live recording
+  of the user's own run k0172-top-1110-1801 at 18:10:48 (the phone ran on to its timer).
+
 ### HOTDOGB: swipebench is SLOWER without the background load: the render thread sits on the A55s (2026-11-10)
 - Three runs of kernel 0172, same args, unlock ~22 s after the live log starts (home screen checked: centre pixel
   72b2d2ff), then `hotdogb-swipebench.py 30 --no-unlock` twice. fps / GPU busy / CPU TOP during the swipes:

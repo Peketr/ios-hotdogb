@@ -228,3 +228,4 @@ written to the alt ramoops region via /dev/access-ramoops did not survive reboot
   osfmk/kern/exception.c, global thread list) and logs the busiest processes and threads with user/system split and
   per-core load ("#### CPU TOP ..." / "TOP proc" / "TOP thread" / "TOP --- done"). Every `sweettop` seconds (default
   60, 0 = off) over 5 s; on demand `flame-cmd.py top [SECS] [N]`.
+- 0173 hotdogb big cores first: choose_processor (osfmk/kern/sched_prim.c; one pset of 8, idle cores were taken lowest number first = the A55s) gives a timeshare thread at priority `sweetbig` (default 37, 0 = off) or above an idle core of `sweetbigmask` (default 0xf0 = cpu4-7), a thread below it an idle small core; none of its kind idle = old choice. "#### BIG CORES FIRST FOR PRIORITY N AND UP"; TOP thread lines end in "cpu N" (core it ran on last).
