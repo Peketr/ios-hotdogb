@@ -1,0 +1,115 @@
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -554,10 +554,68 @@
+ 	uint32_t groups, nested, other, cut, lost, parsed, budget;
+ 	char markers[64];
+ 	uint32_t nmark;
++	/*
++	 * 0177: the 2D engine's state as the stream sets it (GRAS_A2D_SRC_XMIN..DEST_BR 0x8401-0x8406,
++	 * TPL1_A2D_SRC_TEXTURE_INFO..PITCH 0xb4c0-0xb4c4, RB_A2D_DEST_BUFFER_INFO..PITCH 0x8c17-0x8c1a), and each
++	 * CP_BLIT grouped into runs: consecutive one-row blits into the same destination, one row further down each
++	 * time, are one copy that Turnip split per row (an A6xx buffer<->image copy whose buffer rows or start are
++	 * not 64-byte aligned, tu_clear_blit.cc).
++	 */
++	uint32_t gras[6], tpl[5], rb[4];
++	struct SweetBlitRun {
++		uint64_t src0, src1, dst;
++		uint32_t srcinfo, srcpitch, dstinfo, dstpitch, x, w, h, y0, y1, n;
++	} cur, runs[40];
++	uint32_t nruns, blits, rowblits, rowruns, rowruns_dropped;
+ };
+ static const uint32_t hist_watch[HIST_WATCH] = { 0x80a1, 0x8800, 0x80f0, 0x88e3 };
+ #define HIST_DRAWS(st)  ((st)->op[0x38] + (st)->op[0x22] + (st)->op[0x28] + (st)->op[0x29] + (st)->op[0x2a])
+ 
++static void
++hist_blit_close(struct SweetGpuHist *st)
++{
++	struct SweetGpuHist::SweetBlitRun *r = &st->cur;
++	if (r->n >= 2) {
++		st->rowruns++;
++		st->rowblits += r->n;
++		if (st->nruns < sizeof(st->runs) / sizeof(st->runs[0])) {
++			st->runs[st->nruns++] = *r;
++		} else {
++			st->rowruns_dropped++;
++		}
++	}
++	r->n = 0;
++}
++
++static void
++hist_blit(struct SweetGpuHist *st)
++{
++	st->blits++;
++	struct SweetGpuHist::SweetBlitRun b;
++	b.src0 = b.src1 = st->tpl[2] | ((uint64_t)st->tpl[3] << 32);
++	b.dst = st->rb[1] | ((uint64_t)st->rb[2] << 32);
++	b.srcinfo = st->tpl[0];
++	b.srcpitch = st->tpl[4];
++	b.dstinfo = st->rb[0];
++	b.dstpitch = st->rb[3];
++	b.x = (st->gras[0] >> 8) & 0x1ffff;
++	uint32_t tl = st->gras[4], br = st->gras[5];
++	b.w = (br & 0x3fff) - (tl & 0x3fff) + 1;
++	b.y0 = b.y1 = (tl >> 16) & 0x3fff;
++	b.h = ((br >> 16) & 0x3fff) - b.y0 + 1;
++	b.n = 1;
++	struct SweetGpuHist::SweetBlitRun *r = &st->cur;
++	if (r->n != 0 && b.h == 1 && r->h == 1 && b.dst == r->dst && b.w == r->w && b.srcinfo == r->srcinfo &&
++	    b.y0 == r->y1 + 1) {
++		r->src1 = b.src1;
++		r->y1 = b.y0;
++		r->n++;
++		return;
++	}
++	hist_blit_close(st);
++	*r = b;
++}
++
+ void
+ SweetAcceleratorUserClient::v2HistParse(struct SweetGpuHist *st, uint64_t iova, uint32_t dwords, int depth)
+ {
+@@ -614,6 +672,9 @@
+ 				break;
+ 			}
+ 			st->op[op]++;
++			if (op == 0x2c) {                       /* CP_BLIT (0177) */
++				hist_blit(st);
++			}
+ 			if (op == 0x3f && cnt >= 3) {           /* CP_INDIRECT_BUFFER */
+ 				st->nested++;
+ 				if (depth < 3) {
+@@ -642,6 +703,16 @@
+ 					break;
+ 				}
+ 			}
++			for (uint32_t k = 0; k < cnt; k++) {     /* 0177: the 2D engine's registers */
++				uint32_t r = reg + k, v = w[i + 1 + k];
++				if (r >= 0x8401 && r <= 0x8406) {
++					st->gras[r - 0x8401] = v;
++				} else if (r >= 0xb4c0 && r <= 0xb4c4) {
++					st->tpl[r - 0xb4c0] = v;
++				} else if (r >= 0x8c17 && r <= 0x8c1a) {
++					st->rb[r - 0x8c17] = v;
++				}
++			}
+ 			for (uint32_t k = 0; k < HIST_WATCH; k++) {
+ 				if (hist_watch[k] >= reg && hist_watch[k] < reg + cnt) {
+ 					uint32_t v = w[i + 1 + hist_watch[k] - reg];
+@@ -720,6 +791,15 @@
+ 		IOLog("GPUHIST reg %#x: %u writes, first %#x last %#x\n", hist_watch[k], st->watch_n[k], st->watch_first[k],
+ 		    st->watch_last[k]);
+ 	}
++	hist_blit_close(st);
++	IOLog("#### GPUHIST BLIT RUNS: %u blits, %u of them in %u one-row runs (%u runs not listed)\n", st->blits,
++	    st->rowblits, st->rowruns, st->rowruns_dropped);
++	for (uint32_t k = 0; k < st->nruns; k++) {
++		struct SweetGpuHist::SweetBlitRun *r = &st->runs[k];
++		IOLog("GPUHIST run %u: %u rows of %u px at x %u, dst y %u-%u, src %#llx..%#llx (step %llu), "
++		    "src info %#x pitch %#x, dst %#llx info %#x pitch %#x\n", k, r->n, r->w, r->x, r->y0, r->y1, r->src0,
++		    r->src1, (r->src1 - r->src0) / (r->n - 1), r->srcinfo, r->srcpitch, r->dst, r->dstinfo, r->dstpitch);
++	}
+ 	IOLog("GPUHIST --- done: %u dw read, %u draw-state groups, %u words not packets, %u cut, %u IBs not read\n",
+ 	    st->parsed, st->groups, st->other, st->cut, st->lost);
+ 	IODelete(st, struct SweetGpuHist, 1);

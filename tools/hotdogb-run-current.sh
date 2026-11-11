@@ -9,7 +9,13 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-11, panel copy thread): kernel 0175 (WSL build) = 0173 + 0174 (gpuhist command) + the panel copy
+# Current (2026-11-11, where the one-row GPU copies come from): kernel 0177 (WSL build) = 0175 + 0176 (unaligned
+# IOSurface rows rounded to 64 bytes; no measurable effect) + the gpuhist command also groups the 2D blits into one-row
+# runs. Once the home screen is up, swipe (python tools\hotdogb-swipebench.py 30 --no-unlock) and meanwhile run
+# python tools\flame-cmd.py "gpuhist 100000 2". Expect "#### GPUHIST BLIT RUNS: ~11000 blits, M of them in R one-row
+# runs" and "GPUHIST run k: ..." lines in logs\runs\NAME\live.txt: step = the buffer pitch (a multiple of 64 or not),
+# x = the start's misalignment in pixels, dst pitch 0 = a copy back to a buffer. Back to 0175: KERNEL=work/boot/kernel-0175.
+# Before (2026-11-11, panel copy thread): kernel 0175 (WSL build) = 0173 + 0174 (gpuhist command) + the panel copy
 # on its own thread, so vsync never waits for the GPU (sweetpthread=0 = copy in the vsync timer as before). Expect
 # "SWEET FB: 5s: ... vsync late max ~1000 us, 0 ticks > 1/8 period late" while swiping (was up to 264 ms late).
 # Measured: real fps unchanged, ~33-35 swaps/s (k0175-pthread-1111 / k0175-nothread-1111). Earlier swipebench scores
@@ -92,11 +98,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0175}
-TAG=k0175-pthread
-if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0173 ]; then
-	echo "no $KERNEL yet: using kernel-0173 (panel copy in the vsync timer)" >&2
-	KERNEL=work/boot/kernel-0173 TAG=k0173-big
+KERNEL=${KERNEL:-work/boot/kernel-0177}
+TAG=k0177-blitruns
+if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0175 ]; then
+	echo "no $KERNEL yet: using kernel-0175 (no blit runs in gpuhist)" >&2
+	KERNEL=work/boot/kernel-0175 TAG=k0175-pthread
 fi
 SECS=900
 OPTS=(-q -G)

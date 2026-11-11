@@ -5,6 +5,52 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: the ~16 ms per backboardd frame is ~9,000 one-row 2D blits re-copying the same shadowed textures every frame; Turnip fix 0101 written (runs k0175-sysmem-1111, k0176-surf64-1111, k0175-m2vmsg-1111, k0177-blitruns-1111, 2026-11-11)
+- Observed, TU_DEBUG=sysmem (`/var/local/mtl2-tu-debug`, removed again): the gpuhist shows direct rendering
+  (marker 1, 124 draws instead of ~1,700). Swipebench 38.7 / 33.0 fps, within the noise of 0175's 34.7 / 32.9.
+  The heavy IB still takes 16.3 ms (17.5 with tiles). ~177k of its ~187k dwords are ~10,900 CP_BLITs
+  (~1.5 us each). The second IB takes 7.3 ms.
+- The code (Mesa tu_clear_blit.cc copy_buffer_to_image ~2843, copy_image_to_buffer ~3067): on A6xx a
+  buffer<->image copy whose buffer start or row pitch is not a multiple of 64 bytes is issued as one CP_BLIT
+  per row (A7xx has an unaligned mode). ~150 such copies of ~76 rows per frame, so smallish images, not
+  full-screen ones.
+- 0176 (round an explicit unaligned IOSurfaceBytesPerRow up to 64, `sweetsurfalign`, default 1): only 5
+  unaligned surfaces in a whole boot (e.g. SpringBoard 230x186 LA08 bpr 480 -> 512); backboardd's framebuffers
+  are already 4608. CP_BLIT is still ~11,400 per job, fps 33.4 / 32.4. Harmless, kept. So the copies do not come
+  from unaligned IOSurfaces.
+- Candidate sources in metal2vulkan (any of them, not yet told apart):
+  - shadow images of textures over MTLBuffers (texture.rs ~2044, `Degradation::ShadowedTexture`), copied in
+    and back around each encoder (shadow.rs ~826);
+  - `replaceRegion` uploads, packed tightly (pitch = width x bpp, texture.rs ~5449);
+  - `copyFromBuffer:toTexture` blits with the app's bytesPerRow (blit_texture.rs ~801).
+- `SWEET_M2V_MESSAGES=/var/local/m2v-msg.log` in `/var/local/mtl2-env` reached backboardd, SpringBoard and
+  others (console "env ..." lines), but no file appeared (k0175-m2vmsg-1111, 37.6 fps swipebench). Guess: the
+  bridge could not create it. Both it and `/var/local/mtl2.log` (opt-in: written only when it exists) are now
+  pre-created empty with mode 666; the env file is still on the phone.
+- MEASURED with 0177 (k0177-blitruns-1111, swipebench 39.7 fps, two backboardd jobs captured mid-swipe): 8,900 /
+  8,964 CP_BLITs per job, 8,814 / 8,876 of them in ~50 one-row runs. The same destinations in both jobs, so the
+  same textures are copied again every frame: metal2vulkan shadow copy-ins (shadow.rs: "copy in before the first
+  command of an encoder that uses the texture"; the CPU may have written the buffer). All are buffer -> tiled
+  image with tightly packed rows, start aligned (x 0, once x 8):
+  - 2 large RGBA8: 1105x1160 (pitch ~4420) and 1271x1823 (~5084), ~3,000 rows;
+  - ~20 x 180x180 RGBA8 (pitch 720: home screen icons), ~3,600 rows;
+  - ~25 A8 140-285 px wide x 62/134 rows (pitch 160/224/288: icon labels), ~2,200 rows;
+  - a few tiny ones (6 px) back to buffers.
+- Fix written, NOT built yet: phone/turnip/patches/0101-sweet-a6xx-unaligned-buffer-copy-repack.patch
+  (tu_clear_blit.cc, A6xx 2D path only). A pitch that is a multiple of 64 with an unaligned start: one blit
+  with an x offset. An unaligned pitch: with k = 64 / gcd(pitch, 64), k blits at pitch k x pitch repack the
+  rows into Turnip's scratch BO at a 64-aligned pitch, then one blit into the image (Turnip's own staging
+  flushes in between). Expected ~210 blits per frame instead of ~8,900. A/B without rebuilding:
+  `TU_SWEET_ROW_REPACK=0` in /var/local/mtl2-env. Needs the Mac: setup-metal2-trees.sh, build-turnip-ios.sh,
+  phone/metal2/build.sh, then tools/hotdogb-metal2-install.py with the new SweetMetal2.tgz. Check after:
+  gpuhist "BLIT RUNS" should show few one-row runs; the heavy IB ~16 ms -> a few ms; the images must look right
+  (icons, labels, wallpaper).
+- Kernel 0177 (sha256 b1d97bc2..., booted in k0177-blitruns-1111) = 0176 + gpuhist groups CP_BLITs into one-row runs:
+  `#### GPUHIST BLIT RUNS: N blits, M of them in R one-row runs` and up to 40 `GPUHIST run k: ROWS rows of W px
+  at x X, dst y.., src A..B (step = the buffer pitch), src info/pitch, dst base/info/pitch`. x > 0 = the start
+  is unaligned; step % 64 != 0 = the pitch is. A dst pitch of 0 = the image->buffer direction (copy back).
+- The phone dropped off USB after k0175-m2vmsg-1111 ended (no fastboot, no network); it was back in fastboot later.
+
 ### HOTDOGB: kernel 0175 panel copy on its own thread: vsync regular, real fps unchanged (~33-35); EARLIER FPS NUMBERS WERE INFLATED (runs k0175-pthread-1111, k0175-nothread-1111, 2026-11-11)
 - 0175 (WSL build, sha256 d14264d6...) = 0174 + AppleCLCD's vsync timer only signals a present thread (boot-arg
   `sweetpthread`, default 1; 0 = the copy in the timer as before). The thread copies the latest swapped frame, one

@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -328,6 +328,40 @@
+ 	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
+ 		return kIOReturnBadArgument;
+ 	}
++	/*
++	 * 0176: a creator's own IOSurfaceBytesPerRow that is not a multiple of 64 (CA: width x 4, e.g. 4500 for
++	 * 1125 px) goes up to the next one, for a surface without planes. metal2vulkan aliases a texture over
++	 * the surface with a linear VkImage only when Turnip's linear row pitch (64-byte aligned) equals the
++	 * surface's; otherwise it keeps a shadow image and copies the bytes in and back around every encoder,
++	 * which Turnip does one row per 2D blit on A6xx (~10k blits, ~16 ms per backboardd frame). Creators read
++	 * the pitch back (IOSurfaceGetBytesPerRow); the allocation grows below. Boot-arg sweetsurfalign=0: off.
++	 */
++	{
++		static int align64 = -1;
++		static uint32_t logged;
++		if (align64 < 0) {
++			uint32_t v = 1;
++			PE_parse_boot_argn("sweetsurfalign", &v, sizeof(v));
++			align64 = (int)v;
++			IOLog(align64 ? "#### SURFACE ROWS ROUNDED UP TO 64 BYTES\n" :
++			    "#### SURFACE ROWS AS GIVEN (sweetsurfalign=0)\n");
++		}
++		uint32_t bpr = s->bytesPerRow;
++		bool unaligned = props->getObject("IOSurfaceBytesPerRow") != NULL && (bpr & 63) != 0;
++		bool round = unaligned && align64 && props->getObject("IOSurfacePlaneInfo") == NULL &&
++		    bpr <= 0xffffffffu - 63;
++		if (unaligned && logged < 48) {
++			char who[32] = "";
++			proc_selfname(who, sizeof(who));
++			logged++;
++			IOLog("SWEET SURF: unaligned rows: %s %ux%u fmt 0x%x bpr %u -> %u%s\n", who, s->width, s->height,
++			    s->pixelFormat, bpr, round ? (bpr + 63) & ~63u : bpr,
++			    props->getObject("IOSurfacePlaneInfo") ? " (planar, kept)" : round ? "" : " (kept)");
++		}
++		if (round) {
++			s->bytesPerRow = (bpr + 63) & ~63u;
++		}
++	}
+ 	end = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);
+ 
+ 	OSArray *planes = one_plane ? NULL : OSDynamicCast(OSArray, props->getObject("IOSurfacePlaneInfo"));

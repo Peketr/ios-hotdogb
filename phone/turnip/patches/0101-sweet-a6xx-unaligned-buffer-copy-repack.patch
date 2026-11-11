@@ -1,0 +1,125 @@
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -13,6 +13,7 @@
+ #include "util/format_rgb9e5.h"
+ #include "util/format_srgb.h"
+ #include "util/half_float.h"
++#include "util/u_debug.h"
+ 
+ #include "common/freedreno_gpu_event.h"
+ #include "common/freedreno_lrz.h"
+@@ -2784,6 +2785,99 @@
+       *height = DIV_ROUND_UP(*height, block_height);
+ }
+ 
++/*
++ * Sweet (A6xx, iOS): a buffer->image copy whose buffer rows do not start on 64-byte boundaries, which the
++ * 2D engine's source needs (its pitch is in 64-byte units and its base 64-byte aligned), without one
++ * blit per row. metal2vulkan's shadow of a texture over a buffer with tightly packed rows (a 180x180
++ * RGBA8 icon: 720-byte rows) copies in before every encoder that samples it; at ~1.5 us per row blit,
++ * backboardd spent ~13 ms of GPU time per frame on ~9000 of them.
++ *
++ * - The pitch is aligned but the start is not: one blit from the start rounded down, the texels x
++ *   pixels in.
++ * - The pitch is not: with k = 64 / gcd(pitch, 64), rows r, r+k, r+2k, ... start at the same offset
++ *   within 64 bytes and lie k * pitch (a multiple of 64) apart. k blits, one per r, repack the rows
++ *   into the device's scratch buffer at a 64-byte aligned pitch, and one blit copies that into the
++ *   image: k + 1 blits instead of one per row.
++ *
++ * Returns false where neither applies (the caller copies row by row). The 2D ops only.
++ */
++template <chip CHIP>
++static bool
++sweet_copy_buffer_rows(struct tu_cmd_buffer *cmd, struct tu_cs *cs, const struct blit_ops *ops,
++                       enum pipe_format src_format, enum pipe_format dst_format,
++                       VkImageAspectFlags aspect_mask, unsigned blit_param, const struct tu_image *dst_image,
++                       const struct fdl6_view *dst, uint32_t layer, uint64_t src_va, uint32_t pitch,
++                       uint32_t block_size, VkOffset3D offset, VkExtent3D extent)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = debug_get_bool_option("TU_SWEET_ROW_REPACK", true);
++   if (!enabled || ops != &r2d_ops<CHIP> || block_size == 0 || extent.height < 2 || pitch == 0)
++      return false;
++
++   if (!(pitch & 63)) {
++      uint32_t mis = src_va & 63;
++      if (mis % block_size || mis / block_size + extent.width > MAX_VIEWPORT_SIZE)
++         return false;
++      uint32_t x = mis / block_size;
++      ops->src_buffer(cmd, cs, src_format, src_va & ~63ull, pitch, x + extent.width, extent.height,
++                      dst_format);
++      ops->coords(cmd, cs, (VkOffset2D) { offset.x, offset.y }, (VkOffset2D) { (int32_t) x, 0 },
++                  (VkExtent2D) { extent.width, extent.height });
++      ops->run(cmd, cs);
++      return true;
++   }
++
++   uint32_t k = 64 >> MIN2(ffs(pitch) - 1, 6);
++   uint64_t row = (uint64_t) extent.width * block_size;
++   uint64_t tpitch = align64(row, 64);
++   if (k + 1 >= extent.height || (uint64_t) k * pitch >= (1u << 22) || k * tpitch >= (1u << 21))
++      return false;
++   for (uint32_t r = 0; r < k; r++) {
++      uint32_t mis = (src_va + (uint64_t) r * pitch) & 63;
++      if (mis % block_size || mis / block_size + extent.width > MAX_VIEWPORT_SIZE)
++         return false;
++   }
++
++   struct tu_bo *scratch;
++   if (tu_get_scratch_bo(cmd->device, tpitch * extent.height, &scratch) != VK_SUCCESS)
++      return false;
++
++   /* the scratch buffer's last reader (an earlier copy) done before these writes */
++   tu_cs_emit_wfi(cs);
++   ops->setup(cmd, cs, src_format, src_format, VK_IMAGE_ASPECT_COLOR_BIT, blit_param, false, false,
++              VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT);
++   for (uint32_t r = 0; r < k; r++) {
++      uint64_t va = src_va + (uint64_t) r * pitch;
++      uint32_t x = (va & 63) / block_size;
++      uint32_t rows = (extent.height - r + k - 1) / k;
++      ops->src_buffer(cmd, cs, src_format, va & ~63ull, k * pitch, x + extent.width, rows, src_format);
++      ops->dst_buffer(cs, src_format, scratch->iova + r * tpitch, k * tpitch, src_format);
++      ops->coords(cmd, cs, (VkOffset2D) { 0, 0 }, (VkOffset2D) { (int32_t) x, 0 },
++                  (VkExtent2D) { extent.width, rows });
++      ops->run(cmd, cs);
++   }
++
++   /* as the staging copy between images (tu_copy_image_to_image): the writes out of CCU, the reads
++    * below through UCHE see them */
++   tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_CLEAN_COLOR);
++   tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_INVALIDATE_COLOR);
++   tu_emit_event_write<CHIP>(cmd, cs, FD_CACHE_INVALIDATE);
++   tu_cs_emit_wfi(cs);
++
++   ops->setup(cmd, cs, src_format, dst_format, aspect_mask, blit_param, false, dst_image->layout[0].ubwc,
++              (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
++              (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
++   ops->dst(cs, dst, layer, src_format);
++   ops->src_buffer(cmd, cs, src_format, scratch->iova, tpitch, extent.width, extent.height, dst_format);
++   ops->coords(cmd, cs, (VkOffset2D) { offset.x, offset.y }, (VkOffset2D) { 0, 0 },
++               (VkExtent2D) { extent.width, extent.height });
++   ops->run(cmd, cs);
++   /* and done reading it before anything writes it again */
++   tu_cs_emit_wfi(cs);
++   return true;
++}
++
+ template <chip CHIP>
+ static void
+ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
+@@ -2841,7 +2935,12 @@
+ 
+       uint64_t src_va = vk_buffer_address(&src_buffer->vk, info->bufferOffset) + layer_size * i;
+       bool unaligned = (src_va & 63) || (pitch & 63);
+-      if (!has_unaligned && unaligned) {
++      if (!has_unaligned && unaligned &&
++          sweet_copy_buffer_rows<CHIP>(cmd, cs, ops, src_format, dst_format,
++                                       info->imageSubresource.aspectMask, blit_param, dst_image, &dst, i,
++                                       src_va, pitch, block_size, offset, extent)) {
++         continue;
++      } else if (!has_unaligned && unaligned) {
+          for (uint32_t y = 0; y < extent.height; y++) {
+             uint32_t x = (src_va & 63) / block_size;
+             uint32_t excess_width = 0;
