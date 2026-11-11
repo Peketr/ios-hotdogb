@@ -45,6 +45,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   phone/metal2/build.sh, then tools/hotdogb-metal2-install.py with the new SweetMetal2.tgz. Check after:
   gpuhist "BLIT RUNS" should show few one-row runs; the heavy IB ~16 ms -> a few ms; the images must look right
   (icons, labels, wallpaper).
+- Mac setup broke on the first try (log fos.hu/1wp1): "DOES NOT APPLY: offline-adreno-compiler-probe.patch"
+  (meson.options:899). Cause: three UniXNU patches append to meson.options, so in an already patched tree the
+  earlier ones neither reverse nor apply. This was not caused by 0101. Fixed in tools/setup-metal2-trees.sh:
+  work/turnip/mesa-patches.stamp (hash of the patch set + of the tree's changes). If the stamp doesn't match,
+  the tree's changes are saved to work/turnip/mesa-before-<time>.diff and Mesa restarts from 85fda3b3 with
+  every patch. Tested in WSL on a copy of the patched tree: stale tree rebuilt, a second run says "all 10
+  patches already in", a changed patch set rebuilds again.
 - Kernel 0177 (sha256 b1d97bc2..., booted in k0177-blitruns-1111) = 0176 + gpuhist groups CP_BLITs into one-row runs:
   `#### GPUHIST BLIT RUNS: N blits, M of them in R one-row runs` and up to 40 `GPUHIST run k: ROWS rows of W px
   at x X, dst y.., src A..B (step = the buffer pitch), src info/pitch, dst base/info/pitch`. x > 0 = the start
