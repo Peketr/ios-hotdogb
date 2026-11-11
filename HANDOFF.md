@@ -5,6 +5,38 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: kernel 0175 panel copy on its own thread: vsync regular, real fps unchanged (~33-35); EARLIER FPS NUMBERS WERE INFLATED (runs k0175-pthread-1111, k0175-nothread-1111, 2026-11-11)
+- 0175 (WSL build, sha256 d14264d6...) = 0174 + AppleCLCD's vsync timer only signals a present thread (boot-arg
+  `sweetpthread`, default 1; 0 = the copy in the timer as before). The thread copies the latest swapped frame, one
+  per kick; a kick while it is busy is counted as "skipped". "SWEET FB: 5s" lines now end in "vsync late max N us,
+  N ticks > 1/8 period late, N copies skipped (busy)". Milestone "#### PANEL COPY ON ITS OWN THREAD (VSYNC NEVER WAITS
+  FOR THE GPU)" / "#### PANEL COPY IN THE VSYNC TIMER (sweetpthread=0)" (before the live log starts; not seen).
+- Observed: the "5s" stats window is 450 vsync ticks, so with late ticks it ran long. With the copy in the timer
+  (sweetpthread=0) the windows lasted 5.0-10.4 s while swiping, vsync up to 264 ms late, 25-112 ticks per window
+  > 1.4 ms late. The swipebench divided by 5, so it overstated fps by up to 2x. Re-scored from the logs with the real
+  time between FB lines (scratchpad rescore.py; tools/hotdogb-swipebench.py now does this):
+
+  | run | old score | real swaps/s | panel copies/s |
+  |---|---|---|---|
+  | k0172-swipe-nolog-1110 (0172) | 27.0 / 22.8 | 27.0 / 22.8 | 26.9 / 22.7 |
+  | k0172-swipe-withlog-1110 (0172 + junk load) | 34.0 / 36.4 | 32.8 / 30.0 | 31.8 / 25.8 |
+  | k0173-swipe-big-1110 (0173) | **63.8 / 67.7** | **33.6 / 33.6** | 19.3 / 17.3 |
+  | k0175-nothread-1111 (0175, sweetpthread=0) | 47.0 / 70.1 | 33.1 (both passes) | 23.1 |
+  | k0175-pthread-1111 (0175, thread) | 35.7 / 32.9 | 34.7 / 32.9 | 29.7 / 19.5 |
+
+  So 0173 gave ~+25-45% over 0172, not 2.5x. The 64-74 "fps" in the entries below are the inflated scores.
+- With the thread: windows exactly 5.0 s, vsync late max 1.0-1.3 ms while swiping (a single 3.8 / 11.5 / 29 ms tick
+  now and then when idle), 0-1 late ticks per window. But a panel copy still takes 8-37 ms while swiping (it
+  waits in present_wait_locked for the present two back, behind backboardd's 27 ms jobs), so 55-228 kicks per
+  5 s find the thread busy: new pictures on the panel stay at ~20-30 per second either way.
+- Reading: 0175 makes vsync honest and regular (CA gets on-time vsyncs and correct timestamps), but the frame
+  rate is set by the GPU: ~33 swaps/s, ~20-30 panel copies/s, both limited by the 27 ms backboardd job. The
+  panel copies' irregular spacing (whenever the copy thread gets through the GPU queue) is still uneven.
+  Whether it LOOKS smoother: not judged yet (needs eyes on the phone).
+- Next: the GPU job itself (entry below: per-row 2D copies + 22-bin GMEM pass) is what limits the rate. 0175 stays
+  the recommended kernel (regular vsync, no loss). Possible kernel follow-up: give the panel copy its own GPU
+  priority/ring so it does not queue behind the Metal clients' jobs.
+
 ### HOTDOGB: choppy frames = one 27 ms GPU job per frame + the panel blit queued behind it (analysis of k0173-perf-1111, 2026-11-11)
 - Observed in the "SWEET GPU: 5s" / "5s jobs" lines while swiping (0173, 61.8 "fps"):
   - backboardd's GPU jobs are two kinds: ~200-230 per 5 s take 1-4 ms, ~110-140 per 5 s take >= 16 ms. The long
@@ -78,7 +110,7 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   with sweetcharge=0 to take the charging heat out. (2) Why panel copies take 24-34 ms under load. (3) Symbolise
   the backboardd hot spot. (4) Idle power states (CPU_SUSPEND, GPU off when idle, Wi-Fi power save).
 
-### HOTDOGB: kernel 0173 big cores first: swipebench 64 / 68 fps (was 27 / 23) (run k0173-swipe-big-1110, 2026-11-10)
+### HOTDOGB: kernel 0173 big cores first: swipebench 64 / 68 fps (was 27 / 23) (run k0173-swipe-big-1110, 2026-11-10) - CORRECTED: real 33.6 / 33.6 fps, see the 0175 entry
 - Cause found in the source: the 8 cores are one processor set (MAX_CPU_CLUSTERS 1, clutch scheduler, no AMP) and
   choose_processor took the lowest-numbered idle core = cpu0-3, the A55s.
 - 0173 (WSL build, sha256 fd933acb...): a timeshare thread at priority >= `sweetbig` (default 37; 0 = off) takes an

@@ -1,0 +1,159 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -74,6 +74,8 @@
+ #define SWEET_BL_DEFAULT_NITS           200
+ #endif
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);   /* 0175 */
++extern "C" void thread_deallocate(thread_t);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -140,8 +142,19 @@
+ 	uint32_t            fVsyncUS;       /* 0157: SWEET_FB_VSYNC_US, or 11111 with the panel at 90 Hz (sweet90=1) */
+ 	uint32_t            fStatTicks;     /* 0157: vsync ticks in 5 s */
+ 	uint64_t            fStatSwaps, fStatPresents, fStatPresentAbs;
++	/*
++	 * 0175: the panel copy runs on its own thread (boot-arg sweetpthread, default 1; 0 = in the vsync timer as
++	 * before). presentGPU waits for the present two back, which sits behind the Metal clients' GPU work (a
++	 * 27 ms backboardd job): in the timer that delayed the vsync notifications CA paces its frames on.
++	 */
++	bool                fPresentThread;
++	bool                fPresentKick;   /* with fLock: the vsync timer asks for a panel copy */
++	bool                fPresentBusy;
++	uint64_t            fStatLateMax, fStatLateTicks, fStatSkipped;
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
++	static void presentThread(void *arg, wait_result_t wr);
++	void        presentPending(void);
+ 
+ public:
+ 	uint64_t      fPhys;
+@@ -299,6 +312,18 @@
+ 	PE_parse_boot_argn("sweet90", &hz90, sizeof(hz90));
+ 	fVsyncUS = (hz90 & 2) ? 11111 : SWEET_FB_VSYNC_US;
+ 	fStatTicks = 5000000 / fVsyncUS;
++	{
++		uint32_t pt = 1;
++		thread_t thr;
++		PE_parse_boot_argn("sweetpthread", &pt, sizeof(pt));
++		if (pt && kernel_thread_start(&AppleCLCD::presentThread, this, &thr) == KERN_SUCCESS) {
++			thread_deallocate(thr);
++			fPresentThread = true;
++			IOLog("#### PANEL COPY ON ITS OWN THREAD (VSYNC NEVER WAITS FOR THE GPU)\n");
++		} else {
++			IOLog("#### PANEL COPY IN THE VSYNC TIMER (sweetpthread=0)\n");
++		}
++	}
+ 	fVsync->setTimeoutUS(fVsyncUS);
+ 
+ #if SWEET_BL
+@@ -419,6 +444,15 @@
+ 		nanoseconds_to_absolutetime(fb->fVsyncUS * 1000ULL, &fb->fVsyncAbs);
+ 		fb->fNextVsync = now;
+ 	}
++	if (now > fb->fNextVsync) {             /* 0175: how late this tick fired */
++		uint64_t late = now - fb->fNextVsync;
++		if (late > fb->fStatLateMax) {
++			fb->fStatLateMax = late;
++		}
++		if (late > fb->fVsyncAbs / 8) {
++			fb->fStatLateTicks++;
++		}
++	}
+ 	fb->fNextVsync += fb->fVsyncAbs;
+ 	if (fb->fNextVsync <= now) {
+ 		fb->fNextVsync = now + fb->fVsyncAbs;
+@@ -430,14 +464,21 @@
+ 		absolutetime_to_nanoseconds(fb->fStatPresentAbs, &ns);
+ 		if (swaps || fb->fStatPresents) {
+ 			uint32_t fallbacks = sweet_fb_gpu_fallbacks - sweet_fb_gpu_fallbacks_logged;
++			uint64_t lateNs = 0;
++			absolutetime_to_nanoseconds(fb->fStatLateMax, &lateNs);
+ 			sweet_fb_gpu_fallbacks_logged = sweet_fb_gpu_fallbacks;
+-			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us, %u CPU fallbacks\n",
++			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us, %u CPU fallbacks, "
++			    "vsync late max %llu us, %llu ticks > 1/8 period late, %llu copies skipped (busy)\n",
+ 			    swaps, swaps / 5, (swaps * 2) % 10, fb->fStatPresents,
+-			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0, fallbacks);
++			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0, fallbacks, lateNs / 1000,
++			    fb->fStatLateTicks, fb->fStatSkipped);
+ 		}
+ 		fb->fStatSwaps = sweet_fb_swap_count;
+ 		fb->fStatPresents = 0;
+ 		fb->fStatPresentAbs = 0;
++		fb->fStatLateMax = 0;
++		fb->fStatLateTicks = 0;
++		fb->fStatSkipped = 0;
+ 	}
+ 	/*
+ 	 * CA::WindowServer::IOMFBServer::vsync_callback(fb, a1, a2, a3, refcon): a1 only goes to kdebug, a2 is
+@@ -475,6 +516,18 @@
+ 		return;
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	if (fb->fPresentThread) {
++		/* 0175: only signal; the present thread takes the latest frame when it is free */
++		if (flush) {
++			if (fb->fPresentBusy) {
++				fb->fStatSkipped++;
++			}
++			fb->fPresentKick = true;
++			IOLockWakeup(fb->fLock, &fb->fPresentKick, true);
++		}
++		IOLockUnlock(fb->fLock);
++		return;
++	}
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+@@ -493,6 +546,48 @@
+ 	}
+ }
+ 
++/* 0175: the present thread: one panel copy per vsync kick, always of the latest swapped frame. */
++void
++AppleCLCD::presentThread(void *arg, wait_result_t wr)
++{
++	AppleCLCD *fb = (AppleCLCD *)arg;
++	for (;;) {
++		fb->presentPending();
++	}
++}
++
++void
++AppleCLCD::presentPending(void)
++{
++	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++	if (rec == NULL) {
++		IOSleep(10);
++		return;
++	}
++	IOLockLock(fLock);
++	while (!fPresentKick) {
++		IOLockSleep(fLock, &fPresentKick, THREAD_UNINT);
++	}
++	fPresentKick = false;
++	bool go = fDirty && !fPowerOff;
++	if (go) {
++		memcpy(rec, fPending, SWEET_FB_SWAP_REC_SIZE);
++		fDirty = false;
++		fPresentBusy = true;
++	}
++	IOLockUnlock(fLock);
++	if (go) {
++		uint64_t t0 = mach_absolute_time();
++		present(rec);
++		fStatPresentAbs += mach_absolute_time() - t0;
++		fStatPresents++;
++		IOLockLock(fLock);
++		fPresentBusy = false;
++		IOLockUnlock(fLock);
++	}
++	IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++}
++
+ void
+ AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
+ {

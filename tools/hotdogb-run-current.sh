@@ -9,7 +9,13 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-10, big cores first): kernel 0173 (WSL build) = 0172 + the scheduler gives threads at priority 37
+# Current (2026-11-11, panel copy thread): kernel 0175 (WSL build) = 0173 + 0174 (gpuhist command) + the panel copy
+# on its own thread, so vsync never waits for the GPU (sweetpthread=0 = copy in the vsync timer as before). Expect
+# "SWEET FB: 5s: ... vsync late max ~1000 us, 0 ticks > 1/8 period late" while swiping (was up to 264 ms late).
+# Measured: real fps unchanged, ~33-35 swaps/s (k0175-pthread-1111 / k0175-nothread-1111). Earlier swipebench scores
+# (0173's 64/68) were inflated by long stats windows; the real 0173 figure is 33.6 (HANDOFF). Test: USE the phone and
+# judge whether scrolling LOOKS more even than with -a "... sweetpthread=0". Back to 0173: KERNEL=work/boot/kernel-0173.
+# Before (2026-11-10, big cores first): kernel 0173 (WSL build) = 0172 + the scheduler gives threads at priority 37
 # and up an idle A76 (cpu4-7) before an A55, lower ones an idle A55 first (sweetbig=N sets the priority, sweetbig=0 =
 # old behaviour; sweetbigmask=0xf0). Expect "#### BIG CORES FIRST FOR PRIORITY 37 AND UP (CPU MASK 0xf0)" (early: it
 # may be before the live log starts). "TOP thread" lines now end in "cpu N" = the core the thread ran on last.
@@ -86,11 +92,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0173}
-TAG=k0173-big
-if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0172 ]; then
-	echo "no $KERNEL yet: using kernel-0172 (no big cores first)" >&2
-	KERNEL=work/boot/kernel-0172 TAG=k0172-top
+KERNEL=${KERNEL:-work/boot/kernel-0175}
+TAG=k0175-pthread
+if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0173 ]; then
+	echo "no $KERNEL yet: using kernel-0173 (panel copy in the vsync timer)" >&2
+	KERNEL=work/boot/kernel-0173 TAG=k0173-big
 fi
 SECS=900
 OPTS=(-q -G)
