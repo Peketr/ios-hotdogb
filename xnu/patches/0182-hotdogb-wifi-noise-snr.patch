@@ -1,0 +1,82 @@
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -31,6 +31,7 @@
+  * outcome as one of Apple80211's result numbers, which the framework turns into its errors:
+  * 1 success, 21 "invalid PMK" (a wrong passphrase), 9 a timeout, 2 anything else.
+  */
++#include <pexpert/pexpert.h>
+ #include <kern/kalloc.h>
+ #include <kern/locks.h>
+ #include <libkern/libkern.h>
+@@ -202,6 +203,34 @@
+ static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
+ static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
+ 
++/*
++ * 0182: the noise floor. The radio reports signal strength as dB over its noise floor, and wland makes dBm of it
++ * with ath10k's default floor, -95 dBm; so that is the noise, and the signal-to-noise ratio is the rest. wifid
++ * turned a known network down for auto-join as "Below minimum RSSI threshold" at -41 dBm while scan results had
++ * noise = snr = 0 and NOISE (17) was refused. Boot-arg sweetwifinoise: 0 = as before (nothing about noise),
++ * 1 = noise and snr in scan results and NOISE answered (default), 2 = also the 16-bit field before the noise set to 1.
++ */
++#define NOISE_FLOOR             (-95)
++
++static int
++noise_mode(void)
++{
++	static int mode = -1;
++
++	if (mode < 0) {
++		uint32_t value = 1;
++
++		PE_parse_boot_argn("sweetwifinoise", &value, sizeof(value));
++		mode = (int)(value > 2 ? 1 : value);
++		if (mode == 0) {
++			printf("#### WIFI SCAN RESULTS WITHOUT NOISE (sweetwifinoise=0)\n");
++		} else {
++			printf("#### WIFI SCAN RESULTS CARRY NOISE %d DBM AND SNR (0182, MODE %d)\n", NOISE_FLOOR, mode);
++		}
++	}
++	return mode;
++}
++
+ /* ---- channels ---------------------------------------------------------------------------------------- */
+ 
+ static unsigned
+@@ -259,6 +288,11 @@
+ 	result->version = 1;
+ 	channel_fill(&result->channel, bss->frequency, 0);
+ 	result->rssi = bss->rssi;
++	if (noise_mode() != 0) {                /* 0182 */
++		result->noise = NOISE_FLOOR;
++		result->snr = (int16_t)(bss->rssi > NOISE_FLOOR ? bss->rssi - NOISE_FLOOR : 0);
++		result->noise_known = noise_mode() == 2;
++	}
+ 	result->beacon_interval = bss->beacon_interval;
+ 	result->capability = bss->capability;
+ 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
+@@ -364,6 +398,15 @@
+ 		kfree_data(answer, sizeof(*answer));
+ 		return error;
+ 	}
++	case 17: {                              /* 0182: the noise: dBm, per radio and all together, twice over (as RSSI) */
++		struct {
++			uint32_t version, radios, unit;
++			int32_t each[4], all, each_ext[4], all_ext;
++		} answer = { .version = 1, .radios = 1, .each = { NOISE_FLOOR }, .all = NOISE_FLOOR,
++			     .each_ext = { NOISE_FLOOR }, .all_ext = NOISE_FLOOR };
++
++		return noise_mode() == 0 ? EOPNOTSUPP : give(request, &answer, sizeof(answer));
++	}
+ 	case 21:                                /* how the last join went (0: not over yet) */
+ 		lck_mtx_lock(&apple80211_lock);
+ 		request->req_val = (int32_t)join_result;
+@@ -572,6 +615,7 @@
+ {
+ 	switch (request->req_type) {
+ 	case 20:
++		printf("#### WIFID ASKS TO JOIN A NETWORK\n");      /* 0182: by itself (auto-join) or from Settings */
+ 		return set_join(request, said, said_size);
+ 	case 22:                                /* leave the network */
+ 		return redwood_sta_ask_leave();

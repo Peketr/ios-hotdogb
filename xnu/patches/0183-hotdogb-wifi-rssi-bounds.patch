@@ -1,0 +1,52 @@
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -231,6 +231,33 @@
+ 	return mode;
+ }
+ 
++/*
++ * 0183: RSSI_BOUNDS (106, 16 bytes), asked once as wifid starts and refused until now. wifid still turned every
++ * known network down as "Below minimum RSSI threshold" with noise and snr given (0182), at -38..-45 dBm; its
++ * auto-join threshold may come from these bounds. The layout is a guess: a version, then three signed bounds,
++ * all -100 dBm (below anything heard). Boot-arg sweetwifibounds: 0 = refused as before, 1 = answered (default).
++ */
++#define BOUNDS_FLOOR            (-100)
++
++static int
++bounds_mode(void)
++{
++	static int mode = -1;
++
++	if (mode < 0) {
++		uint32_t value = 1;
++
++		PE_parse_boot_argn("sweetwifibounds", &value, sizeof(value));
++		mode = value != 0;
++		if (mode) {
++			printf("#### WIFI RSSI BOUNDS ANSWERED: %d DBM (0183)\n", BOUNDS_FLOOR);
++		} else {
++			printf("#### WIFI RSSI BOUNDS REFUSED (sweetwifibounds=0)\n");
++		}
++	}
++	return mode;
++}
++
+ /* ---- channels ---------------------------------------------------------------------------------------- */
+ 
+ static unsigned
+@@ -407,6 +434,14 @@
+ 
+ 		return noise_mode() == 0 ? EOPNOTSUPP : give(request, &answer, sizeof(answer));
+ 	}
++	case 106: {                             /* 0183: the RSSI bounds (a guessed layout, see bounds_mode) */
++		struct {
++			uint32_t version;
++			int32_t bound[3];
++		} answer = { .version = 1, .bound = { BOUNDS_FLOOR, BOUNDS_FLOOR, BOUNDS_FLOOR } };
++
++		return bounds_mode() == 0 ? EOPNOTSUPP : give(request, &answer, sizeof(answer));
++	}
+ 	case 21:                                /* how the last join went (0: not over yet) */
+ 		lck_mtx_lock(&apple80211_lock);
+ 		request->req_val = (int32_t)join_result;

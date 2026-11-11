@@ -9,7 +9,17 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-11, GPU images and perf counters): kernel 0181 (WSL build) = 0180 + gpuhist lists the sampled images
+# Current (2026-11-11, Wi-Fi auto-join WORKS): kernel 0183 (WSL build) = 0182 + RSSI_BOUNDS (106) answered, a guessed
+# layout {version 1, three bounds -100 dBm}. k0183-bounds-1111-2002: wifid joined by itself 3 s after its first scan. Expect "#### WIFI RSSI BOUNDS ANSWERED: -100 DBM (0183)" when wifid starts.
+# Do NOT touch Settings > Wi-Fi for 3 minutes. Fixed = "#### WIFID ASKS TO JOIN A NETWORK" by itself. wifid's own log:
+# /var/local/oslog-wifid-0182.log on the phone. EXTRA=" sweetwifibounds=0" = refused as in 0182.
+# Before (2026-11-11, Wi-Fi auto-join): kernel 0182 (WSL build) = 0181 + scan results for wifid carry noise -95 dBm
+# and snr, and the NOISE request is answered (wifid refused the known network as "Below minimum RSSI threshold" at
+# -41 dBm). Expect "#### WIFI SCAN RESULTS CARRY NOISE -95 DBM AND SNR (0182, MODE 1)" at wifid's first scan (~70-90 s).
+# Do NOT touch Settings > Wi-Fi: wait 3 minutes. Fixed = "#### WIFID ASKS TO JOIN A NETWORK" appears by itself and the
+# Wi-Fi icon comes up. Not fixed: rerun with EXTRA=" sweetwifinoise=2" (also sets the field before the noise);
+# EXTRA=" sweetwifinoise=0" = old behaviour. Back to 0181: KERNEL=work/boot/kernel-0181.
+# Before (2026-11-11, GPU images and perf counters): kernel 0181 (WSL build) = 0180 + gpuhist lists the sampled images
 # ("#### GPUHIST IMAGES: ...") and a `gpuperf [SECS]` command. Once the home screen is up: python tools\flame-cmd.py
 # "gpuhist 8000 3", python tools\flame-cmd.py "gpuperf 20", python tools\hotdogb-swipebench.py 30, then read the
 # "GPUHIST image" and "gpuperf" lines in logs\runs\NAME\live.txt. k0181-perf-1111: 23/25 images tiled (UBWC), CP never
@@ -118,8 +128,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0181}
-TAG=k0181-perf
+KERNEL=${KERNEL:-work/boot/kernel-0183}
+TAG=k0183-bounds
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${EXTRA:-}"

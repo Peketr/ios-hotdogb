@@ -5,6 +5,37 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: Wi-Fi AUTO-JOIN WORKS with kernel 0183 - RSSI_BOUNDS answered (run k0183-bounds-1111-2002, 2026-11-11)
+- Result: "#### WIFI RSSI BOUNDS ANSWERED" at 201.9 s, first scan 201.9 s, "#### WIFID ASKS TO JOIN A NETWORK" at
+  205.2 s with nobody touching Settings; ASSOCIATE (6-byte name, WPA2-PSK key) -> "flame wifi: join -> 0", ASSOCIATE_RESULT
+  answered. So wifid's auto-join threshold depended on RSSI_BOUNDS (106) being answered. The layout is still a guess;
+  whether 0182's noise/snr is also needed is not tested (try EXTRA=" sweetwifinoise=0").
+- 0182 run twice (k0182-autojoin): NOISE answered, scan results carry noise/snr, but wifid still refuses "FBI HQ" at
+  -38..-45 dBm as `Below minimum RSSI threshold` (30 times in /var/local/oslog-wifid-0182.log); no join asked.
+- The oslog-wifid launchd job had been removed from the phone (the old /var/local/oslog-wifid.log stopped at ~500 MB);
+  re-added, now logging to /var/local/oslog-wifid-0182.log.
+- Observed in wifid (16.5): the check is "candidate RSSI < __WiFiDeviceManagerGetAutoJoinThreshold(...)"; the -80
+  values in the log (scan minRSSI, poor-link) are other checks. Where the threshold's default comes from is not known.
+- 0183: RSSI_BOUNDS (106, 16 bytes) answered with a guessed layout {version 1, three int32 bounds = -100 dBm}.
+  Boot-arg `sweetwifibounds=0` = refused as before. Milestone "#### WIFI RSSI BOUNDS ANSWERED: -100 DBM (0183)".
+- Test: tools/hotdogb-run-current.sh (kernel 0183, tag k0183-bounds); 3 minutes without Settings. Fixed = "#### WIFID
+  ASKS TO JOIN A NETWORK" by itself. Then check oslog-wifid-0182.log for the rejection count.
+
+### HOTDOGB: Wi-Fi auto-join test kernel 0182 - noise and SNR for wifid (run: not fixed, 2026-11-11)
+- Observed again (run k0148-oslog-wifid, 40 rejections): wifid has the home network as known (`autojoin=yes`), finds
+  both BSSs at -38..-44 dBm and refuses each as `Below minimum RSSI threshold`; then "auto-join failed with no
+  network found" and a new scan every ~3 s for ever. On the phone now: no /var/local/wlan.conf, so wland's own join
+  does not run either.
+- Guess, not proven (CoreWiFi is not on the PC): the threshold test uses noise/SNR, which we gave as 0.
+- 0182 (bsd/dev/redwood_apple80211.c): scan results (11, 103) carry noise -95 dBm and snr = rssi + 95; NOISE (17)
+  answers -95 in the 52-byte RSSI layout, joined or not. Boot-arg `sweetwifinoise`: 0 = old, 1 = default, 2 = also
+  the 16-bit field before the noise (our "noise_known") = 1. Milestones: "#### WIFI SCAN RESULTS CARRY NOISE -95 DBM
+  AND SNR (0182, MODE n)", "#### WIFID ASKS TO JOIN A NETWORK" (every ASSOCIATE, auto or from Settings).
+- Test: tools/hotdogb-run-current.sh (kernel 0182, tag k0182-autojoin); do not touch Settings for 3 minutes. Fixed =
+  the join milestone by itself. Else EXTRA=" sweetwifinoise=2"; if that fails too, disassemble CoreWiFi (16.5 shared
+  cache, CWFAutoJoinManager) for what "Below minimum RSSI threshold" compares. RSSI (16) unjoined and RSSI_BOUNDS
+  (106) are still refused.
+
 ### HOTDOGB: the heavy backboardd pass samples tiled UBWC images, and the CP is never starved; the GPU is idle ~59% of the time while swiping (kernel 0181, run k0181-perf-1111, 2026-11-11)
 - 0181 (diagnostic only): gpuhist follows CP_SET_DRAW_STATE groups and the bindless descriptor sets and lists each
   sampled image. The new `gpuperf [SECS]` command reads CP/UCHE/TP/SP/RB perf counters (Mesa-verified selects) over
