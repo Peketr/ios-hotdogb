@@ -5,6 +5,97 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: the heavy backboardd pass samples tiled UBWC images, and the CP is never starved; the GPU is idle ~59% of the time while swiping (kernel 0181, run k0181-perf-1111, 2026-11-11)
+- 0181 (diagnostic only): gpuhist follows CP_SET_DRAW_STATE groups and the bindless descriptor sets and lists each
+  sampled image. The new `gpuperf [SECS]` command reads CP/UCHE/TP/SP/RB perf counters (Mesa-verified selects) over
+  SECS. swipebench 30 s: 37.1 fps; backboardd 1297 submits at 9.7 ms each; GPU busy 54%.
+- Observed (3 heavy jobs): 25 distinct images each. 23 are tiled and 20-21 are UBWC. Only 2 are linear (32x32 and
+  1x1, 8 KB together), and none are imported. The big ones are RGBA8 UBWC: 1125x2436 (x2-4), 1326x1326, 1326x1160,
+  1271x1823, 1105x1160. There are 45-53 descriptor sets and ~500 draw states per job. So the earlier guess ("large
+  linear IOSurface images") is WRONG.
+- Observed (gpuperf, 20 s of swiping, GPU busy 8.19 s = 41%):
+  - CP: starved for IB data 0.15% and for draw-state data 0.26% of busy cycles. Stalls: pipe-out 50%, WFI 23%, sync 13%.
+  - UCHE: DRAM latency 247 cycles on average (~366 ns at 675 MHz); arbiter stall 46%; TP read beats = 50 GB (32 B/beat).
+  - TP: L1 miss 46%, waiting on UCHE 37% of its busy cycles.
+  - SP: waiting on RB is its largest stall (more than TP).
+  - RB: 10.5 G 3D pixels, about 5x the 1125x2436 target per frame at ~37 fps.
+  - Caveat: percentages above 100% (TP, RB, SP ALU) mean those counters add up several hardware units, so compare
+    them only with each other.
+- Conclusion for "is it DMA filling the buffer in too-small chunks?": no, as far as the command stream goes. CP never
+  waits for IB or draw-state fetches. Texture fetch does see memory latency (TP waits on UCHE 37%). The bigger fact
+  is that the GPU sits idle ~59% of the time while swiping, so frame rate is bounded by serialization (CPU,
+  submit and present ordering), not GPU throughput.
+- Guess, not measured: 4 KB SMMU PTEs (map_4k) may add TLB-miss latency to the 247 cycles. A 64 KB contiguous-hint
+  mapping would test it, but it can only shorten the ~9.7 ms GPU part, not the idle gaps.
+- Next: measure where the remaining ~17 ms per frame goes outside the GPU (backboardd CPU time to commit, the
+  submit-to-start gap, the fence wait to the panel copy).
+- Icons: home screen and Control Center match k0179-gpu675-1111. Bluetooth was on this time, and "Not Playing"
+  is tinted blue instead of grey; 0181 changes no rendering, so this is probably the vibrancy over a different backdrop.
+
+### HOTDOGB: GPU at 675 MHz (kernels 0179, 0180) works but does not shorten the heavy backboardd pass: it is not core-clock bound (runs k0179-gpu675-1111, k0180-gpuclk-1111, 2026-11-11)
+- The phone's stock dtb (hotdogb/stock/dtb, SM8150P v2, both GPU speed bins) lists 675/585/499.2/427/345/257 MHz at
+  RPMh 320/256/224/192/128/64 (opp-microvolt = level + 1). Our GMU perf table had the lower five with the same
+  levels; 0179 adds 675 MHz at NOM_L1 and makes it the governor's top (`sweetgpufreq=4` = old 499 cap).
+- Observed: the GMU acks every 675 vote, no faults. 0180 measures the clock (CP perf counter 0 = always count over
+  CP_ALWAYS_ON) in busy intervals: "#### GPU CLOCK MEASURED: 674 MHZ AT THE 675 MHZ LEVEL", 257 -> 257, 345 -> 344.
+- Observed: the heavy backboardd IB is 23.7-25 ms at 675 (24-26 ms at 499, k0177-repack-1111): 35% more clock,
+  ~5% less time. swipebench 30 s: 37.4 (0179), 39.7 (0180) fps vs 35-40 before. Battery 35-36 C while swiping.
+- Observed (gpuhist, k0177-repack-1111): the heavy IB is ONE render pass in 15 GMEM bins (markers 2, then 4567 x15):
+  ~104 draws replayed per bin = the 1,564 draws. DDR (MC0) and memory NoC (SH0) are voted top since 0122.
+- Observed, A/B without the DDR/SH0 vote (k0180-noddr-1111, kernel 0180 + `sweetddr=0`, ABL's DDR level, which
+  gave ~30% less CPU bandwidth in 0122): heavy IB 24.8-29 ms (vs 23.7-25), swipebench 37.4 fps (vs 39.7). So some
+  bandwidth sensitivity (~10%), but neither the core clock (+35% -> -5%) nor DDR dominates.
+- Guess, not measured: the pass is latency bound: ~15 us per draw (104 draws x 15 bins in ~23 ms), e.g. texture
+  fetches from large linear (IOSurface-aliased, not tiled/UBWC) images missing the caches, which neither clock
+  hides. Next: count the sampled images by layout/format in that pass (m2v-msg log or a Turnip TU_DEBUG dump), then
+  GPU perf counters (TP/UCHE misses) to confirm before changing metal2vulkan to sample tiled copies.
+- 0179/0180 stay (675 only while busy; the governor drops to 257 idle).
+
+### HOTDOGB: the 5 broken Control Center glyphs come from kernel 0176's row rounding; kernel 0178 turns it off by default (run k0177-noalign-1111, 2026-11-11)
+- Observed: k0177-norepack-1111's log shows 0176 rounding exactly 5 surfaces, all SpringBoard LA08 (fmt
+  0x4c413038): 230x186 bpr 480->512, 75x144 160->192, 102x144 224->256, 105x144 224->256, 360x246 736->768. That is
+  5 surfaces for 5 broken glyphs, and the shear (stripes every few rows) is what a row pitch mismatch looks like.
+- Observed: kernel 0177 + `sweetsurfalign=0` ("#### SURFACE ROWS AS GIVEN (sweetsurfalign=0)", the same 5 lines
+  end "(kept)"): Control Center draws every glyph right (logs/runs/k0177-noalign-1111/screen-cc.png): airplane,
+  AirDrop, Wi-Fi, Bluetooth, rotation, mirroring, Focus, sliders, bell, timer, calculator, camera, NFC.
+- Guess: SpringBoard (CoreUI/CG) writes these glyph surfaces at the pitch it asked for and ignores the one read
+  back, so the GPU read them with the wider pitch. Not checked which code writes them.
+- 0176 bought no frame rate anyway, so kernel 0178 (WSL build) defaults to rows as given ("#### SURFACE ROWS AS
+  GIVEN BY DEFAULT (0178)"; `sweetsurfalign=1` = old rounding). Not booted yet; 0177 + sweetsurfalign=0 is the same
+  code path. The "CAPackage" guess in the entry below was wrong.
+
+### HOTDOGB: Turnip 0101 works (156 blits per backboardd job instead of ~8,900) but the frame rate does not change: the per-row blits were not the cost (runs k0177-install0101-1111, k0177-repack-1111, 2026-11-11)
+- Bundle: the Mac's SweetMetal2.tgz of 2026-11-11 10:08 (sha256 0e1667d0..., `TU_SWEET_ROW_REPACK` in
+  libvulkan_freedreno.dylib), installed with hotdogb-metal2-install.py under kernel 0177, args as
+  hotdogb-run-current.sh. /var/local/mtl2-env unchanged (SWEET_M2V_MESSAGES only, repack on by default).
+- Observed, gpuhist mid-swipe (`gpuhist 8000 3`; the old 100000-dword threshold no longer catches any job):
+  backboardd job 8,245 dw top level, 126,986 with nested IBs, 1,564 draws, "BLIT RUNS: 156 blits, 0 of them in
+  0 one-row runs". Before (k0177-blitruns-1111): ~8,900 blits, 8,814 in one-row runs.
+- Observed, SWEET GPU 5 s lines: the longest backboardd job's IBs 135-150k dw -> 18-21k dw, but its heavy IB still
+  takes ~24-26 ms (before ~27 ms) and backboardd's mean submit is 10.8-11.9 ms. swipebench 30 s: 35.6 fps
+  (with unlock; one 26.5 window), 40.2, 35.4 (20 s, one 23.8 window) vs 39.7 before. GPU busy 58-60%.
+  No GPU faults in the log.
+- Visual check (user: "not all icons look right"): Control Center screenshot
+  (`flame-shot --pa 0x9c000000 --w 1080 --h 2400 --stride 4352`; the run's log says panel stride 4352; corners,
+  status bar and home bar line up, so the capture is aligned): 5 module glyphs are sheared, repeated stripes:
+  airplane mode, cellular, flashlight, camera, and the bottom-left module. Wi-Fi, Bluetooth, rotation lock,
+  mirroring, Focus moon, bell, timer, sliders and media controls are right.
+  A/B (k0177-norepack-1111, `TU_SWEET_ROW_REPACK=0` confirmed by "env TU_SWEET_ROW_REPACK=0" in backboardd's
+  log): the same 5 broken glyphs, byte-identical regions (mean diff 0.00-0.07/255). So NOT caused by 0101: an
+  older bug. Guess: the broken ones are animated CAPackage module glyphs (the working ones static symbols), so
+  some texture format or row layout used for them is wrong in metal2vulkan or Turnip. Not investigated further.
+  Shots: logs/runs/k0177-repack-1111/screen-1.png, logs/runs/k0177-norepack-1111/screen-cc.png.
+  /var/local/mtl2-env is back to SWEET_M2V_MESSAGES only. /var/local/m2v-msg.log now fills (640 lines per boot):
+  besides precision notes, backboardd logs 6x tu_image.cc:769 VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+  the 1125x2436 BGRA8 shadow (rows 4608), BGR5A1 mipmaps; AegirPoster one BoMap failure (out of device memory).
+- Conclusion (measured): the shadow copy-ins cost little GPU time even as ~9,000 blits; the ~25 ms IB is the
+  1,564 draws themselves (31,791 draw-state groups, GMEM bin markers 4567 repeated). Guess, not measured: the bytes
+  copied per frame (~20 MB) are still there, now twice through scratch, but at ~15 GB/s that is ~2-3 ms.
+- 0101 stays in (fewer command dwords, less CPU work recording the copies). A/B still possible with
+  `TU_SWEET_ROW_REPACK=0` in /var/local/mtl2-env.
+- Next (the earlier list): 4 high-priority GPU queue for the panel copy, 5 direct scanout, 6 GPU clock; or look
+  at why the 1,564 draws take ~25 ms (per-draw state, bins x draws).
+
 ### HOTDOGB: the ~16 ms per backboardd frame is ~9,000 one-row 2D blits re-copying the same shadowed textures every frame; Turnip fix 0101 written (runs k0175-sysmem-1111, k0176-surf64-1111, k0175-m2vmsg-1111, k0177-blitruns-1111, 2026-11-11)
 - Observed, TU_DEBUG=sysmem (`/var/local/mtl2-tu-debug`, removed again): the gpuhist shows direct rendering
   (marker 1, 124 draws instead of ~1,700). Swipebench 38.7 / 33.0 fps, within the noise of 0175's 34.7 / 32.9.

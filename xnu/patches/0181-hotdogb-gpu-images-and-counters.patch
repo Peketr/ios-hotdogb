@@ -1,0 +1,549 @@
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -163,6 +163,8 @@
+ 	void v2Release(SweetV2BO *bo);
+ 	void v2Hist(const uint64_t *iova, const uint32_t *dw, uint32_t nib);    /* 0174 */
+ 	void v2HistParse(struct SweetGpuHist *st, uint64_t iova, uint32_t dwords, int depth);
++	uint64_t v2HistRead(struct SweetGpuHist *st, uint64_t iova, uint64_t bytes, void *dst);   /* 0181 */
++	void v2HistImages(struct SweetGpuHist *st);                                               /* 0181 */
+ 
+ public:
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+@@ -540,6 +542,12 @@
+  * CP opcode (type 7 packets), the CP_EVENT_WRITE events, the most written registers (type 4 packets) and the
+  * first/last value of the bin-control registers. Nested CP_INDIRECT_BUFFERs are followed (3 levels);
+  * CP_SET_DRAW_STATE groups are counted, not followed. Raw numbers: decode against Mesa's adreno_pm4.xml / a6xx.xml.
++ *
++ * 0181: the draw-state groups are followed too (each address once per job), so the op/register counts and
++ * "dw with nested" include what they load. The bindless descriptor-set bases they set (SP_GFX_BINDLESS_BASE
++ * 0xab10, SP_CS_BINDLESS_BASE 0xa9e8) are collected, and at the end each set's first 4 KB is read and every
++ * 64-byte slot that decodes as an image (A6XX TEX_MEMOBJ: 2D/cube/3D, sane size, base inside a BO) is listed
++ * once: size, format, tile mode (0 = linear), UBWC, pitch, and the BO it lives in (imported = an IOSurface).
+  */
+ extern "C" {
+ volatile uint32_t sweet_gpu_hist_min, sweet_gpu_hist_left;
+@@ -547,7 +555,19 @@
+ 
+ #define HIST_REGS       96
+ #define HIST_WATCH      4
++#define HIST_DS         4096    /* 0181: draw-state addresses already followed (open hash) */
++#define HIST_SETS       64
++#define HIST_IMGS       128
+ struct SweetGpuHist {
++	uint64_t *ds;                   /* HIST_DS entries, own allocation (IONew stops at 16 KB) */
++	uint32_t nds, ds_full, dsfollowed;
++	uint32_t bl[20];                /* SP_GFX_BINDLESS_BASE[0-4] lo/hi, then SP_CS_BINDLESS_BASE[0-4] */
++	struct { uint64_t base; uint32_t set; } sets[HIST_SETS];
++	uint32_t nsets, sets_dropped;
++	struct SweetHistImg { uint64_t base; uint32_t d[4], refs, bo; uint64_t bobytes; bool imported; } img[HIST_IMGS];
++	uint32_t nimg, img_dropped;
++	IOMemoryMap *km;               /* the BO read last, kept mapped */
++	uint64_t km_iova, km_bytes;
+ 	uint32_t op[128], ev[128];
+ 	struct { uint32_t reg, n; } regs[HIST_REGS];
+ 	uint32_t watch_first[HIST_WATCH], watch_last[HIST_WATCH], watch_n[HIST_WATCH];
+@@ -571,6 +591,52 @@
+ static const uint32_t hist_watch[HIST_WATCH] = { 0x80a1, 0x8800, 0x80f0, 0x88e3 };
+ #define HIST_DRAWS(st)  ((st)->op[0x38] + (st)->op[0x22] + (st)->op[0x28] + (st)->op[0x29] + (st)->op[0x2a])
+ 
++/* 0181: true the first time a draw-state address is seen in this job */
++static bool
++hist_ds_new(struct SweetGpuHist *st, uint64_t a)
++{
++	if (st->ds == NULL) {
++		return false;
++	}
++	uint32_t h = (uint32_t)((a >> 4) * 2654435761u) & (HIST_DS - 1);
++	for (uint32_t k = 0; k < HIST_DS; k++, h = (h + 1) & (HIST_DS - 1)) {
++		if (st->ds[h] == a) {
++			return false;
++		}
++		if (st->ds[h] == 0) {
++			if (st->nds >= HIST_DS * 3 / 4) {
++				st->ds_full++;
++				return false;
++			}
++			st->ds[h] = a;
++			st->nds++;
++			return true;
++		}
++	}
++	return false;
++}
++
++/* 0181: a bindless base was written (lo/hi pair complete): note the set address once */
++static void
++hist_set(struct SweetGpuHist *st, uint32_t set, uint64_t v)
++{
++	uint64_t base = v & ~0x3fULL;  /* low bits: descriptor size */
++	if (base == 0) {
++		return;
++	}
++	for (uint32_t k = 0; k < st->nsets; k++) {
++		if (st->sets[k].base == base) {
++			return;
++		}
++	}
++	if (st->nsets < HIST_SETS) {
++		st->sets[st->nsets].base = base;
++		st->sets[st->nsets++].set = set;
++	} else {
++		st->sets_dropped++;
++	}
++}
++
+ static void
+ hist_blit_close(struct SweetGpuHist *st)
+ {
+@@ -629,33 +695,7 @@
+ 		st->lost++;
+ 		return;
+ 	}
+-	/* the buffers are GPU pool memory outside the kernel's physical map: map the one holding this IB */
+-	bool ok = false;
+-	IOMemoryDescriptor *md = NULL;
+-	uint64_t off = 0;
+-	IOLockLock(fLock);
+-	for (uint32_t i = 0; i < fBOCap; i++) {
+-		SweetV2BO *bo = &fBO[i];
+-		if (bo->md != NULL && bo->iova != 0 && iova >= bo->iova && iova + bytes <= bo->iova + bo->bytes) {
+-			md = bo->md;
+-			md->retain();
+-			off = iova - bo->iova;
+-			break;
+-		}
+-	}
+-	IOLockUnlock(fLock);
+-	if (md != NULL) {
+-		IOMemoryMap *km = md->map(kIOMapReadOnly);
+-		if (km != NULL) {
+-			if (off + bytes <= km->getLength()) {
+-				memcpy(w, (const void *)(km->getVirtualAddress() + off), bytes);
+-				ok = true;
+-			}
+-			km->release();
+-		}
+-		md->release();
+-	}
+-	if (!ok) {
++	if (v2HistRead(st, iova, bytes, w) != bytes) {
+ 		st->lost++;
+ 		IOFreeData(w, bytes);
+ 		return;
+@@ -688,6 +728,15 @@
+ 				st->ev[p[0] & 0x7f]++;
+ 			} else if (op == 0x43) {                /* CP_SET_DRAW_STATE */
+ 				st->groups += cnt / 3;
++				/* 0181: follow each group (count, address lo/hi), skipping DISABLE / DISABLE_ALL_GROUPS */
++				for (uint32_t g = 0; g + 3 <= cnt && depth < 6; g += 3) {
++					uint32_t n = p[g] & 0xffff;
++					uint64_t a = p[g + 1] | ((uint64_t)p[g + 2] << 32);
++					if ((p[g] & (3u << 17)) == 0 && n != 0 && a != 0 && hist_ds_new(st, a)) {
++						st->dsfollowed++;
++						v2HistParse(st, a, n, depth + 1);
++					}
++				}
+ 			}
+ 			i += 1 + cnt;
+ 		} else if (type == 4) {
+@@ -711,6 +760,13 @@
+ 					st->tpl[r - 0xb4c0] = v;
+ 				} else if (r >= 0x8c17 && r <= 0x8c1a) {
+ 					st->rb[r - 0x8c17] = v;
++				} else if ((r >= 0xab10 && r <= 0xab19) || (r >= 0xa9e8 && r <= 0xa9f1)) {
++					/* 0181: SP_GFX_BINDLESS_BASE[0-4] (sets 0-4), SP_CS_BINDLESS_BASE[0-4] (sets 5-9) */
++					uint32_t j = r >= 0xab10 ? r - 0xab10 : 10 + r - 0xa9e8;
++					st->bl[j] = v;
++					if (j & 1) {
++						hist_set(st, j / 2, st->bl[j - 1] | ((uint64_t)v << 32));
++					}
+ 				}
+ 			}
+ 			for (uint32_t k = 0; k < HIST_WATCH; k++) {
+@@ -731,6 +787,143 @@
+ 	IOFreeData(w, bytes);
+ }
+ 
++/*
++ * 0181: copy up to BYTES from GPU address IOVA out of the BO that holds it, stopping at the BO's end; returns
++ * what was copied. The buffers are GPU pool memory outside the kernel's physical map: the BO is mapped, and
++ * stays mapped for the next read (most IBs and draw states of a job sit in a few BOs).
++ */
++uint64_t
++SweetAcceleratorUserClient::v2HistRead(struct SweetGpuHist *st, uint64_t iova, uint64_t bytes, void *dst)
++{
++	if (st->km == NULL || iova < st->km_iova || iova >= st->km_iova + st->km_bytes) {
++		if (st->km != NULL) {
++			st->km->release();
++			st->km = NULL;
++		}
++		IOMemoryDescriptor *md = NULL;
++		uint64_t biova = 0, bbytes = 0;
++		IOLockLock(fLock);
++		for (uint32_t i = 0; i < fBOCap; i++) {
++			SweetV2BO *bo = &fBO[i];
++			if (bo->md != NULL && bo->iova != 0 && iova >= bo->iova && iova < bo->iova + bo->bytes) {
++				md = bo->md;
++				md->retain();
++				biova = bo->iova;
++				bbytes = bo->bytes;
++				break;
++			}
++		}
++		IOLockUnlock(fLock);
++		if (md == NULL) {
++			return 0;
++		}
++		st->km = md->map(kIOMapReadOnly);
++		md->release();
++		if (st->km == NULL) {
++			return 0;
++		}
++		st->km_iova = biova;
++		st->km_bytes = bbytes < st->km->getLength() ? bbytes : st->km->getLength();
++	}
++	uint64_t off = iova - st->km_iova;
++	if (off >= st->km_bytes) {
++		return 0;
++	}
++	if (bytes > st->km_bytes - off) {
++		bytes = st->km_bytes - off;
++	}
++	memcpy(dst, (const void *)(st->km->getVirtualAddress() + off), bytes);
++	return bytes;
++}
++
++/* 0181: decode the descriptor sets the job bound and list the images in them (see the comment at the top) */
++void
++SweetAcceleratorUserClient::v2HistImages(struct SweetGpuHist *st)
++{
++	static const uint32_t set_bytes = 4096;
++	uint32_t *d = (uint32_t *)IOMallocData(set_bytes);
++	if (d == NULL) {
++		return;
++	}
++	for (uint32_t s = 0; s < st->nsets; s++) {
++		uint64_t got = v2HistRead(st, st->sets[s].base, set_bytes, d);
++		uint32_t found = 0;
++		for (uint32_t slot = 0; (slot + 1) * 64 <= got; slot++) {
++			const uint32_t *t = &d[slot * 16];
++			uint32_t type = t[2] >> 29, w = t[1] & 0x7fff, h = (t[1] >> 15) & 0x7fff;
++			uint64_t base = (t[4] & ~0x1fu) | ((uint64_t)(t[5] & 0x1ffff) << 32);
++			if (type < 1 || type > 3 || w == 0 || h == 0 || w > 16384 || h > 16384 || base == 0 || (base & 0x3f)) {
++				continue;
++			}
++			uint32_t bo = 0;
++			uint64_t bobytes = 0;
++			bool imported = false, inbo = false;
++			IOLockLock(fLock);
++			for (uint32_t i = 0; i < fBOCap; i++) {
++				if (fBO[i].md != NULL && fBO[i].iova != 0 && base >= fBO[i].iova && base < fBO[i].iova + fBO[i].bytes) {
++					inbo = true;
++					bo = i + 1;
++					bobytes = fBO[i].bytes;
++					imported = fBO[i].imported;
++					break;
++				}
++			}
++			IOLockUnlock(fLock);
++			if (!inbo) {
++				continue;
++			}
++			found++;
++			uint32_t k;
++			for (k = 0; k < st->nimg; k++) {
++				if (st->img[k].base == base && st->img[k].d[0] == t[0] && st->img[k].d[1] == t[1]) {
++					st->img[k].refs++;
++					break;
++				}
++			}
++			if (k == st->nimg) {
++				if (st->nimg == HIST_IMGS) {
++					st->img_dropped++;
++					continue;
++				}
++				struct SweetGpuHist::SweetHistImg *im = &st->img[st->nimg++];
++				im->base = base;
++				for (uint32_t j = 0; j < 4; j++) {
++					im->d[j] = t[j];
++				}
++				im->refs = 1;
++				im->bo = bo;
++				im->bobytes = bobytes;
++				im->imported = imported;
++			}
++		}
++		IOLog("GPUHIST set %u (bindless %u%s) at %#llx: %llu bytes read, %u image slots\n", s, st->sets[s].set % 5,
++		    st->sets[s].set >= 5 ? " compute" : "", st->sets[s].base, got, found);
++	}
++	IOFreeData(d, set_bytes);
++	uint32_t linear = 0, tiled = 0, ubwc = 0, imp = 0;
++	uint64_t linear_bytes = 0;
++	for (uint32_t k = 0; k < st->nimg; k++) {
++		struct SweetGpuHist::SweetHistImg *im = &st->img[k];
++		uint32_t tile = im->d[0] & 3, fmt = (im->d[0] >> 22) & 0xff, swap = im->d[0] >> 30, mips = (im->d[0] >> 16) & 0xf;
++		uint32_t w = im->d[1] & 0x7fff, h = (im->d[1] >> 15) & 0x7fff, pitch = (im->d[2] >> 7) & 0x3fffff;
++		bool flag = (im->d[3] >> 28) & 1;
++		if (tile == 0) {
++			linear++;
++			linear_bytes += (uint64_t)pitch * h;
++		} else {
++			tiled++;
++		}
++		ubwc += flag;
++		imp += im->imported;
++		IOLog("GPUHIST image %u: %ux%u fmt %#x swap %u tile %u%s%s pitch %u mips %u type %u, %#llx in BO %u "
++		    "(%llu KB%s), %u refs\n", k, w, h, fmt, swap, tile, tile ? " tiled" : " linear", flag ? " UBWC" : "", pitch,
++		    mips, im->d[2] >> 29, im->base, im->bo, im->bobytes >> 10, im->imported ? ", imported" : "", im->refs);
++	}
++	IOLog("#### GPUHIST IMAGES: %u distinct (%u linear = %llu KB, %u tiled, %u UBWC, %u imported, %u not listed), "
++	    "%u descriptor sets (%u not listed), %u draw states followed (%u not: table full)\n", st->nimg, linear,
++	    linear_bytes >> 10, tiled, ubwc, imp, st->img_dropped, st->nsets, st->sets_dropped, st->dsfollowed, st->ds_full);
++}
++
+ void
+ SweetAcceleratorUserClient::v2Hist(const uint64_t *iova, const uint32_t *dw, uint32_t nib)
+ {
+@@ -743,6 +936,7 @@
+ 		total += dw[i];
+ 	}
+ 	st->budget = 8u << 20;
++	st->ds = (uint64_t *)IOMallocZeroData(HIST_DS * sizeof(uint64_t));     /* 0181 */
+ 	IOLog("#### GPU JOB HISTOGRAM: %s, %u IBs, %u dw\n", fName, nib, total);
+ 	for (uint32_t i = 0; i < nib; i++) {
+ 		uint32_t d0 = HIST_DRAWS(st), n0 = st->nested, p0 = st->parsed, m0 = st->nmark, e0 = st->op[0x46];
+@@ -800,8 +994,15 @@
+ 		    "src info %#x pitch %#x, dst %#llx info %#x pitch %#x\n", k, r->n, r->w, r->x, r->y0, r->y1, r->src0,
+ 		    r->src1, (r->src1 - r->src0) / (r->n - 1), r->srcinfo, r->srcpitch, r->dst, r->dstinfo, r->dstpitch);
+ 	}
++	v2HistImages(st);
+ 	IOLog("GPUHIST --- done: %u dw read, %u draw-state groups, %u words not packets, %u cut, %u IBs not read\n",
+ 	    st->parsed, st->groups, st->other, st->cut, st->lost);
++	if (st->km != NULL) {
++		st->km->release();
++	}
++	if (st->ds != NULL) {
++		IOFreeData(st->ds, HIST_DS * sizeof(uint64_t));
++	}
+ 	IODelete(st, struct SweetGpuHist, 1);
+ }
+ 
+diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -891,6 +891,134 @@
+ 	return (uint64_t)hi2 << 32 | lo;
+ }
+ 
++/*
++ * 0181: GPU performance counters for "gpuperf SECS" (sweet_gpu.c): select register, RBBM_PERFCTR_* lo register,
++ * countable (Mesa a6xx_enums.xml a6xx_{cp,uche,tp,sp,rb}_perfcounter_select). CP counter 0 stays ALWAYS_COUNT
++ * (0180) and SP counter 0 is left alone. GX stays powered while the GPU is up, so the selects hold.
++ */
++struct a6_pc {
++	uint16_t sel, ctr;
++	uint8_t countable;
++	const char *name;
++};
++#define PC_CP(n, c, s)   { 0x08d0 + (n), 0x0400 + 2 * (n), c, "cp." s }
++#define PC_UCHE(n, c, s) { 0x0e1c + (n), 0x0476 + 2 * (n), c, "uche." s }
++#define PC_TP(n, c, s)   { 0xb610 + (n), 0x048e + 2 * (n), c, "tp." s }
++#define PC_SP(n, c, s)   { 0xae10 + (n), 0x04a6 + 2 * (n), c, "sp." s }
++#define PC_RB(n, c, s)   { 0x8e10 + (n), 0x04d6 + 2 * (n), c, "rb." s }
++static const struct a6_pc a6_pcs[] = {
++	PC_CP(1, 2, "busy"), PC_CP(2, 15, "sqe_idle"), PC_CP(3, 16, "starve_ib"), PC_CP(4, 17, "starve_drawstate"),
++	PC_CP(5, 18, "starve_mrb"), PC_CP(6, 19, "starve_rrb"), PC_CP(7, 20, "starve_vsd"), PC_CP(8, 22, "pipe_out_stall"),
++	PC_CP(9, 23, "sync_stall"), PC_CP(10, 24, "wfi_stall"), PC_CP(11, 25, "sys_wfi_stall"), PC_CP(12, 29, "draws"),
++	PC_CP(13, 47, "read_beats"),
++	PC_UCHE(0, 0, "busy"), PC_UCHE(1, 1, "arbiter_stall"), PC_UCHE(2, 2, "dram_lat_cycles"),
++	PC_UCHE(3, 3, "dram_lat_samples"), PC_UCHE(4, 4, "beats_tp"), PC_UCHE(5, 5, "beats_vfd"),
++	PC_UCHE(6, 6, "beats_hlsq"), PC_UCHE(7, 8, "beats_sp"), PC_UCHE(8, 9, "reads_tp"), PC_UCHE(9, 18, "evicts"),
++	PC_UCHE(10, 29, "gmem_beats"), PC_UCHE(11, 7, "beats_lrz"),
++	PC_TP(0, 0, "busy"), PC_TP(1, 1, "uche_stall"), PC_TP(2, 2, "lat_cycles"), PC_TP(3, 3, "lat_trans"),
++	PC_TP(4, 6, "l1_lines"), PC_TP(5, 7, "l1_misses"), PC_TP(6, 10, "pixels"), PC_TP(7, 8, "sp_tp"),
++	PC_TP(8, 9, "tp_sp"), PC_TP(9, 13, "quads"), PC_TP(10, 26, "pixels_bilinear"), PC_TP(11, 19, "quads_2d"),
++	PC_SP(1, 0, "busy"), PC_SP(2, 1, "alu"), PC_SP(3, 4, "tp_stall"), PC_SP(4, 5, "uche_stall"), PC_SP(5, 6, "rb_stall"),
++	PC_SP(6, 7, "non_exec"), PC_SP(7, 20, "wave_wait"), PC_SP(8, 21, "wave_fetch"), PC_SP(9, 82, "gm_lat_cycles"),
++	PC_SP(10, 83, "gm_lat_samples"), PC_SP(11, 37, "fs_tex"), PC_SP(12, 44, "fs_instr"), PC_SP(13, 51, "icache_req"),
++	PC_SP(14, 52, "icache_miss"), PC_SP(15, 46, "uche_reads"), PC_SP(16, 8, "wave_contexts"),
++	PC_RB(0, 0, "busy"), PC_RB(1, 5, "starve_sp"), PC_RB(2, 7, "starve_ccu"), PC_RB(3, 14, "color_read"),
++	PC_RB(4, 15, "color_write"), PC_RB(5, 29, "pixels_3d"), PC_RB(6, 34, "ccu_read_stall"), PC_RB(7, 35, "ccu_write_stall"),
++};
++#define A6_NPC (sizeof(a6_pcs) / sizeof(a6_pcs[0]))
++_Static_assert(A6_NPC <= A6_PERFCTR_MAX, "a6_pcs");
++
++int a6_perfctr_start(void)
++{
++	if (!a6_gx_up())
++		return -1;
++	for (uint32_t i = 0; i < A6_NPC; i++)
++		wr32(GREG(a6_pcs[i].sel), a6_pcs[i].countable);
++	return 0;
++}
++
++int a6_perfctr_read(uint64_t *v)
++{
++	if (!a6_gx_up())
++		return -1;
++	for (uint32_t i = 0; i < A6_NPC; i++) {
++		uint32_t c = a6_pcs[i].ctr;
++		uint32_t hi = rd32(GREG(c + 1)), lo = rd32(GREG(c)), hi2 = rd32(GREG(c + 1));
++		if (hi2 != hi)
++			lo = rd32(GREG(c));
++		v[i] = (uint64_t)hi2 << 32 | lo;
++	}
++	return 0;
++}
++
++static uint64_t pc_get(const uint64_t *a, const uint64_t *b, const char *name)
++{
++	for (uint32_t i = 0; i < A6_NPC; i++)
++		if (strcmp(a6_pcs[i].name, name) == 0)
++			return b[i] - a[i];
++	return 0;
++}
++
++static unsigned pc_pct(uint64_t x, uint64_t of)
++{
++	return of ? (unsigned)(x * 100 / of) : 0;
++}
++
++void a6_perfctr_report(const uint64_t *a, const uint64_t *b, uint64_t ms, uint64_t busy_ms)
++{
++	uint32_t bad = 0;
++	if (a6_gx_up())
++		for (uint32_t i = 0; i < A6_NPC; i++)
++			bad += (rd32(GREG(a6_pcs[i].sel)) & 0xff) != a6_pcs[i].countable;
++	a6_log("#### GPU PERF COUNTERS OVER %llu MS (GPU BUSY %llu MS)%s\n", ms, busy_ms,
++	    bad ? " - SELECTS CHANGED, NUMBERS SUSPECT" : "");
++	char line[200];
++	uint32_t len = 0;
++	for (uint32_t i = 0; i < A6_NPC; i++) {
++		len += snprintf(line + len, sizeof(line) - len, " %s=%llu", a6_pcs[i].name, b[i] - a[i]);
++		if (len > 150 || i == A6_NPC - 1) {
++			a6_log("gpuperf raw:%s\n", line);
++			len = 0;
++		}
++	}
++#define G(s) pc_get(a, b, s)
++	uint64_t busy = G("cp.busy");
++	a6_log("gpuperf cp: %llu busy cycles; of those SQE idle %u%%, starved for IB data %u%%, for draw-state data %u%%, "
++	    "MRB %u%%, RRB %u%%, VSD %u%%; stalled pipe-out %u%%, sync %u%%, WFI %u%%, sys WFI %u%%; %llu draws, "
++	    "%llu read beats\n", busy, pc_pct(G("cp.sqe_idle"), busy), pc_pct(G("cp.starve_ib"), busy),
++	    pc_pct(G("cp.starve_drawstate"), busy), pc_pct(G("cp.starve_mrb"), busy), pc_pct(G("cp.starve_rrb"), busy),
++	    pc_pct(G("cp.starve_vsd"), busy), pc_pct(G("cp.pipe_out_stall"), busy), pc_pct(G("cp.sync_stall"), busy),
++	    pc_pct(G("cp.wfi_stall"), busy), pc_pct(G("cp.sys_wfi_stall"), busy), G("cp.draws"), G("cp.read_beats"));
++	uint64_t beats = G("uche.beats_tp") + G("uche.beats_vfd") + G("uche.beats_hlsq") + G("uche.beats_sp") +
++	    G("uche.beats_lrz");
++	uint64_t ls = G("uche.dram_lat_samples");
++	a6_log("gpuperf uche: busy %u%% of CP busy, arbiter stall %u%%; memory latency %llu cycles avg over %llu "
++	    "samples; read beats tp %llu vfd %llu hlsq %llu sp %llu lrz %llu (%llu MB at 32 B/beat), %llu TP reads, "
++	    "%llu evicts, %llu GMEM beats\n", pc_pct(G("uche.busy"), busy), pc_pct(G("uche.arbiter_stall"), busy),
++	    ls ? G("uche.dram_lat_cycles") / ls : 0, ls, G("uche.beats_tp"), G("uche.beats_vfd"), G("uche.beats_hlsq"),
++	    G("uche.beats_sp"), G("uche.beats_lrz"), beats * 32 >> 20, G("uche.reads_tp"), G("uche.evicts"),
++	    G("uche.gmem_beats"));
++	uint64_t tpb = G("tp.busy"), lines = G("tp.l1_lines"), lt = G("tp.lat_trans");
++	a6_log("gpuperf tp: busy %u%% of CP busy, waiting on UCHE %u%% of its busy; L1 miss %u.%u%% of %llu lines; "
++	    "latency %llu cycles avg; %llu pixels (%llu bilinear), %llu quads (%llu 2D)\n", pc_pct(tpb, busy),
++	    pc_pct(G("tp.uche_stall"), tpb), pc_pct(G("tp.l1_misses"), lines),
++	    lines ? (unsigned)(G("tp.l1_misses") * 1000 / lines % 10) : 0, lines, lt ? G("tp.lat_cycles") / lt : 0,
++	    G("tp.pixels"), G("tp.pixels_bilinear"), G("tp.quads"), G("tp.quads_2d"));
++	uint64_t spb = G("sp.busy"), gs = G("sp.gm_lat_samples"), icr = G("sp.icache_req");
++	a6_log("gpuperf sp: busy %u%% of CP busy; of its busy ALU %u%%, waiting on TP %u%%, UCHE %u%%, RB %u%%, "
++	    "not executing %u%%; global-load latency %llu cycles avg; icache miss %u%% of %llu; %llu FS tex, %llu FS "
++	    "instr, %llu waves\n", pc_pct(spb, busy), pc_pct(G("sp.alu"), spb), pc_pct(G("sp.tp_stall"), spb),
++	    pc_pct(G("sp.uche_stall"), spb), pc_pct(G("sp.rb_stall"), spb), pc_pct(G("sp.non_exec"), spb),
++	    gs ? G("sp.gm_lat_cycles") / gs : 0, pc_pct(G("sp.icache_miss"), icr), icr, G("sp.fs_tex"), G("sp.fs_instr"),
++	    G("sp.wave_contexts"));
++	uint64_t rbb = G("rb.busy");
++	a6_log("gpuperf rb: busy %u%% of CP busy; of its busy starved by SP %u%%, by CCU %u%%, CCU read stall %u%%, "
++	    "write stall %u%%; color read %llu write %llu, %llu 3D pixels\n", pc_pct(rbb, busy),
++	    pc_pct(G("rb.starve_sp"), rbb), pc_pct(G("rb.starve_ccu"), rbb), pc_pct(G("rb.ccu_read_stall"), rbb),
++	    pc_pct(G("rb.ccu_write_stall"), rbb), G("rb.color_read"), G("rb.color_write"), G("rb.pixels_3d"));
++#undef G
++}
++
+ bool a6_fence_done(const struct a6_gpu *g, uint32_t fence)
+ {
+ 	return (int32_t)(a6_fence_read(g) - fence) >= 0;
+diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -78,6 +78,11 @@
+ int a6_set_perf(struct a6_gpu *g, uint32_t lvl);
+ uint32_t a6_perf_khz(uint32_t lvl);
+ uint64_t a6_gpu_cycles(void);	/* 0180: GPU clock cycles, 0 = GX off */
++/* 0181: GPU perf counters (stalls, cache misses, memory latency); -1 = GX off */
++#define A6_PERFCTR_MAX 64
++int a6_perfctr_start(void);
++int a6_perfctr_read(uint64_t *v);
++void a6_perfctr_report(const uint64_t *a, const uint64_t *b, uint64_t ms, uint64_t busy_ms);
+ 
+ /* ---- environment ---- */
+ uint32_t a6_rd(uint64_t pa);
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -253,6 +253,7 @@
+ }
+ 
+ static uint64_t ggov_busy;      /* 0170: GPU ticks (19.2 MHz) of all landed submits, for the governor */
++volatile uint32_t sweet_gpu_perf_secs;  /* 0181: "gpuperf SECS" (sweet_usb.c): read the counters over SECS */
+ static void gpu_gov_start(void);
+ 
+ static void
+@@ -576,6 +577,10 @@
+ 	uint64_t cyc0 = a6_gpu_cycles(), aon0 = a6_timestamp(&gpu);
+ 	uint64_t mcyc[A6_PERF_LEVELS + 1] = { 0 }, maon[A6_PERF_LEVELS + 1] = { 0 };
+ 	static bool said;
++	/* 0181: gpuperf */
++	static uint64_t pc0[A6_PERFCTR_MAX], pc1[A6_PERFCTR_MAX];
++	bool perf_on = false;
++	uint64_t perf_t0 = 0, perf_busy0 = 0;
+ 	int ticks = (int)(GGOV_TICK_MS * (unsigned)hz / 1000u);
+ 	a6_log("#### GPU GOVERNOR RUNNING (every %u ms, %u-%u MHz, aims at %u%% load)\n", GGOV_TICK_MS,
+ 	    a6_perf_khz(1) / 1000, a6_perf_khz(top) / 1000, GGOV_TARGET);
+@@ -606,6 +611,23 @@
+ 		}
+ 		cyc0 = cyc;
+ 		aon0 = aon;
++		uint32_t perf_secs = sweet_gpu_perf_secs;
++		if (perf_secs && !perf_on) {
++			if (a6_perfctr_start() == 0 && a6_perfctr_read(pc0) == 0) {
++				perf_on = true;
++				perf_t0 = now;
++				perf_busy0 = ggov_busy;
++				a6_log("#### GPU PERF COUNTERS RUNNING FOR %u S\n", perf_secs);
++			}
++		} else if (perf_on) {
++			uint64_t pns;
++			absolutetime_to_nanoseconds(now - perf_t0, &pns);
++			if (pns >= perf_secs * 1000000000ULL && a6_perfctr_read(pc1) == 0) {
++				a6_perfctr_report(pc0, pc1, pns / 1000000, (ggov_busy - perf_busy0) / 19200);
++				perf_on = false;
++				sweet_gpu_perf_secs = 0;
++			}
++		}
+ 		bool queued = (int32_t)(gpu.fence - a6_fence_read(&gpu)) > 0;
+ 		uint32_t want = top;
+ 		if (load < GGOV_JUMP) {
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1259,6 +1259,15 @@
+ 			sweet_top_request(secs, n);
+ 			continue;
+ 		}
++		if (strncmp(cmd, "gpuperf", 7) == 0) {
++			/* 0181: "gpuperf [SECS]": GPU stall / cache-miss / memory-latency counters over SECS s (sweet_gpu.c) */
++			extern volatile uint32_t sweet_gpu_perf_secs;
++			const char *p = cmd + 7;
++			int secs = ud_num(&p);
++			sweet_gpu_perf_secs = secs > 0 && secs <= 120 ? (uint32_t)secs : 10;
++			printf("#### GPU PERF COUNTERS ARMED (%u S)\n", sweet_gpu_perf_secs);
++			continue;
++		}
+ 		if (strncmp(cmd, "gpuhist", 7) == 0) {
+ 			/* 0174: "gpuhist [MIN_DW] [JOBS]": what is in the next big GPU jobs (SweetAccelerator.cpp) */
+ 			extern volatile uint32_t sweet_gpu_hist_min, sweet_gpu_hist_left;

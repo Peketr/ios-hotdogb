@@ -1,0 +1,26 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -335,16 +335,19 @@
+ 	 * surface's; otherwise it keeps a shadow image and copies the bytes in and back around every encoder,
+ 	 * which Turnip does one row per 2D blit on A6xx (~10k blits, ~16 ms per backboardd frame). Creators read
+ 	 * the pitch back (IOSurfaceGetBytesPerRow); the allocation grows below. Boot-arg sweetsurfalign=0: off.
++	 * 0178: off by default (sweetsurfalign=1 turns it on). SpringBoard's five LA08 Control Center glyph
++	 * surfaces (230x186, 75x144, 102x144, 105x144, 360x246) are written at the pitch they asked for, not the
++	 * rounded one, so the GPU read them sheared; and it bought no frame rate.
+ 	 */
+ 	{
+ 		static int align64 = -1;
+ 		static uint32_t logged;
+ 		if (align64 < 0) {
+-			uint32_t v = 1;
++			uint32_t v = 0;
+ 			PE_parse_boot_argn("sweetsurfalign", &v, sizeof(v));
+ 			align64 = (int)v;
+-			IOLog(align64 ? "#### SURFACE ROWS ROUNDED UP TO 64 BYTES\n" :
+-			    "#### SURFACE ROWS AS GIVEN (sweetsurfalign=0)\n");
++			IOLog(align64 ? "#### SURFACE ROWS ROUNDED UP TO 64 BYTES (sweetsurfalign=1)\n" :
++			    "#### SURFACE ROWS AS GIVEN BY DEFAULT (0178)\n");
+ 		}
+ 		uint32_t bpr = s->bytesPerRow;
+ 		bool unaligned = props->getObject("IOSurfaceBytesPerRow") != NULL && (bpr & 63) != 0;

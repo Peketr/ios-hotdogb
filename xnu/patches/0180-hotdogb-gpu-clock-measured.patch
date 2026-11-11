@@ -1,0 +1,86 @@
+diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -880,6 +880,17 @@
+ 	return (uint64_t)hi2 << 32 | lo;
+ }
+ 
++/* 0180: GPU core clock cycles (CP perf counter 0, CP_PERFCTR_CP_SEL[0] = always count); 0 with GX off */
++uint64_t a6_gpu_cycles(void)
++{
++	if (!a6_gx_up())
++		return 0;
++	uint32_t hi = rd32(GREG(0x0401)), lo = rd32(GREG(0x0400)), hi2 = rd32(GREG(0x0401));
++	if (hi2 != hi)
++		lo = rd32(GREG(0x0400));
++	return (uint64_t)hi2 << 32 | lo;
++}
++
+ bool a6_fence_done(const struct a6_gpu *g, uint32_t fence)
+ {
+ 	return (int32_t)(a6_fence_read(g) - fence) >= 0;
+diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -77,6 +77,7 @@
+ /* 0170: vote GPU frequency level 1..5 at run time (HFI GX_BW_PERF_VOTE, as at power-up); 0 = acked */
+ int a6_set_perf(struct a6_gpu *g, uint32_t lvl);
+ uint32_t a6_perf_khz(uint32_t lvl);
++uint64_t a6_gpu_cycles(void);	/* 0180: GPU clock cycles, 0 = GX off */
+ 
+ /* ---- environment ---- */
+ uint32_t a6_rd(uint64_t pa);
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -571,6 +571,11 @@
+ 	uint32_t top = gpu.perf_level >= 1 && gpu.perf_level <= A6_PERF_LEVELS ? gpu.perf_level : 1;
+ 	uint64_t last = mach_absolute_time(), report = last, busy0 = 0, khz_sum = 0;
+ 	unsigned down = 0, changes = 0, nticks = 0, peak = 0;
++	/* 0180: the real clock: GPU cycles over CP_ALWAYS_ON ticks (19.2 MHz), per level, in intervals >= 90% busy
++	 * (an idle core may be clock-gated and not count) */
++	uint64_t cyc0 = a6_gpu_cycles(), aon0 = a6_timestamp(&gpu);
++	uint64_t mcyc[A6_PERF_LEVELS + 1] = { 0 }, maon[A6_PERF_LEVELS + 1] = { 0 };
++	static bool said;
+ 	int ticks = (int)(GGOV_TICK_MS * (unsigned)hz / 1000u);
+ 	a6_log("#### GPU GOVERNOR RUNNING (every %u ms, %u-%u MHz, aims at %u%% load)\n", GGOV_TICK_MS,
+ 	    a6_perf_khz(1) / 1000, a6_perf_khz(top) / 1000, GGOV_TARGET);
+@@ -583,12 +588,24 @@
+ 			continue;
+ 		}
+ 		gpu_stats_locked();
++		uint64_t cyc = a6_gpu_cycles(), aon = a6_timestamp(&gpu);
+ 		uint64_t now = mach_absolute_time(), dt, ns;
+ 		absolutetime_to_nanoseconds(now - last, &dt);
+ 		last = now;
+ 		uint64_t busy_ns = (ggov_busy - busy0) * 10000 / 192;
+ 		busy0 = ggov_busy;
+ 		unsigned load = dt == 0 || busy_ns >= dt ? 100 : (unsigned)(busy_ns * 100 / dt);
++		if (load >= 90 && cyc0 && cyc > cyc0 && aon > aon0) {
++			mcyc[cur] += cyc - cyc0;
++			maon[cur] += aon - aon0;
++			if (!said) {
++				said = true;
++				a6_log("#### GPU CLOCK MEASURED: %llu MHZ AT THE %u MHZ LEVEL\n",
++				    (cyc - cyc0) * 192 / (aon - aon0) / 10, a6_perf_khz(cur) / 1000);
++			}
++		}
++		cyc0 = cyc;
++		aon0 = aon;
+ 		bool queued = (int32_t)(gpu.fence - a6_fence_read(&gpu)) > 0;
+ 		uint32_t want = top;
+ 		if (load < GGOV_JUMP) {
+@@ -626,6 +643,13 @@
+ 		if (ns >= GGOV_REPORT_S * 1000000000ULL) {
+ 			a6_log("gov %us: avg %llu MHz, now %u MHz, %u changes, busiest 100 ms %u%%\n", GGOV_REPORT_S,
+ 			    khz_sum / nticks / 1000, a6_perf_khz(gpu.perf_cur) / 1000, changes, peak);
++			for (uint32_t l = 1; l <= A6_PERF_LEVELS; l++) {
++				if (maon[l] >= 192000) {	/* >= 10 ms busy at that level */
++					a6_log("gov clock: level %u MHz measured %llu MHz over %llu ms busy\n",
++					    a6_perf_khz(l) / 1000, mcyc[l] * 192 / maon[l] / 10, maon[l] / 19200);
++				}
++				mcyc[l] = maon[l] = 0;
++			}
+ 			report = now;
+ 			khz_sum = 0;
+ 			nticks = changes = peak = 0;

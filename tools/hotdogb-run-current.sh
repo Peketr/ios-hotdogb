@@ -9,7 +9,27 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-11, where the one-row GPU copies come from): kernel 0177 (WSL build) = 0175 + 0176 (unaligned
+# Current (2026-11-11, GPU images and perf counters): kernel 0181 (WSL build) = 0180 + gpuhist lists the sampled images
+# ("#### GPUHIST IMAGES: ...") and a `gpuperf [SECS]` command. Once the home screen is up: python tools\flame-cmd.py
+# "gpuhist 8000 3", python tools\flame-cmd.py "gpuperf 20", python tools\hotdogb-swipebench.py 30, then read the
+# "GPUHIST image" and "gpuperf" lines in logs\runs\NAME\live.txt. k0181-perf-1111: 23/25 images tiled (UBWC), CP never
+# starved, GPU idle ~59% while swiping (HANDOFF). Back to 0180: KERNEL=work/boot/kernel-0180.
+# Before (2026-11-11, GPU clock measured): kernel 0180 (WSL build) = 0179 + the governor measures the real clock:
+# "#### GPU CLOCK MEASURED: 674 MHZ AT THE 675 MHZ LEVEL" and per 30 s "gov clock: level ... measured ..." lines.
+# Measured (k0180-gpuclk-1111): 674 MHz, but the heavy backboardd IB stays ~24 ms and swipebench ~38-40 fps (HANDOFF).
+# Back to 0179: KERNEL=work/boot/kernel-0179.
+# Before (2026-11-11, GPU clock): kernel 0179 (WSL build) = 0178 + GPU level 6 = 675 MHz at NOM_L1 (the top of the
+# phone's own stock GPU table), the governor's top by default. Expect "#### GPU PERF TABLE UP TO 675 MHZ (6 LEVELS)" and
+# "#### GPU GOVERNOR RUNNING (every 100 ms, 257-675 MHz ...)". Unlock, swipe (python tools\hotdogb-swipebench.py 30
+# --no-unlock) and compare fps and the heavy backboardd IB time ("IB us:" in SWEET GPU 5s jobs, ~25 ms at 499) and the
+# battery temperature with k0177-repack-1111. "#### GPU GOVERNOR STOPPED" or GPU faults = 675 not taken: -a "...
+# sweetgpufreq=5" (585) or sweetgpufreq=4 (old 499 cap). Back to 0178: KERNEL=work/boot/kernel-0178.
+# Before (2026-11-11, broken Control Center glyphs): kernel 0178 (WSL build) = 0177 + 0176's row rounding off by
+# default (it sheared 5 SpringBoard LA08 glyph surfaces; sweetsurfalign=1 = rounding on). Expect "#### SURFACE ROWS AS
+# GIVEN BY DEFAULT (0178)". Unlock, open Control Center (python tools\flame-cmd.py "swipe 960 15 960 1100 400") and
+# capture: python tools\flame-shot cc.png --pa 0x9c000000 --w 1080 --h 2400 --stride 4352. Airplane, cellular,
+# flashlight, camera and the NFC module should be unsheared. Back to 0177: KERNEL=work/boot/kernel-0177.
+# Before (2026-11-11, where the one-row GPU copies come from): kernel 0177 (WSL build) = 0175 + 0176 (unaligned
 # IOSurface rows rounded to 64 bytes; no measurable effect) + the gpuhist command also groups the 2D blits into one-row
 # runs. Once the home screen is up, swipe (python tools\hotdogb-swipebench.py 30 --no-unlock) and meanwhile run
 # python tools\flame-cmd.py "gpuhist 100000 2". Expect "#### GPUHIST BLIT RUNS: ~11000 blits, M of them in R one-row
@@ -98,15 +118,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0177}
-TAG=k0177-blitruns
-if [ ! -f "$KERNEL" ] && [ -f work/boot/kernel-0175 ]; then
-	echo "no $KERNEL yet: using kernel-0175 (no blit runs in gpuhist)" >&2
-	KERNEL=work/boot/kernel-0175 TAG=k0175-pthread
-fi
+KERNEL=${KERNEL:-work/boot/kernel-0181}
+TAG=k0181-perf
 SECS=900
 OPTS=(-q -G)
-ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3"
+ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${EXTRA:-}"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}
 [ -f "$KERNEL" ] || { echo "no kernel $KERNEL (fetch it from the NAS first)" >&2; exit 1; }
