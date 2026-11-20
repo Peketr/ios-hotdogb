@@ -8,7 +8,7 @@ use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
-    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType, IndexType, PixelFormat, PrimitiveTopologyClass,
+    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType, DepthClipMode, IndexType, PixelFormat, PrimitiveTopologyClass,
     PrimitiveType, RenderStages, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StencilOperation, TextureType,
     TextureUsage, TriangleFillMode, VertexFormat, VertexStepFunction, Winding,
 };
@@ -1914,6 +1914,15 @@ pub extern "C" fn nmb_render_set_stencil_reference(encoder: *mut NmbEncoder, fro
 pub extern "C" fn nmb_render_set_depth_bias(encoder: *mut NmbEncoder, bias: f32, slope_scale: f32, clamp: f32) -> bool {
     guard(false, || {
         render(encoder)?.set_depth_bias(bias, slope_scale, clamp).map_err(e("depth bias"))?;
+        Ok(true)
+    })
+}
+
+/// `setDepthClipMode:` (0 clip, 1 clamp): the runtime turns clamp into the pipeline's `depthClampEnable`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_set_depth_clip_mode(encoder: *mut NmbEncoder, mode: u64) -> bool {
+    guard(false, || {
+        render(encoder)?.set_depth_clip_mode(raw::<DepthClipMode>(mode, "depth clip mode")?).map_err(e("depth clip mode"))?;
         Ok(true)
     })
 }

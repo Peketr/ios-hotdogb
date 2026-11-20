@@ -663,6 +663,7 @@ static void waitForResource(id resource) {
 - (void)setDepthBias:(float)bias slopeScale:(float)slope clamp:(float)clamp {
  [self check:nmb_render_set_depth_bias(self.handle,bias,slope,clamp) what:"setDepthBias"];
 }
+- (void)setDepthClipMode:(MTLDepthClipMode)mode {[self check:nmb_render_set_depth_clip_mode(self.handle,mode) what:"setDepthClipMode"];}
 - (void)setLineWidth:(float)width {[self check:nmb_render_set_line_width(self.handle,width) what:"setLineWidth"];}
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset {
  [self check:nmb_render_set_visibility_mode(self.handle,mode,offset) what:"setVisibilityResultMode"];
