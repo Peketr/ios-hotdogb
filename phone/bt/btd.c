@@ -635,33 +635,98 @@ static void host_feed(struct h4host *h, const uint8_t *d, size_t len)
 	}
 }
 
-/* the chip's H4 stream, cut into packets (patched as needed) before they go to the host; bytes between packets are
- * dropped (h4log counts them as junk) */
+/*
+ * The chip's H4 stream, cut into packets (patched as needed) before they go to the host; bytes between packets are
+ * dropped (h4log counts them as junk).
+ * k0183-bletrace2: with Wi-Fi associating while Bluetooth came up (0183 makes wifid join by itself, ~5 s after en0,
+ * exactly when btd starts), serving began mid-packet. The old cutter took any 1..4 as a type byte, locked onto
+ * fake headers ("<ctlr cmd 0x2000", "acl len 1100") and swallowed the answer to bluetoothd's first Read Local
+ * Version: bluetoothd timed out and restarted every 30 s for ever, BLE never came up. Now headers that cannot come
+ * from a controller are refused and the cutter resyncs one byte later: no commands (type 1) ever, no event code 0,
+ * ACL/SCO only after a link exists (a connection complete event) and ACL at most 1024 bytes.
+ */
+static int ctlr_links;
+static unsigned ctlr_resyncs;
+/*
+ * k0183-blefix-1120-1027: the ~500-byte "acl" blobs after command answers are the firmware's debug log, ACL on handle
+ * 0xedc (Linux hci_qca: QCA_DEBUG_HANDLE, dropped there too). Treating them as junk cut them apart, the resync landed
+ * inside one and a payload byte taken as an event header swallowed the Read Local Supported Commands answer. They are
+ * framed as ACL at any time now and dropped, never passed to bluetoothd.
+ */
+#define QCA_DEBUG_HANDLE        0xedc
+static unsigned ctlr_debug_pkts;
+
+/* 0: need more bytes, -1: not a packet start, else the packet's length */
+static long ctlr_need(const uint8_t *b, size_t n)
+{
+	switch (b[0]) {
+	case 4:
+		if (n < 2)
+			return 0;
+		if (b[1] == 0 || (b[1] > 0x58 && b[1] != 0xff))
+			return -1;
+		return n < 3 ? 0 : 3 + b[2];
+	case 2:
+		if (n < 3)
+			return 0;
+		if (!ctlr_links && ((b[1] | b[2] << 8) & 0x0fff) != QCA_DEBUG_HANDLE)
+			return -1;
+		if (n < 5)
+			return 0;
+		return (b[3] | b[4] << 8) > 1024 ? -1 : 5 + (b[3] | b[4] << 8);
+	case 3:
+		if (!ctlr_links)
+			return -1;
+		return n < 4 ? 0 : 4 + b[3];
+	default:
+		return -1;
+	}
+}
+
+static void ctlr_note_links(const uint8_t *b, size_t len)
+{
+	if (b[0] != 4 || len < 4)
+		return;
+	if ((b[1] == 0x03 || b[1] == 0x2c) && !b[3])
+		ctlr_links = 1;
+	else if (b[1] == 0x3e && len >= 5 && (b[3] == 0x01 || b[3] == 0x0a) && !b[4])
+		ctlr_links = 1;
+}
+
 static void ctlr_feed(struct h4host *c, const uint8_t *d, size_t len)
 {
 	for (size_t i = 0; i < len; i++) {
-		if (c->n == 0 && (d[i] < 1 || d[i] > 4))
+		if (c->n == 0 && (d[i] < 2 || d[i] > 4))
 			continue;
-		if (c->n >= sizeof(c->b)) {
-			pipe_write(c->b, c->n);
-			c->n = 0;
-		}
 		c->b[c->n++] = d[i];
-		size_t need = 0;
-		uint8_t *b = c->b;
-		if (b[0] == 4 && c->n >= 3)
-			need = 3u + b[2];
-		else if (b[0] == 2 && c->n >= 5)
-			need = 5u + (b[3] | b[4] << 8);
-		else if (b[0] == 3 && c->n >= 4)
-			need = 4u + b[3];
-		else if (b[0] == 1 && c->n >= 4)
-			need = 4u + b[3];
-		if (need && c->n >= need) {
-			patch_supported_commands(b, need);
-			if (pipe_write(b, need))
-				LOG("host write of %zu bytes failed (no host, or it is not reading)\n", need);
-			c->n = 0;
+		for (;;) {
+			long need = ctlr_need(c->b, c->n);
+			if (need < 0) {
+				/* not a packet: drop its first byte, look for a start in the rest */
+				if (ctlr_resyncs++ < 20)
+					LOG("<ctlr resync: dropped a bad header %02x %02x\n", c->b[0], c->n > 1 ? c->b[1] : 0);
+				size_t k = 1;
+				while (k < c->n && (c->b[k] < 2 || c->b[k] > 4))
+					k++;
+				memmove(c->b, c->b + k, c->n - k);
+				c->n -= k;
+				if (c->n)
+					continue;
+				break;
+			}
+			if (need && c->n >= (size_t)need && c->b[0] == 2 &&
+			    ((c->b[1] | c->b[2] << 8) & 0x0fff) == QCA_DEBUG_HANDLE) {
+				if (ctlr_debug_pkts++ == 0)
+					LOG("<ctlr firmware debug log (ACL handle 0xedc): dropped, counted in stats\n");
+				c->n = 0;
+			} else if (need && c->n >= (size_t)need) {
+				ctlr_note_links(c->b, (size_t)need);
+				patch_supported_commands(c->b, (size_t)need);
+				if (pipe_write(c->b, (size_t)need))
+					LOG("host write of %ld bytes failed (no host, or it is not reading)\n", need);
+				c->n = 0;
+			}
+			break;
 		}
 	}
 }
@@ -676,7 +741,11 @@ static int bt_serve(void)
 		LOG("#### BLUETOOTH PIPE FAILED\n");
 		return -1;
 	}
-	LOG("#### BLUETOOTH SERVING bluetoothd (H4 at 3 Mbaud)\n");
+	/* whatever the chip still sends after the bring-up goes here, not to bluetoothd: start on a packet boundary */
+	drain(300);
+	rxn = 0;
+	uart_flush_rx();
+	LOG("#### BLUETOOTH SERVING bluetoothd (H4 at 3 Mbaud, chip stream resyncs)\n");
 	for (;;) {
 		int busy = 0;
 		size_t n = pipe_read(buf, sizeof(buf));
@@ -700,8 +769,8 @@ static int bt_serve(void)
 			uint32_t hs[4] = { 0 };
 			pipe_host(hs);
 			LOG("stats: host> %u packets %u bytes, <ctlr %u packets %u bytes, junk %u/%u; host unit %u pid %u, "
-			    "drops %u/%u\n", up.pkts, up.bytes, down.pkts, down.bytes, up.junk, down.junk, hs[0], hs[1], hs[2],
-			    hs[3]);
+			    "drops %u/%u, fw debug %u, resyncs %u\n", up.pkts, up.bytes, down.pkts, down.bytes, up.junk,
+			    down.junk, hs[0], hs[1], hs[2], hs[3], ctlr_debug_pkts, ctlr_resyncs);
 		}
 		if (!busy)
 			usleep(300);

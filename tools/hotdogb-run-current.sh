@@ -9,7 +9,12 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
-# Current (2026-11-11, Wi-Fi auto-join WORKS): kernel 0183 (WSL build) = 0182 + RSSI_BOUNDS (106) answered, a guessed
+# Current (2026-11-20, BLE with Wi-Fi auto-join): same kernel 0183; btd11 (phone/bt, tools/hotdogb-bt-install.py) resyncs the
+# chip stream. 0183 made wifid join ~5 s after en0, the moment btd brings BT up; serving then started mid-packet and the
+# old btd swallowed bluetoothd's first answer (restart every 30 s). k0183-blefix: "<ctlr resync" lines, then HCI reset and
+# "LE meta sub 0x2" reports in /var/local/btd.log. btd11 also frames+drops the firmw. debug log (ACL 0xedc; k0183-btd11-1120-1033:
+# stats "fw debug 3, resyncs 0", LE scan on, 55 reports, bluetoothd stays on pid 92). Expect the two H4 BYTES milestones.
+# Before - Current (2026-11-11, Wi-Fi auto-join WORKS): kernel 0183 (WSL build) = 0182 + RSSI_BOUNDS (106) answered, a guessed
 # layout {version 1, three bounds -100 dBm}. k0183-bounds-1111-2002: wifid joined by itself 3 s after its first scan. Expect "#### WIFI RSSI BOUNDS ANSWERED: -100 DBM (0183)" when wifid starts.
 # Do NOT touch Settings > Wi-Fi for 3 minutes. Fixed = "#### WIFID ASKS TO JOIN A NETWORK" by itself. wifid's own log:
 # /var/local/oslog-wifid-0182.log on the phone. EXTRA=" sweetwifibounds=0" = refused as in 0182.
@@ -129,7 +134,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KERNEL=${KERNEL:-work/boot/kernel-0183}
-TAG=k0183-bounds
+TAG=k0183-btd11
 SECS=900
 OPTS=(-q -G)
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${EXTRA:-}"
