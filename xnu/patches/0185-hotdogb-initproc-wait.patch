@@ -1,0 +1,25 @@
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1821,6 +1821,22 @@
+ 
+ 	sync(p, (void *)NULL, (int *)NULL);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * sweetinitwait=1: when launchd dies (e.g. a broken shared cache on the root), keep the kernel up instead of
++	 * panicking, so the kernel file server (tcp 2223) and the USB live log can still repair the root.
++	 */
++	if (p == initproc) {
++		static int sweet_initwait_chan;
++		uint32_t sweet_initwait = 0;
++		if (PE_parse_boot_argn("sweetinitwait", &sweet_initwait, sizeof(sweet_initwait)) && sweet_initwait) {
++			printf("#### %s: KERNEL STAYS UP FOR THE FILE SERVER (SWEETINITWAIT), NO PANIC\n", prefix_str);
++			for (;;) {
++				(void)tsleep(&sweet_initwait_chan, PZERO, "sweetinitwait", 60 * hz);
++			}
++		}
++	}
++#endif
+ 	if (p->p_exit_reason == OS_REASON_NULL) {
+ 		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
+ 		    prefix_str, WTERMSIG(rv), WEXITSTATUS(rv), ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""));

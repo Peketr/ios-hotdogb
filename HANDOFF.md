@@ -18,7 +18,29 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
   does not move. Delete /var/local/sensors/vibtest from the phone before normal use (it buzzes + raises accel to 400 Hz).
 - **SpringBoard exits ~0.1-0.5 s after an edge swipe** (home swipe up from y≈2390, or from the left edge), no crash line in
   the kernel log: 6 times in d-sensors-1120-1636, 2 times in d-install-1120-1628 (no sensors), so not caused by sensors.
-  Next: fetch /var/mobile/Library/Logs/CrashReporter/SpringBoard-*.ips with flame-files.py.
+  **Cause found (later the same day): the iOS root was full** (ENOSPC). The oslog-wifid job (`--keep`, no time limit)
+  had written ~800 MB; SpringBoard's Metal shader cache (MTL2 ShaderCache) failed with StorageFull on unlock and
+  SpringBoard exited. Deleting the oslog-*.log files, vib.csv and m2v-msg.log and removing the oslog-wifid job fixed
+  it: unlock works again. Keep oslog jobs time-limited (`oslog -t SECS`), never `--keep`.
+
+### HOTDOGB: AUTOROTATE WORKS (kernel 0185, two shared-cache patches, run qc-test-1120-2148, 2026-11-20)
+- **Orientation**: backboardd's CoreMotion `CLOrientationNotifier` asked for the AOP orientation HID device {0x20,0x8a}
+  ("fHidDeviceInterface NULL", orientation "unknown"). The per-hwType capability mask (CoreMotion, case 103 at
+  0x1919c4fec, `mov x19,#0xcfe`) has bit 6 = AOP orientation; patched to `#0xcbe` (dyld_shared_cache_arm64.05 file
+  offset 0x3de0fec, d39f81d2 -> d39781d2). CoreMotion then runs its software accelerometer detector and backboardd logs
+  "Updating device orientation from CoreMotion to: landscapeLeft (3)" etc. within a second of each turn.
+- **Drawing**: in landscape QuartzCore asked for a rotated framebuffer (descriptor 2436x1125, `setRotation:3`, over the
+  1125x2436 IOSurface; MetalContext at 0x188347030 decides from the display's rotation). Our Metal can't make those
+  ("Failed to allocate [2436 x 1125] BGRA framebuffer"), so landscape frames never showed until the next change. Patched
+  `cbnz w20` -> `b` (dyld_shared_cache_arm64.03 offset 0x15bb030, 54010035 -> 0a000014): QuartzCore rotates in its own
+  render instead. (`CAEnableFramebufferCompression` would also skip that path; untried.)
+- Both patched files were put with flame-files.py over USB; originals stay off-repo (Apple files). Not yet scripted.
+- **Recovery lesson**: an interrupted put of .05 left the root without it -> "initproc failed to start" panic before USB.
+  Kernel 0185 (`sweetinitwait=1`, patch 0185) parks the dying launchd instead of panicking, so USB + the kernel file
+  server stay up and the file can be put again. flame-files.py `put` timed out after 30 s for any file > ~30 MB (Python
+  times the whole sendall); it now allows 1 s per 256 KiB. The kernel server's PUT has no receive timeout: a killed
+  client can wedge it (reboot via flame-cmd.py still works). Kill orphaned python.exe flame-files processes after
+  stopping a script (TaskStop/pkill in Git Bash does not reach them).
 
 ### HOTDOGB: ACCEL, GYRO AND COMPASS STREAM TO iOS (kernel 0184 + sensord, run d-sensors-1120-1439, 2026-11-20)
 - **Cause of "accel/gyro/mag not found"**: OnePlus's SLPI firmware (Oppo "oplus" sensor layer) only registers the

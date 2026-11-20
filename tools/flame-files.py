@@ -60,6 +60,9 @@ def main(argv):
         local, remote = args[0], args[1]
         mode = int(args[2], 8) if len(args) > 2 else stat.S_IMODE(os.stat(local).st_mode)
         data = open(local, 'rb').read()
+        # Python's socket timeout bounds the whole sendall, not each chunk: USB NCM moves ~1 MB/s, so
+        # allow 1 s per 256 KiB (a 114 MB shared-cache file needs ~90 s; 30 s cut it off mid-file).
+        s.settimeout(max(30, len(data) / (256 << 10)))
         s.sendall(f'PUT {remote} {mode:o} {len(data)}\n'.encode() + data)
         print(remote, reply(s))
     elif cmd == 'get':

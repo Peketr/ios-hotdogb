@@ -17,6 +17,19 @@
 # (accel LSM6DSM, mag MMC5603) before booting the SLPI; ~42 s after SLPI start "#### FOUND ACCEL/GYRO/MAG SENSOR",
 # then "#### FIRST ACCEL/GYRO/COMPASS EVENT SENT TO IOS HID" (~116 s into the boot). Ran 420 s, no GPI timeouts.
 # Axis signs, autorotate and compass calibration are untested (need the phone moved).
+# Compass app (2026-11-20, c-compass9, SENSORS=1 SECS=1200): the phone runs a patched locationd from /usr/local/bin/locationd
+# (job com.apple.locationd program; /usr/libexec/locationd untouched): CLCompass7/AOP check at 0x6bd158 -> 0, legacy
+# CLMagnetometer::isAvailable at 0x73b2a8 -> 1, re-signed with its own entitlements; mobile pref CompassIgnoreGyro=true.
+# locationd now builds the legacy compass on our HID magnetometer and computes headings (oslog-loc job, /var/local/oslog-loc.log:
+# "Type,Compass,magneticHeading,229.61,...accuracy,-1.0,...level,0"), but uncalibrated: |B| ~131 uT (hard-iron offset), so
+# the Compass app shows no heading yet. Next: rotate the phone in a figure-8 with Compass open, then check level/accuracy.
+# Autorotate (2026-11-20, qc-test-1120-2148): WORKS with two shared-cache patches on the phone (Apple files, not in git;
+# originals kept off-repo): dyld_shared_cache_arm64.05 @0x3de0fec d39f81d2->d39781d2 (CoreMotion hwType 103 capability
+# mask: clear bit 6 = no AOP orientation, so CLOrientationNotifier runs its software accel detector), and
+# dyld_shared_cache_arm64.03 @0x15bb030 54010035->0a000014 (QuartzCore: never ask for a rotated framebuffer; our Metal
+# can't make rotation=3 IOSurface textures: "Failed to allocate [2436 x 1125] BGRA framebuffer").
+# SENSORS=1 now boots kernel 0185 with sweetinitwait=1: if launchd dies (e.g. a broken shared cache) the kernel stays up
+# ("#### initproc ...: KERNEL STAYS UP FOR THE FILE SERVER") so flame-files.py can repair the root over USB.
 # Motion log (sensord ssc.c, always on): "#### ORIENTATION AT START", "#### MOTION START", "motion:" traces every 250 ms,
 # "#### MOTION END ... rotation x/y/z deg ... gravity before -> after, tilt N deg", "#### ORIENTATION: FACE UP|..." -
 # move / rotate the phone during a SENSORS=1 run and check axis signs there (iOS frame: +x right, +y top, +z out).
@@ -154,7 +167,7 @@ TAG=k0183-btd11
 SECS=${SECS:-900}
 OPTS=(-q -G)
 SENS=""
-[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1"; TAG=k0184-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0184}; }
+[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1 sweetinitwait=1"; TAG=k0185-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0185}; }
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${SENS}${EXTRA:-}"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}

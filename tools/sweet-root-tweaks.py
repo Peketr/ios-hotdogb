@@ -64,9 +64,13 @@ def location(root):
     apps never ask and Settings lists no per-app Location rows)."""
     path = os.path.join(root, 'private/var/root/Library/Preferences/com.apple.locationd.plist')
     data = load(path) if os.path.exists(path) else {}
-    data.update({'LocationServicesEnabledIn7.0': True, 'LocationServicesEnabled': True})
+    data.update({'LocationServicesEnabledIn7.0': True, 'LocationServicesEnabledIn8.0': True,
+                 'LocationServicesEnabled': True})  # iOS 16 locationd reads In8.0 (BigSwitch)
     save(path, data, 0, 0, 0o600)
     print('pref com.apple.locationd (root): Location Services on')
+    # iOS 16 locationd runs as mobile and reads the big switch from mobile's domain
+    merge_pref(root, 'com.apple.locationd', {'LocationServicesEnabled': True, 'LocationServicesEnabledIn7.0': True,
+                                            'LocationServicesEnabledIn8.0': True})
 
 
 def launchd(root):
