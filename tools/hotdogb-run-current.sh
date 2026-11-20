@@ -28,7 +28,27 @@
 # mask: clear bit 6 = no AOP orientation, so CLOrientationNotifier runs its software accel detector), and
 # dyld_shared_cache_arm64.03 @0x15bb030 54010035->0a000014 (QuartzCore: never ask for a rotated framebuffer; our Metal
 # can't make rotation=3 IOSurface textures: "Failed to allocate [2436 x 1125] BGRA framebuffer").
-# SENSORS=1 now boots kernel 0185 with sweetinitwait=1: if launchd dies (e.g. a broken shared cache) the kernel stays up
+# Compass test (2026-11-20, cmp-test): the Compass app's CMMotionManager asks CoreMotion for 9AxisWithNorthReference;
+# CLDeviceMotion::enableSensorFusionWithMode (0x1919c4520) builds the AOP/SPU fusion service when capability bit 4 is
+# set (it waits forever on HID {0xff0c,4}) and the software CLSensorFusionService9Axis otherwise. Same .05 instruction,
+# first d39581d2 (mask 0xcae): Compass crashed, assert "CLCompass7 requires deviceMotionService" - the compass factory
+# (0x191c62080) makes CLCompass7 when bit 5 OR bit 4 is set, else the legacy CLCompass (hwType 103 magnetometer check
+# 0x1919bd768 returns 0x1f, bit 0 set). Now d39181d2 (mask 0xc8e: bits 4, 5, 6 clear), cmp2-test.
+# cmp2-test-1120-2256: no crash; Compass runs "Legacy compass" + CLSensorFusionService9Axis on our HID mag/accel/gyro,
+# calibrates within ~30 s of figure-8s (bias x ~79 uT, |B| ~35 uT after, calibrationLevel 2, locationd heading 107..202
+# acc 15), but the dial stays at 0: CMDeviceMotion yaw stays ~0, MagneticFieldAccuracy 0, Heading 0 (the 9-axis MEKF never
+# pulls yaw to north). Next run: mobile pref com.apple.CoreMotion LogSensorFusion=1 to see its [CompassIntoKF] /
+# "Aborted yawUpdate" / "UpdatingYaw!" lines. Log job oslog-loc (-t 900 -l locationd Compass). Open Compass, turn it.
+# cmp3-test (k0186, LogSensorFusion=1): touch OK. Mag axes match accel/gyro (gravity-dip and gyro-prediction tests,
+# identity mapping best). The 9-axis MEKF feedCompassData (0x191c20b60) only uses the compass when calibrationLevel > 2
+# ("cmp w21,#2; b.gt" at 0x191c20c54); our legacy compass stays at level 1 (sometimes 2), so yaw never gets a north
+# reference. kf-test: same .05 file offset 0x403cc54 bf0a0071 -> bf020071 (cmp w21,#0: level >= 1 is used).
+# kf-test-1121: COMPASS DIAL MOVES. 173 "UpdatingYaw!", calibration level 2, accuracy 30 deg; user: "not all that precise".
+# Mag 16 Hz, noise ~0.3 uT, sphere-fit residual 1.8 uT on |B| ~48 uT. Next: better hard/soft-iron calibration or a
+# higher mag rate in sensord so the legacy compass reaches level 3 (then the MEKF gate patch is not needed).
+# Touch failure (cmlog-prep-1120-2322): "SWEET S3706: L17A enable failed 16; stopping" at 321 s - RPMH lock held by a
+# WLAN rail vote (ldoc11/rfclka2) and 0185 returned EBUSY at once. 0186 waits up to 500 ms ("#### RPMH WAITED N MS").
+# SENSORS=1 now boots kernel 0186 (0185 + RPMH wait) with sweetinitwait=1: if launchd dies (e.g. a broken shared cache) the kernel stays up
 # ("#### initproc ...: KERNEL STAYS UP FOR THE FILE SERVER") so flame-files.py can repair the root over USB.
 # Motion log (sensord ssc.c, always on): "#### ORIENTATION AT START", "#### MOTION START", "motion:" traces every 250 ms,
 # "#### MOTION END ... rotation x/y/z deg ... gravity before -> after, tilt N deg", "#### ORIENTATION: FACE UP|..." -
@@ -167,7 +187,7 @@ TAG=k0183-btd11
 SECS=${SECS:-900}
 OPTS=(-q -G)
 SENS=""
-[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1 sweetinitwait=1"; TAG=k0185-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0185}; }
+[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1 sweetinitwait=1"; TAG=k0186-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0186}; }
 ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${SENS}${EXTRA:-}"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}

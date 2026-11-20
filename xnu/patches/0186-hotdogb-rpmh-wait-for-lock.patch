@@ -1,0 +1,48 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -52,6 +52,27 @@
+ static uint32_t rh_db_size;
+ static unsigned rh_ncpt;
+ static unsigned rh_lock;
++
++/*
++ * One RPMH user at a time. Callers run on different threads (touch rail at boot, /dev/pmem PMEM_RPMH votes from
++ * sensord/wland, GPU/DDR votes): wait up to 500 ms for the other caller instead of failing at once. 0185 and before
++ * returned EBUSY immediately, so a touch L17A enable racing a WLAN rail vote stopped the touchscreen for the boot.
++ */
++static bool
++rh_take(void)
++{
++	for (unsigned ms = 0; ms <= 500; ++ms) {
++		if (!__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++			if (ms) {
++				printf("#### RPMH WAITED %u MS FOR ANOTHER CALLER (0186)\n", ms);
++			}
++			return true;
++		}
++		delay(1000);
++	}
++	printf("#### RPMH STILL BUSY AFTER 500 MS, GIVING UP (0186)\n");
++	return false;
++}
+ static bool rh_poisoned;
+ 
+ static uint32_t
+@@ -347,7 +370,7 @@
+ 	if (!res || n == 0 || n > 4) {
+ 		return EINVAL;
+ 	}
+-	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++	if (!rh_take()) {
+ 		return EBUSY;
+ 	}
+ 	int error = EIO;
+@@ -377,7 +400,7 @@
+ 		printf("SWEET RPMH: %s %u mV is not an allowed touch rail\n", res ? res : "?", mv);
+ 		return EINVAL;
+ 	}
+-	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++	if (!rh_take()) {
+ 		return EBUSY;
+ 	}
+ 	int error = EIO;
