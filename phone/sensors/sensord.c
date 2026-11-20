@@ -17,9 +17,12 @@
  *
  *   sensord smp2p          the SLPI's SMP2P state
  *   sensord up [DELAY]     everything above after DELAY s
- *   sensord auto           the boot job: `up 45` (after wland's and audiod's AOSS messages); skipped if
- *                          /var/local/sensord.off exists
+ *   sensord auto           the boot job: `up 45` (after wland's and audiod's AOSS messages), only when the
+ *                          boot args carry sweetsensors=1; skipped if /var/local/sensord.off exists
  *   sensord shutdown       PAS shutdown of the SLPI
+ *   sensord vib [SECS]     the vibration motor (PM8150B haptics, vib.c) on for SECS s (default 1); `vib 0` = off
+ *   With /var/local/sensors/vibtest (optional content: the accel rate, default 400 Hz) `up` runs the motor
+ *   on/off in 4 s windows once accel streams and logs the accel/gyro noise per window (ssc.c, /var/local/vib.csv).
  * Files (not in git): /var/local/fw/slpi/slpi.mdt + slpi.bNN (the 7T's modem partition, image/);
  * /var/local/sensors/{etc/config/NAME.json, etc/sns_reg_config, socinfo/FILE, persist/registry/registry/}
  * (tools/hotdogb-sensors-install.py).
@@ -30,6 +33,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/sysctl.h>
 #include "../wifi/pmem.h"
 #include "../wifi/smem.h"
 #include "../wifi/link.h"
@@ -37,6 +41,7 @@
 #include "../wifi/qmi.h"
 #include "fastrpc.h"
 #include "ssc.h"
+#include "vib.h"
 
 #define SMEM_HOST_SLPI	3
 #define SLPI_PA		0x98100000ull	/* dtbo overlay 3, fragment@87: pil_slpi_mem <0x98100000 0x1400000> */
@@ -52,7 +57,8 @@
 #define SHM_PA		0x9e200000ull
 #define SHM_SIZE	0x00100000u
 #define FRPC_SID	0x5a0		/* + mask 3: the three sdsprpc banks 0x5a1-0x5a3 */
-#define FRPC_MSW	1		/* 0x5a1 & 0xf */
+#define FRPC_MSW	1		/* 0x5a1 & 3: the stream offset in DSP address bits 33:32 */
+#define FRPC_PT_PA	0x9e1fe000ull	/* SMMU L1 + L2 for the SLPI bank: just below SHM_PA, not mapped for the DSP */
 #define ROOT		"/var/local/sensors"
 
 uint32_t qrtr_node_remote = 9;		/* replaced by the SLPI's HELLO */
@@ -286,6 +292,85 @@ static uint8_t *slurp(const char *path, size_t *len)
 	return b;
 }
 
+/*
+ * OnePlus/Oppo sensor devinfo: SMEM item 130 (SMEM_SENSOR) lists the sensor chips the board has, and the SLPI's
+ * oplus driver layer only registers the drivers it names. On Android the AP kernel fills it from the DT node
+ * "oplus,sensor-devinfo" (oplus_sensor_devinfo.c: on 4.14 it finds the item already allocated, zeroes it and
+ * parses the DT); our kernel never did, so the SLPI saw no IMU and no magnetometer (accel/gyro/mag "not found"
+ * while timer/suid/registry answered). Layout (oplus_sensor_devinfo.h):
+ *   sensor_info { int magic; sensor_vector s[11]; sensor_algorithm a[A] (84 bytes each) }
+ *   sensor_vector { int id; sensor_hw hw[S] }   S 3 A 8 (6792 bytes, current source); the 7T's item is 4684 = S 2 A 7
+ *   sensor_hw { u8 name, bus, direction, irq; int reg[10], parameter[25], feature[10] }   184 bytes
+ * Values from the 7T's dtbo (oplus_sensor): gsensor@0 type 0 name 1 (LSM6DSM) direction 0; msensor@0 type 2
+ * name 2 (MMC5603) direction 2 + 18 soft-iron parameters; no bus/irq properties -> 0xff ("from the registry").
+ * Light/proximity and the virtual algorithms stay zero (not needed for motion).
+ */
+#define SMEM_SENSOR	130
+#define HW_SIZE		184
+static int oplus_devinfo(void)
+{
+	uint64_t pa;
+	uint32_t sz;
+	int found = smem_get(SMEM_HOST_GLOBAL, SMEM_SENSOR, &pa, &sz) == 0;
+	if (!found) {
+		/* not allocated by the boot chain: allocate the current layout in the global partition */
+		sz = 6792;
+		if (smem_alloc(SMEM_HOST_GLOBAL, SMEM_SENSOR, sz, &pa)) {
+			printf("#### OPLUS SENSOR DEVINFO: NO SMEM ITEM 130 AND ALLOCATION FAILED\n");
+			return -1;
+		}
+	}
+	/* 11 sensor vectors of S sources, then A algorithm entries (84 bytes). Seen on the 7T: 4684 bytes = S 2, A 7
+	 * (run d-sensors-1120, item allocated by the boot chain, all zero). Newer kernels: 6792 = S 3, A 8. */
+	int S = -1;
+	for (int s = 3; s >= 1 && S < 0; s--) {
+		uint32_t vec = 11 * (4 + HW_SIZE * (uint32_t)s);
+		if (sz >= 4 + vec && (sz - 4 - vec) % 84 == 0 && (sz - 4 - vec) / 84 >= 5 && (sz - 4 - vec) / 84 <= 10)
+			S = s;
+	}
+	uint8_t old[64];
+	pm_rd(pa, old, sizeof(old));
+	printf("oplus devinfo: SMEM item 130 %s at %llx, %u bytes -> %d sources per sensor; first bytes:",
+	       found ? "found" : "allocated", (unsigned long long)pa, sz, S);
+	for (int i = 0; i < 32; i++)
+		printf(" %02x", old[i]);
+	printf("\n");
+	if (S < 1 || S > 4) {
+		printf("#### OPLUS SENSOR DEVINFO: UNKNOWN LAYOUT (%u BYTES), NOT WRITTEN\n", sz);
+		return -1;
+	}
+	static uint8_t b[16384];
+	if (sz > sizeof(b))
+		return -1;
+	memset(b, 0, sz);
+	uint32_t vsize = 4 + HW_SIZE * (uint32_t)S;
+#define VEC(i)		(4 + (i) * vsize)
+#define HW(i, k)	(VEC(i) + 4 + (k) * HW_SIZE)
+	/* accel (OPLUS_ACCEL 0): LSM6DSM; gyro (1) has no DT node - the LSM6DSM driver publishes it */
+	uint32_t id = 0;
+	memcpy(b + VEC(0), &id, 4);
+	b[HW(0, 0) + 0] = 0x01;
+	b[HW(0, 0) + 1] = 0xff;
+	b[HW(0, 0) + 2] = 0x00;
+	b[HW(0, 0) + 3] = 0xff;
+	/* mag (OPLUS_MAG 2): MMC5603, soft-mag-parameter -> parameter[0..17] */
+	id = 2;
+	memcpy(b + VEC(2), &id, 4);
+	b[HW(2, 0) + 0] = 0x02;
+	b[HW(2, 0) + 1] = 0xff;
+	b[HW(2, 0) + 2] = 0x02;
+	b[HW(2, 0) + 3] = 0xff;
+	static const int32_t softmag[18] = { 0x26ec, 0, 0x25, 0, 0x34d, 1, 0xa9, 1, 0x29b4, 0, 0x138, 1, 0x91, 1, 0xf9, 0,
+					     0x2dee, 0 };
+	memcpy(b + HW(2, 0) + 4 + 40, softmag, sizeof(softmag));
+#undef VEC
+#undef HW
+	pm_wr(pa, b, sz);
+	__asm__ volatile("dsb sy" ::: "memory");
+	printf("#### OPLUS SENSOR DEVINFO WRITTEN (SMEM 130: ACCEL LSM6DSM, MAG MMC5603)\n");
+	return 0;
+}
+
 struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; };
 #define SEG_HASH(p)	((((p)->flags >> 24) & 7) == 2)
 #define SEG_RELOC	(1u << 27)
@@ -427,28 +512,53 @@ static int boot_slpi(void)
 
 #define SMMU_PA		0x15000000ull
 
-static int smmu_identity(uint32_t sid, uint32_t mask)
+/* Streams sid..sid+n-1 -> one translation-off bank, one exact SMR each (mask 0). A masked SMR does not stick here:
+ * 0x5a0/mask 3 read back 00000000 (runs k0184-sensord-1111-2034 and k0184-msw0-1111-2046), so the SLPI's FastRPC
+ * reads matched no SMR - the sensors PD faulted on the payload (msw 1) or never answered (msw 0). audiod's
+ * unmasked 0x1b21 reads back valid. */
+static uint64_t frpc_cbp;	/* the SLPI bank's register page, for smmu_fault_dump */
+
+/* The sensors PD faults at 0xb218da68 (slpi.b14 +0x8da68): reading our payload's list[] {num, pgidx}, its first
+ * access to the message buffer. A fault the apps SMMU took shows here (bank FSR/FAR/FSYNR0, global GFSR/GFAR/
+ * GFSYNR0); nothing here means the access never reached this SMMU (hypervisor stage 2 or the DSP's own MMU). */
+static void smmu_fault_dump(const char *when)
+{
+	uint64_t s = SMMU_PA;
+	uint32_t gfsr = rd32(s + 0x48);
+	printf("[%6llu] smmu %s: GFSR %08x GFAR %08x:%08x GFSYNR0 %08x GFSYNR1 %08x", (unsigned long long)link_ms(), when,
+	       gfsr, rd32(s + 0x44), rd32(s + 0x40), rd32(s + 0x50), rd32(s + 0x54));
+	if (frpc_cbp)
+		printf("; bank FSR %08x FAR %08x:%08x FSYNR0 %08x SCTLR %08x", rd32(frpc_cbp + 0x58), rd32(frpc_cbp + 0x64),
+		       rd32(frpc_cbp + 0x60), rd32(frpc_cbp + 0x68), rd32(frpc_cbp));
+	printf("\n");
+}
+
+static int smmu_identity(uint32_t sid, uint32_t n)
 {
 	uint64_t s = SMMU_PA;
 	uint32_t id0 = rd32(s + 0x20), id1 = rd32(s + 0x24), nsmr = id0 & 0xff, ncb = id1 & 0xff;
 	uint32_t psize = (id1 >> 31) ? 0x10000 : 0x1000, npage = 1u << (((id1 >> 28) & 7) + 1);
 	uint64_t used[4] = { 0 };
-	int slot = -1, cb = -1;
+	int freeslot[8], nfree = 0, cb = -1;
+	uint32_t have = 0;	/* bit k: sid + k already matched */
 	for (uint32_t i = 0; i < nsmr && i < 128; i++) {
 		uint32_t smr = rd32(s + 0x800 + 4 * i), s2cr = rd32(s + 0xc00 + 4 * i);
 		if (!(smr >> 31)) {
-			if (slot < 0)
-				slot = (int)i;
+			if (nfree < 8)
+				freeslot[nfree++] = (int)i;
 			continue;
 		}
 		if (((s2cr >> 16) & 3) == 0)
 			used[(s2cr & 0xff) / 64] |= 1ull << ((s2cr & 0xff) % 64);
 		uint32_t id = smr & 0x7fff, m = (smr >> 16) & 0x7fff;
-		if (((id ^ sid) & ~(m | mask) & 0x7fff) == 0) {
-			printf("smmu: SMR%u %08x already matches %#x: S2CR %08x\n", i, smr, sid, s2cr);
-			return 0;
-		}
+		for (uint32_t k = 0; k < n; k++)
+			if (((id ^ (sid + k)) & ~m & 0x7fff) == 0) {
+				printf("smmu: SMR%u %08x already matches %#x: S2CR %08x\n", i, smr, sid + k, s2cr);
+				have |= 1u << k;
+			}
 	}
+	if (have == (1u << n) - 1)
+		return 0;
 	for (uint32_t c = 0; c < ncb && c < 256; c++) {
 		uint64_t cbp = s + (uint64_t)npage * psize + (uint64_t)c * psize;
 		if (!(used[c / 64] & (1ull << (c % 64))) && !(rd32(cbp) & 1) && rd32(s + psize + 4 * c) == 0) {
@@ -456,29 +566,68 @@ static int smmu_identity(uint32_t sid, uint32_t mask)
 			break;
 		}
 	}
-	if (slot < 0 || cb < 0) {
-		printf("smmu: no free SMR/bank (SMR %d, bank %d)\n", slot, cb);
+	if (nfree < (int)n || cb < 0) {
+		printf("smmu: no free SMRs/bank (%d free SMRs, bank %d)\n", nfree, cb);
 		return -1;
 	}
+	/* Translation ON. OnePlus msm-4.14 adsprpc.c ("SMMU interconnect HW bug" workaround): on the SDSP, address
+	 * bits 33:32 select the stream (0x5a0 + cb), so its IOVAs live at cb << 32 and reach the DSP unchanged.
+	 * A translation-off bank would pass 0x1_9e200000 straight through as a physical address: real iOS RAM 4 GB
+	 * above our buffer (the PD crash and the dead phone with msw 1). One 2 MB block maps
+	 * FRPC_IOVA_MSW:SHM_PA back to SHM_PA; tables and walks non-cacheable, as sweet_usb.c's bank. */
 	uint64_t gr1 = s + psize, cbp = s + (uint64_t)npage * psize + (uint64_t)cb * psize;
-	wr32(cbp + 0x58, 0xffffffff);
-	wr32(cbp + 0x20, 0);
-	wr32(cbp + 0x24, 0);
-	wr32(cbp + 0x30, 0);
-	wr32(cbp + 0x10, 0);
-	wr32(cbp + 0x38, 0);
-	wr32(cbp + 0x3c, 0);
+	frpc_cbp = cbp;
+	uint64_t iova = ((uint64_t)FRPC_MSW << 32) | (SHM_PA & ~0x1fffffull), l1[512] = { 0 }, l2[512] = { 0 };
+	l1[(iova >> 30) & 0x1ff] = (FRPC_PT_PA + 0x1000) | 3;
+	l2[(iova >> 21) & 0x1ff] = (SHM_PA & ~0x1fffffull) | (1u << 10) | (3u << 8) | (1u << 6) | 1u;
+	pm_wr(FRPC_PT_PA, l1, sizeof(l1));
+	pm_wr(FRPC_PT_PA + 0x1000, l2, sizeof(l2));
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr32(cbp, 0);					/* SCTLR off while programming */
 	wr32(gr1 + 0x800 + 4 * cb, 1);			/* CBA2R: AArch64 */
-	wr32(gr1 + 4 * cb, 0x0001f000u);		/* CBAR as ABL's banks */
-	wr32(cbp, 0x000000e0u);				/* SCTLR: M = 0, no translation */
-	wr32(s + 0xc00 + 4 * slot, (uint32_t)cb);
-	wr32(s + 0x800 + 4 * slot, (1u << 31) | (mask << 16) | sid);
+	wr32(gr1 + 4 * cb, (1u << 16) | (0xfu << 12) | (3u << 8) | (uint32_t)(cb + 1));	/* S1, S2 bypass */
+	/* TCR2: 40-bit PA, SEP 7 (upstream). SEP 0 makes VA bit 31 select TTBR1 (off): run k0184-c-sensors-1111
+	 * took a translation fault at 1:9e200000 (FSR 402) - bit 31 is set. As sweet_a6xx.c TCR2_VAL, Linux SEP_UPSTREAM. */
+	wr32(cbp + 0x10, (7u << 15) | 2u);
+	wr32(cbp + 0x20, (uint32_t)FRPC_PT_PA);
+	wr32(cbp + 0x24, (uint32_t)(FRPC_PT_PA >> 32));
+	wr32(cbp + 0x30, 25 | (1u << 23));		/* TCR: T0SZ 25, NC walks, EPD1 */
+	wr32(cbp + 0x38, 0x0000ff44);			/* MAIR0: attr0 Normal NC */
+	wr32(cbp + 0x58, 0xffffffff);
+	wr32(cbp, 1 | 2 | 4 | 0x20 | 0x40);		/* SCTLR: M TRE AFE CFRE CFIE */
+	wr32(cbp + 0x618, 0);				/* TLBIALL */
+	wr32(cbp + 0x7f0, 0);				/* TLBSYNC */
+	for (int i = 0; i < 1000 && (rd32(cbp + 0x7f4) & 1); i++)
+		usleep(100);
+	/* self-test: ATS1PR on the payload IOVA, PAR should be SHM_PA (as sweet_usb.c's check) */
+	wr32(cbp + 0x800, (uint32_t)(iova + (SHM_PA & 0x1fffff)));
+	wr32(cbp + 0x804, (uint32_t)((iova + (SHM_PA & 0x1fffff)) >> 32));
+	for (int i = 0; i < 1000 && (rd32(cbp + 0x8f0) & 1); i++)
+		usleep(100);
+	printf("smmu: ATS1PR %llx -> PAR %08x:%08x (bit 0 = fault)\n", (unsigned long long)(iova + (SHM_PA & 0x1fffff)),
+	       rd32(cbp + 0x54), rd32(cbp + 0x50));
+	printf("smmu: CB%d translates %llx -> %llx (2 MB), tables at %llx, SCTLR %08x TCR %08x TCR2 %08x\n", cb,
+	       (unsigned long long)iova, (unsigned long long)(SHM_PA & ~0x1fffffull), (unsigned long long)FRPC_PT_PA,
+	       rd32(cbp), rd32(cbp + 0x30), rd32(cbp + 0x10));
+	int bad = 0, j = 0;
+	for (uint32_t k = 0; k < n; k++) {
+		if (have & (1u << k))
+			continue;
+		int slot = freeslot[j++];
+		wr32(s + 0xc00 + 4 * slot, (uint32_t)cb);
+		wr32(s + 0x800 + 4 * slot, (1u << 31) | (sid + k));
+		uint32_t smr = rd32(s + 0x800 + 4 * slot);
+		printf("smmu: fastrpc %#x -> CB%d via SMR%d: SMR %08x S2CR %08x\n", sid + k, cb, slot, smr,
+		       rd32(s + 0xc00 + 4 * slot));
+		if (smr != ((1u << 31) | (sid + k)))
+			bad = 1;
+	}
 	wr32(s + 0x70, 0);
 	for (int i = 0; i < 1000 && (rd32(s + 0x74) & 1); i++)
 		usleep(1000);
-	printf("smmu: fastrpc %#x/%#x -> CB%d via SMR%d: SMR %08x S2CR %08x\n", sid, mask, cb, slot,
-	       rd32(s + 0x800 + 4 * slot), rd32(s + 0xc00 + 4 * slot));
-	return 0;
+	if (bad)
+		printf("#### SMMU: FASTRPC STREAM SMR DID NOT STICK\n");
+	return bad ? -1 : 0;
 }
 
 /* ---- servreg notifier: msm/slpi/sensor_pd (as audiod.c) ---- */
@@ -628,11 +777,16 @@ static int up(unsigned delay)
 	if (smp2p_create())
 		return 1;
 	printf("smp2p: outbound item %u at %llx (sleepstate awake)\n", SMP2P_OUT, (unsigned long long)smp2p_out_pa);
+	oplus_devinfo();	/* before the SLPI boots: its oplus layer reads the chip list at start */
 	if (boot_slpi())
 		return 1;
-	if (smmu_identity(FRPC_SID, 3))
+	if (smmu_identity(FRPC_SID + 1, 3))	/* 0x5a1-0x5a3 (sdsprpc banks); an SMR for 0x5a0 reads back 0 */
 		return 1;
-	frpc_init(SHM_PA, SHM_SIZE, FRPC_MSW, ROOT);
+	/* The DSP address's upper word is the stream offset (0x5a1 -> 1), translated back by smmu_identity's table.
+	 * Fixed: msw 0 is stream 0x5a0, which the hypervisor will not map. */
+	unsigned msw = FRPC_MSW;
+	printf("fastrpc: DSP address upper word %u\n", msw);
+	frpc_init(SHM_PA, SHM_SIZE, msw, ROOT);
 	link_idle = idle;
 	int rc = -1;
 	for (int t = 0; t < 10 && rc; t++)	/* the GLINK FIFO appears a little after "ready" */
@@ -647,7 +801,9 @@ static int up(unsigned delay)
 	/* the sensors PD: attach (retried while it starts), then the listener its registry needs */
 	int att = -1;
 	for (int t = 0; t < 30 && att; t++) {
+		smmu_fault_dump(t == 0 ? "before attach" : "before retry");
 		att = frpc_attach_sensors();
+		smmu_fault_dump("after attach");
 		if (att)
 			link_poll(2000);
 	}
@@ -673,8 +829,11 @@ static int up(unsigned delay)
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	/* Each log line reaches the disk before the next step: earlier runs took the phone down mid-bring-up and
+	 * lost the tail of sensord.log. */
+	fcntl(STDOUT_FILENO, F_SETFL, fcntl(STDOUT_FILENO, F_GETFL) | O_FSYNC);
 	if (argc < 2) {
-		fprintf(stderr, "usage: sensord smp2p | up [DELAY] | auto | shutdown\n");
+		fprintf(stderr, "usage: sensord smp2p | up [DELAY] | auto | shutdown | vib [SECS]\n");
 		return 2;
 	}
 	pm_init();
@@ -691,7 +850,28 @@ int main(int argc, char **argv)
 			printf("sensord: /var/local/sensord.off: not starting\n");
 			return 0;
 		}
+		/* Opt-in per boot: only with sweetsensors=1 in the boot args, so a run without it never touches the SLPI
+		 * (a faulting SLPI or SMMU setup can take the whole SoC down).
+		 * kern.bootargs does not show it to userland here (run k0184-smrfix-1111-2105), so ask the kernel: a 1-byte
+		 * write to kern.sweet_motion is EINVAL with the boot-arg, ENODEV without it (ENOENT before 0184). */
+		uint8_t probe = 0;
+		if (sysctlbyname("kern.sweet_motion", NULL, NULL, &probe, 1) == 0 || errno != EINVAL) {
+			printf("sensord: kernel motion feed off (no sweetsensors=1 or pre-0184 kernel, errno %d): not starting\n",
+			       errno);
+			return 0;
+		}
 		return up(45);
+	}
+	if (!strcmp(argv[1], "vib")) {
+		double secs = argc > 2 ? atof(argv[2]) : 1;
+		if (secs <= 0)
+			return vib_set(0) ? 1 : 0;
+		if (vib_set(1))
+			return 1;
+		printf("vib: on, status %#x\n", vib_status());
+		usleep((useconds_t)(secs * 1e6));
+		printf("vib: status %#x, off\n", vib_status());
+		return vib_set(0) ? 1 : 0;
 	}
 	if (!strcmp(argv[1], "shutdown")) {
 		uint64_t r1;

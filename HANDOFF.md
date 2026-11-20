@@ -5,6 +5,71 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: IMU CHECKED BY HAND, HAPTICS MOTOR STILL SILENT, SPRINGBOARD EXITS ON EDGE SWIPES (run d-sensors-1120-1636, 2026-11-20)
+- **Accel is right** (iOS frame, g): face down at start (z +0.90), face up (z -1.00), upright portrait (y -0.99),
+  on an edge (x -0.98), face down (z +1.00), back face up, all as the user moved it. Gyro at rest ~(-0.02, -0.02, 0.02) rad/s.
+- sensord motion log ("#### MOTION START/END", "motion:" every 250 ms, "#### ORIENTATION") is always on. Bug fixed after
+  this run (built, not yet tested): the gyro bias was seeded from the first gyro sample, which was junk (-0.54 0.18 -1.09),
+  so "motion:" showed a constant +0.53 -0.19 +1.11 rad/s and MOTION END never came. Now seeded at 0, and only gyro samples
+  < 0.2 rad/s update it.
+- **Haptics** (phone/sensors/vib.c, `sensord vib SECS`; vibration test runs when /var/local/sensors/vibtest exists): PM8150B
+  haptics at SID 3 0xc000 answers (type 0x15/0x9, AUTO_RES 0x35 0x50, status 0x82 while on), boost GPIO5 set, but quiet
+  windows show the same accel diff-rms on and off (~1.6 mg): "#### VIBRATION NOT VISIBLE ... x1.1". The motor most likely
+  does not move. Delete /var/local/sensors/vibtest from the phone before normal use (it buzzes + raises accel to 400 Hz).
+- **SpringBoard exits ~0.1-0.5 s after an edge swipe** (home swipe up from y≈2390, or from the left edge), no crash line in
+  the kernel log: 6 times in d-sensors-1120-1636, 2 times in d-install-1120-1628 (no sensors), so not caused by sensors.
+  Next: fetch /var/mobile/Library/Logs/CrashReporter/SpringBoard-*.ips with flame-files.py.
+
+### HOTDOGB: ACCEL, GYRO AND COMPASS STREAM TO iOS (kernel 0184 + sensord, run d-sensors-1120-1439, 2026-11-20)
+- **Cause of "accel/gyro/mag not found"**: OnePlus's SLPI firmware (Oppo "oplus" sensor layer) only registers the
+  chips listed in **SMEM item 130** (SMEM_SENSOR). On Android the AP kernel's `oplus,sensor-devinfo` driver fills
+  it from the dtbo node `oplus_sensor` (source: oplus_sensor_devinfo.c/.h, e.g. /e/'s OnePlus sm7250 kernel mirror);
+  our kernel never did. The boot chain allocates the item: **4684 bytes, all zero** at 0x86007648 (global partition).
+- **Layout** (4684 = 4 + 11 x (4 + 2 x 184) + 7 x 84): `int magic; {int id; {u8 name, bus, direction, irq;
+  int reg[10], parameter[25], feature[10]} hw[2]} s[11]; {int id; int param[15], feature[5]} algo[7]`.
+  Newer kernels use 3 sources / 8 algos (6792 bytes). sensord's `oplus_devinfo()` (phone/sensors/sensord.c) picks the
+  layout from the size and writes, before the SLPI boots: s[0] accel id 0, LSM6DSM (1), direction 0, bus/irq 0xff;
+  s[2] mag id 2, MMC5603 (2), direction 2, bus/irq 0xff, the DT's 18 soft-mag parameters. Light/prox/algos zero.
+- **Result** (kernel 0184, `SENSORS=1`, uncommitted sensord with the SMMU translation fix + devinfo):
+  `#### OPLUS SENSOR DEVINFO WRITTEN`, then at 42 s `FOUND ACCEL/GYRO/MAG SENSOR`, enabled 50/50/25 Hz, first samples
+  ~0.9 s later; kernel `#### FIRST ACCEL/GYRO/COMPASS EVENT SENT TO IOS HID (1 CLIENTS)` at 116 s. Steady at rest
+  (phone propped, not moved): accel (-0.045, -0.884, -0.489) g = 1.01 g; gyro ~(-0.018, -0.015, 0.016) rad/s
+  (uncalibrated bias); mag ~(85, -85, -88) uT, |B| ~148 uT = uncalibrated hard-iron offset (status 3).
+  ~51 Hz accel/gyro, 25 Hz mag. The run lasted its full 420 s: no GPI timeout, no PD failure, phone alive.
+- The SLPI also opens `/proc/oppoVersion/modemType` (10 times, ENOENT); harmless so far. (`prjName`/`pcbVersion`
+  are in the firmware but were not asked for.)
+- **Open / next (needs someone to move the phone)**: axis signs vs iOS (rotate the phone; /var/local/sensors/axes
+  corrects them), whether backboardd autorotates from CLOrientationNotifier, compass heading (mag cal), gyro bias.
+  Then make SENSORS=1 the default in tools/hotdogb-run-current.sh after a few more stable runs.
+
+### HOTDOGB: MOTION SENSORS - iOS side in (kernel 0184), sensord reaches SENSOR PD UP but the phone dies 20-40 s later (2026-11-11)
+- **Stable default**: tools/hotdogb-run-current.sh is still 0183 and never starts sensors. sensord's boot job (`sensord auto`)
+  now starts the SLPI only when the boot args carry `sweetsensors=1`, which the script adds only with `SENSORS=1` (that
+  also picks kernel 0184). /var/local/sensord.off was removed from the phone (the boot-arg gate replaces it).
+- **How iOS reads motion (locationd, pulled from the phone, disassembled)**: CLAccelerometer/CLGyro/compass go through
+  CLIoHidInterface = IOHIDEventSystemClient services matched by usage pair + a matching property: accel {0xff00, 3}
+  + IMULocationID, gyro {0xff00, 9} + IMULocationID, mag {0xff00, 0xa} + MagLocationID (pairs read from the 8-byte
+  constants passed to the device ctor). Orientation: backboardd uses CoreMotion's CMDeviceOrientationManager ->
+  locationd CLOrientationNotifier, which has an `onAccelerometerData` path (likely computes orientation from accel when
+  there is no SPU orientation service; not verified). SPU paths (CLSPU, AppleSPUHIDDriver) are not needed for this.
+- **0184** (WSL build): SweetHIDAccel/Gyro/Compass + kern.sweet_motion (see NOTES). Observed with sweetsensors=1:
+  "#### HID SweetHIDAccel/Gyro/Compass OPENED BY IOHIDEventServiceUserClient" at 37 s = locationd matched all three.
+  Without the boot-arg 0184 behaves as 0183 (k0184-nosens-1111-2036).
+- **sensord** (now builds in WSL with theos: phone/sensors/build.sh): converts SSC samples to iOS units (accel
+  -m/s^2/9.80665 -> g, gyro rad/s, mag uT; optional 3x3 axes per sensor in /var/local/sensors/axes) and writes each to
+  kern.sweet_motion; its log is O_FSYNC now so the tail survives a dead phone. FastRPC DSP upper word from
+  /var/local/sensors/frpc_msw (default 1; the phone currently has **0**).
+- **Runs**: k0184-sensord-1111-2034 (msw 1): SLPI BOOTED, GLINK + QRTR (node 9), SSC SERVICE UP, SENSOR PD UP, "no accel
+  sensor yet" x2, then `PD FAILURE "sensor_process": EX:sensor_process:0x1:frpck_0_0:0x1076:PC=0xb218da68` right as
+  attach was sent; phone dead at 102 s. k0184-msw0-1111-2046 (msw 0): same up to SENSOR PD UP, attach "no answer in
+  3000 ms" (-1001), no PD failure; from 114.8 s `SWEET S3706: GPI timeout waiting on ch 0` (never in runs without
+  sensors), phone dead at 134 s. The earlier k0168-sensors-* runs died the same way (that is why sensord.off existed).
+- **Open / next**: (1) why the AP dies with the SLPI up - the touch GPI timeouts point at a shared QUP/GPI or clock/rail
+  the SLPI takes over (compare stock DT: which SEs/GPI channels the SSC owns; try sensord without touch, `sweettouch=0`?);
+  (2) attach: with msw 1 the DSP reads the payload and crashes in frpck (payload layout?), with 0 it never answers
+  (address not reachable) - so msw 1 is right and the attach payload/ctx is wrong; compare with linux fastrpc
+  INIT_ATTACH_SNS byte for byte. Steps after that (samples, axes, autorotate, Compass) are untested.
+
 ### HOTDOGB: Wi-Fi AUTO-JOIN WORKS with kernel 0183 - RSSI_BOUNDS answered (run k0183-bounds-1111-2002, 2026-11-11)
 - Result: "#### WIFI RSSI BOUNDS ANSWERED" at 201.9 s, first scan 201.9 s, "#### WIFID ASKS TO JOIN A NETWORK" at
   205.2 s with nobody touching Settings; ASSOCIATE (6-byte name, WPA2-PSK key) -> "flame wifi: join -> 0", ASSOCIATE_RESULT

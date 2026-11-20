@@ -9,6 +9,22 @@
 # logs/runs/NAME/live.txt (192.168.7.1 on "Ethernet 2"; close other flame-live.py listeners first)
 # and prints the #### milestones as they come. End early: python tools\flame-cmd.py reboot
 #
+# Motion sensors (2026-11-11): the run is the stable 0183 build whatever state sensord is in. The sensord boot job
+# only starts the SLPI when the boot args carry sweetsensors=1, which this script adds only with SENSORS=1:
+#   SENSORS=1 /mnt/c/.../hotdogb-run-current.sh    -> kernel 0184 (motion HID services + kern.sweet_motion), TAG k0184-sensors
+# Without SENSORS=1: kernel 0183, sensord logs "no sweetsensors=1 in the boot args: not starting" and touches nothing.
+# SENSORS=1 state (2026-11-20, d-sensors-1120-1439): WORKS. sensord fills Oppo's SMEM sensor-devinfo item 130
+# (accel LSM6DSM, mag MMC5603) before booting the SLPI; ~42 s after SLPI start "#### FOUND ACCEL/GYRO/MAG SENSOR",
+# then "#### FIRST ACCEL/GYRO/COMPASS EVENT SENT TO IOS HID" (~116 s into the boot). Ran 420 s, no GPI timeouts.
+# Axis signs, autorotate and compass calibration are untested (need the phone moved).
+# Motion log (sensord ssc.c, always on): "#### ORIENTATION AT START", "#### MOTION START", "motion:" traces every 250 ms,
+# "#### MOTION END ... rotation x/y/z deg ... gravity before -> after, tilt N deg", "#### ORIENTATION: FACE UP|..." -
+# move / rotate the phone during a SENSORS=1 run and check axis signs there (iOS frame: +x right, +y top, +z out).
+# Vibration test (sensord vib.c, PM8150B haptics over SPMI from /dev/pmem): put a file /var/local/sensors/vibtest
+# (content "400" = accel Hz) and run SENSORS=1; 10 s after accel streams the motor goes off/on in 4 s windows and
+# sensord.log gets "#### VIB ON/OFF Wn ..." lines and "#### VIBRATION VISIBLE|NOT VISIBLE IN THE ACCELEROMETER DATA";
+# raw samples in /var/local/vib.csv. Delete vibtest afterwards (it raises the accel rate and buzzes every boot).
+# Run length: SECS=N (default 900).
 # Current (2026-11-20, BLE with Wi-Fi auto-join): same kernel 0183; btd11 (phone/bt, tools/hotdogb-bt-install.py) resyncs the
 # chip stream. 0183 made wifid join ~5 s after en0, the moment btd brings BT up; serving then started mid-packet and the
 # old btd swallowed bluetoothd's first answer (restart every 30 s). k0183-blefix: "<ctlr resync" lines, then HCI reset and
@@ -135,9 +151,11 @@ cd "$(dirname "$0")/.."
 
 KERNEL=${KERNEL:-work/boot/kernel-0183}
 TAG=k0183-btd11
-SECS=900
+SECS=${SECS:-900}
 OPTS=(-q -G)
-ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${EXTRA:-}"
+SENS=""
+[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1"; TAG=k0184-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0184}; }
+ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${SENS}${EXTRA:-}"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}
 [ -f "$KERNEL" ] || { echo "no kernel $KERNEL (fetch it from the NAS first)" >&2; exit 1; }

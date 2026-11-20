@@ -1,0 +1,223 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_fts.c			standard
++bsd/dev/sweet_motion.c			standard
+ bsd/dev/sweet_s3706.c			standard
+ bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_poke.c			standard
+--- a/bsd/dev/sweet_motion.c
++++ b/bsd/dev/sweet_motion.c
+@@ -0,0 +1,82 @@
++/*
++ * hotdogb motion sensors: sensord (userland, phone/sensors) reads the LSM6DSM accelerometer/gyro and the MMC5603
++ * magnetometer from the SLPI and hands their samples to the kernel here; SweetHID.cpp's SweetHIDAccel/Gyro/Compass
++ * services pass them to iOS (locationd's CLIoHidInterface matches HID usage pairs 0xff00/3, 0xff00/9, 0xff00/0xa).
++ *
++ * kern.sweet_motion (write-only, root): an array of struct sweet_motion_sample, at most 64 per write.
++ *   kind 0 accel (g), 1 gyro (rad/s), 2 mag (uT); x, y, z 16.16 fixed in iOS device axes; t = mach_absolute_time.
++ * Everything here is off unless the boot args carry sweetsensors=1 (the services are not even published), so a run
++ * without it behaves as before whatever state sensord is in. Writes then get ENODEV.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/sysctl.h>
++#include <sys/kauth.h>
++#include <pexpert/pexpert.h>
++
++struct sweet_motion_sample {
++	uint32_t kind;
++	int32_t  x, y, z;
++	uint64_t t;
++};
++
++#define SWEET_MOTION_MAX 64
++
++extern void sweet_hid_motion(int kind, int x, int y, int z, uint64_t t);
++int sweet_motion_enabled(void);
++
++int
++sweet_motion_enabled(void)
++{
++	static int on = -1;
++	if (on < 0) {
++		int v = 0;
++		on = (PE_parse_boot_argn("sweetsensors", &v, sizeof(v)) && v == 1) ? 1 : 0;
++	}
++	return on;
++}
++
++static int
++sysctl_sweet_motion SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	struct sweet_motion_sample s[SWEET_MOTION_MAX];
++	static uint32_t seen;
++
++	if (!req->newptr) {
++		return EPERM;
++	}
++	if (!sweet_motion_enabled()) {
++		return ENODEV;
++	}
++	if (!kauth_cred_issuser(kauth_cred_get())) {
++		return EPERM;
++	}
++	size_t len = req->newlen;
++	if (len == 0 || len % sizeof(s[0]) || len > sizeof(s)) {
++		return EINVAL;
++	}
++	int err = SYSCTL_IN(req, s, len);
++	if (err) {
++		return err;
++	}
++	for (size_t i = 0; i < len / sizeof(s[0]); i++) {
++		if (s[i].kind > 2) {
++			continue;
++		}
++		if (!(seen & (1u << s[i].kind))) {
++			static const char *const names[] = { "ACCEL", "GYRO", "COMPASS" };
++			seen |= 1u << s[i].kind;
++			printf("#### FIRST %s SAMPLE FROM SENSORD (%d %d %d / 65536)\n", names[s[i].kind],
++			    s[i].x, s[i].y, s[i].z);
++		}
++		sweet_hid_motion((int)s[i].kind, s[i].x, s[i].y, s[i].z, s[i].t);
++	}
++	return 0;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_motion, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
++    NULL, 0, sysctl_sweet_motion, "S", "hotdogb motion samples from sensord");
++#endif
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -608,3 +608,101 @@
+ 		gSweetTouch->touch(finger, down != 0, x, y);
+ 	}
+ }
++
++/*
++ * Motion sensors (0184): accelerometer, gyro and magnetometer as the HID services locationd matches
++ * (CLIoHidInterface: usage pairs 0xff00/3, 0xff00/9, 0xff00/0xa, plus an IMULocationID / MagLocationID matching
++ * property). Samples come from sensord through kern.sweet_motion (bsd/dev/sweet_motion.c). Only published with
++ * the boot-arg sweetsensors=1: without it start() fails and iOS sees no motion hardware, as before.
++ */
++extern "C" int sweet_motion_enabled(void);
++
++class SweetHIDMotion : public IOHIDEventService {
++	OSDeclareAbstractStructors(SweetHIDMotion);
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void sample(IOFixed x, IOFixed y, IOFixed z, uint64_t t);
++protected:
++	virtual UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return 0xff00; }	/* kHIDPage_AppleVendor */
++	virtual int kind() = 0;
++	UInt32 fSeq;
++};
++OSDefineMetaClassAndAbstractStructors(SweetHIDMotion, IOHIDEventService);
++
++class SweetHIDAccel : public SweetHIDMotion {
++	OSDeclareDefaultStructors(SweetHIDAccel);
++protected:
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return 0x03; }	/* AppleVendor Accelerometer */
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x10; }
++	virtual int kind() APPLE_KEXT_OVERRIDE { return 0; }
++};
++OSDefineMetaClassAndStructors(SweetHIDAccel, SweetHIDMotion);
++
++class SweetHIDGyro : public SweetHIDMotion {
++	OSDeclareDefaultStructors(SweetHIDGyro);
++protected:
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return 0x09; }	/* AppleVendor Gyro */
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x11; }
++	virtual int kind() APPLE_KEXT_OVERRIDE { return 1; }
++};
++OSDefineMetaClassAndStructors(SweetHIDGyro, SweetHIDMotion);
++
++class SweetHIDCompass : public SweetHIDMotion {
++	OSDeclareDefaultStructors(SweetHIDCompass);
++protected:
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return 0x0a; }	/* AppleVendor Compass */
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x12; }
++	virtual int kind() APPLE_KEXT_OVERRIDE { return 2; }
++};
++OSDefineMetaClassAndStructors(SweetHIDCompass, SweetHIDMotion);
++
++static SweetHIDMotion *gSweetMotion[3];
++
++bool
++SweetHIDMotion::start(IOService *provider)
++{
++	if (!sweet_motion_enabled()) {
++		return false;
++	}
++	if (!IOHIDEventService::start(provider)) {
++		return false;
++	}
++	/* locationd adds {IMULocationID: N} (accel, gyro) or {MagLocationID: N} to its matching; N is 0 on one IMU. */
++	setProperty("IMULocationID", 0ULL, 32);
++	setProperty("MagLocationID", 0ULL, 32);
++	gSweetMotion[kind()] = this;
++	registerService();
++	IOLog("SWEET HID: motion %s registered (0xff00/0x%x)\n", getName(), (unsigned)getPrimaryUsage());
++	return true;
++}
++
++void
++SweetHIDMotion::sample(IOFixed x, IOFixed y, IOFixed z, uint64_t t)
++{
++	IOHIDEvent *e;
++	uint32_t seq = ++fSeq;
++
++	switch (kind()) {
++	case 0: e = IOHIDEvent::accelerometerEvent(t, x, y, z, 0, 0, seq); break;
++	case 1: e = IOHIDEvent::gyroEvent(t, x, y, z, 0, 0, seq); break;
++	default: e = IOHIDEvent::compassEvent(t, x, y, z, 0, 0, seq); break;
++	}
++	if (!e) {
++		return;
++	}
++	if (seq == 1) {
++		IOLog("#### FIRST %s EVENT SENT TO IOS HID (%u CLIENTS)\n",
++		    kind() == 0 ? "ACCEL" : (kind() == 1 ? "GYRO" : "COMPASS"), _clients ? _clients->getCount() : 0);
++	}
++	dispatchEvent(e);
++	e->release();
++}
++
++/* kind: 0 accel (g), 1 gyro (rad/s), 2 mag (uT); 16.16 fixed, iOS device axes; t: mach_absolute_time */
++extern "C" void
++sweet_hid_motion(int kind, int x, int y, int z, uint64_t t)
++{
++	if (kind >= 0 && kind < 3 && gSweetMotion[kind]) {
++		gSweetMotion[kind]->sample((IOFixed)x, (IOFixed)y, (IOFixed)z, t ? t : mach_absolute_time());
++	}
++}
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -78,6 +78,21 @@
+     "     'IOMatchCategory' = SweetHIDTouch;"
+     "   },"
+     "   {"
++    "     'IOClass'         = SweetHIDAccel;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetHIDAccel;"
++    "   },"
++    "   {"
++    "     'IOClass'         = SweetHIDGyro;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetHIDGyro;"
++    "   },"
++    "   {"
++    "     'IOClass'         = SweetHIDCompass;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetHIDCompass;"
++    "   },"
++    "   {"
+     "     'IOClass'         = SweetBattery;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"

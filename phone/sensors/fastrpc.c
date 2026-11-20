@@ -360,10 +360,37 @@ static const struct { const char *dsp, *local; } maps[] = {
 };
 
 /* DSP path -> ROOT/...; relative names under the env's directory. -1 for ".." */
-static int map_path(const char *p, const char *env, char *out, size_t cap)
+static int map_path(const char *p0, const char *env, char *out, size_t cap)
 {
-	if (strstr(p, ".."))
-		return -1;
+	/* fold "dir/.." (the SLPI opens .../registry/registry/../sns_reg_version); refuse only escapes above "/" */
+	char nb[512], *seg[64];
+	int ns = 0;
+	snprintf(nb, sizeof(nb), "%s", p0);
+	char *sp, *t = strtok_r(nb, "/", &sp);
+	for (; t; t = strtok_r(NULL, "/", &sp)) {
+		if (!strcmp(t, ".") )
+			continue;
+		if (!strcmp(t, "..")) {
+			if (!ns)
+				return -1;
+			ns--;
+			continue;
+		}
+		if (ns == 64)
+			return -1;
+		seg[ns++] = t;
+	}
+	char pb_[512];
+	const char *p = p0;
+	if (strstr(p0, "..") || strstr(p0, "/./")) {
+		size_t k = 0;
+		if (p0[0] == '/')
+			pb_[k++] = '/';
+		for (int i = 0; i < ns; i++)
+			k += (size_t)snprintf(pb_ + k, sizeof(pb_) - k, "%s%s", i ? "/" : "", seg[i]);
+		pb_[k < sizeof(pb_) ? k : sizeof(pb_) - 1] = 0;
+		p = pb_;
+	}
 	if (p[0] != '/') {
 		const char *d = env && !strcmp(env, "ADSP_AVS_CFG_PATH") ? "acdb" : "dsp";
 		snprintf(out, cap, "%s/%s/%s", root, d, p);
@@ -421,7 +448,7 @@ static int do_open(struct call *c, const char *name, const char *mode, const cha
 		mkparents(path);
 	int fd = open(path, fl, 0644);
 	int e = errno;
-	CLOG("frpc: < open \"%s\" \"%s\"%s%s -> %s: %d%s%s\n", name, mode, env && *env ? " env " : "", env ? env : "", path,
+	LOGT("frpc: < open \"%s\" \"%s\"%s%s -> %s: %d%s%s\n", name, mode, env && *env ? " env " : "", env ? env : "", path,
 	     fd, fd < 0 ? " " : "", fd < 0 ? strerror(e) : "");
 	if (fd < 0)
 		return aee(e);
@@ -572,7 +599,7 @@ static int apps_std(struct call *c)
 		char to[512];
 		if (map_path(S(c, 1), NULL, path, sizeof(path)) || map_path(S(c, 2), NULL, to, sizeof(to)))
 			return AEE_EBADPARM;
-		CLOG("frpc: < rename \"%s\" -> \"%s\"\n", S(c, 1), S(c, 2));
+		LOGT("frpc: < rename \"%s\" -> \"%s\"\n", S(c, 1), S(c, 2));
 		return rename(path, to) ? aee(errno) : 0;
 	}
 	}
