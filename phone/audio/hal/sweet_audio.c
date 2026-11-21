@@ -264,6 +264,36 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sink = -1;                   /* /dev/redwood-audio */
 static Float64 ticks_per_frame;
 static UInt64 written, refused;         /* frames since the speaker's I/O started */
+/* What the FIFO did not take yet. Safari sets 44.1 kHz and the HAL then writes 4096 frames = 16 KB per cycle,
+ * the whole FIFO: dropping the rest of a cycle lost half of the sound (2026-11-21). Kept here and sent first
+ * on the next cycle; over a second behind, the oldest goes. */
+#define PENDING_BYTES	(REDWOOD_AUDIO_RATE * REDWOOD_AUDIO_FRAME)
+static uint8_t pending[PENDING_BYTES];
+static size_t pend_head, pend_len;
+
+static void
+pending_add(const uint8_t *p, size_t n)
+{
+	if (n > PENDING_BYTES) {
+		refused += (n - PENDING_BYTES) / REDWOOD_AUDIO_FRAME;
+		p += n - PENDING_BYTES;
+		n = PENDING_BYTES;
+	}
+	if (pend_len + n > PENDING_BYTES) {	/* whole frames: n and both lengths are multiples of 4 */
+		size_t drop = pend_len + n - PENDING_BYTES;
+		pend_head = (pend_head + drop) % PENDING_BYTES;
+		pend_len -= drop;
+		refused += drop / REDWOOD_AUDIO_FRAME;
+	}
+	while (n > 0) {
+		size_t tail = (pend_head + pend_len) % PENDING_BYTES;
+		size_t c = PENDING_BYTES - tail < n ? PENDING_BYTES - tail : n;
+		memcpy(pending + tail, p, c);
+		pend_len += c;
+		p += c;
+		n -= c;
+	}
+}
 static Boolean inactive[OBJECT_LAST + 1];       /* streams the HAL has switched off */
 static Float32 volume = 1.0f;           /* the speaker's volume control, 0 to 1 (iOS sets it once it routes there) */
 
@@ -936,6 +966,7 @@ start_io(__unused AudioServerPlugInDriverRef driver, AudioObjectID object, __unu
 		d->periods = 0;
 		if (d->output != 0) {
 			written = refused = 0;
+			pend_head = pend_len = 0;
 			sink_open();
 			say("redwood: audio: playing\n");
 		}
@@ -1064,22 +1095,25 @@ do_io_operation(__unused AudioServerPlugInDriverRef driver, __unused AudioObject
 		if (sink < 0) {
 			sink_open();
 		}
+		pending_add((const uint8_t *)buffer, (size_t)frames * REDWOOD_AUDIO_FRAME);
 		/* in pieces of PIPE_BUF (512 bytes, 128 frames): each is written whole or not at all, so a full FIFO
-		 * never cuts a frame in two (which would swap the channels from there on) */
-		size_t left = (size_t)frames * REDWOOD_AUDIO_FRAME, off = 0;
-		while (sink >= 0 && left > 0) {
-			size_t n = left > 512 ? 512 : left;
-			if (write(sink, (const char *)buffer + off, n) != (ssize_t)n) {
+		 * never cuts a frame in two (which would swap the channels from there on); what does not fit waits */
+		while (sink >= 0 && pend_len > 0) {
+			size_t n = pend_len > 512 ? 512 : pend_len;
+			if (PENDING_BYTES - pend_head < n)
+				n = PENDING_BYTES - pend_head;	/* PENDING_BYTES is a multiple of 512: never hit mid-frame */
+			if (write(sink, pending + pend_head, n) != (ssize_t)n) {
 				if (errno != EAGAIN) {
 					close(sink);	/* audiod went away: open again when it is back */
 					sink = -1;
+					refused += pend_len / REDWOOD_AUDIO_FRAME;
+					pend_head = pend_len = 0;
 				}
 				break;
 			}
-			off += n;
-			left -= n;
+			pend_head = (pend_head + n) % PENDING_BYTES;
+			pend_len -= n;
 		}
-		refused += (UInt32)(left / REDWOOD_AUDIO_FRAME);
 		written += frames;
 	}
 	return 0;

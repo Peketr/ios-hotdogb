@@ -16,6 +16,12 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 - Fix: LINK_CLOCK = CLOCK_UPTIME_RAW (mach_absolute_time) in link.c, btd.c, uart.c. Needs a Mac rebuild of
   audiod, wland, sensord, btd11. Not verified on the phone yet. Kernel side (boottime not adjusted on settimeofday?)
   not checked.
+- Choppy Safari audio (after the clock fix): iOS delivered ~half the frames, tempo right. audiod lost nothing
+  (new idle stats: longest round 29-90 ms, 0 reads of a full FIFO). mediaserverd: no HAL overloads; Safari sets
+  the VAD to **44.1 kHz** and the I/O buffer becomes **4096 frames = 16 KB per cycle = the whole FIFO**, so the
+  plug-in's EAGAIN dropped the rest of most cycles (ringtones: 512-1024 frames, fine). Fix: SweetAudio keeps
+  what the FIFO did not take in a 1 s ring and sends it first next cycle (not verified yet). audiod also has a
+  100 ms prefill now (PREFILL 4); its "buffers short" count includes the ~80 silent buffers of the 2 s idle tail.
 - Also seen once (aud-oslog-1121): RPMH cx.lvl vote timed out at 77 s -> TCS quarantined -> touch L17A enable
   failed, `#### TOUCHSCREEN STOPPED`. Not seen in 6 other runs; rebooting fixed it.
 
