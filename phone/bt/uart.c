@@ -11,6 +11,11 @@
 #include <unistd.h>
 #include "../wifi/pmem.h"
 #include "uart.h"
+#ifdef CLOCK_UPTIME_RAW
+#define LINK_CLOCK CLOCK_UPTIME_RAW	/* mach_absolute_time(): never follows the wall clock */
+#else
+#define LINK_CLOCK CLOCK_MONOTONIC	/* host builds (Linux) */
+#endif
 
 #define SE_PA		0x00c8c000ull
 #define WRAP_PA		0x00cc0000ull	/* qcom,qupv3_2_geni_se@cc0000 */
@@ -107,7 +112,7 @@ static void se_wr(uint32_t o, uint32_t v) { wr32(SE_PA + o, v); }
 static uint64_t ms_now(void)
 {
 	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	clock_gettime(LINK_CLOCK, &ts);	/* not CLOCK_MONOTONIC: Darwin derives it from wall time, it jumped back at time sync */
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 

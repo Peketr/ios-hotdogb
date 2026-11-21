@@ -5,6 +5,20 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### HOTDOGB: SOUND STOPS AFTER THE CLOCK SYNCS - CLOCK_MONOTONIC FOLLOWS WALL TIME (run aud-oslog3-1121, 2026-11-21)
+- Symptom: ringtones play after boot, then nothing (Safari, ringtones) for the rest of the boot. audiod.log: amps,
+  stream and `#### SPEAKER READY FOR IOS` fine; `#### IOS AUDIO PLAYING` twice, then no data ever again.
+- mediaserverd's log (oslog -l mediaserverd audiomxd): the wall clock jumped back 01:48 -> 21:11 (time sync once
+  Wi-Fi/Safari was up); every Speaker IOProc start after that wrote into SweetAudio, but audiod read nothing.
+- Cause: phone/wifi/link.c now_ms() used CLOCK_MONOTONIC; Darwin's libc derives it from gettimeofday minus boot
+  time, and on our kernel it went back ~4.5 h with the clock, so link_poll(2) waited for hours (audiod's CPU halved).
+  The same now_ms() paces wland and sensord; bt/btd.c and bt/uart.c had the same clock.
+- Fix: LINK_CLOCK = CLOCK_UPTIME_RAW (mach_absolute_time) in link.c, btd.c, uart.c. Needs a Mac rebuild of
+  audiod, wland, sensord, btd11. Not verified on the phone yet. Kernel side (boottime not adjusted on settimeofday?)
+  not checked.
+- Also seen once (aud-oslog-1121): RPMH cx.lvl vote timed out at 77 s -> TCS quarantined -> touch L17A enable
+  failed, `#### TOUCHSCREEN STOPPED`. Not seen in 6 other runs; rebooting fixed it.
+
 ### HOTDOGB: IMU CHECKED BY HAND, HAPTICS MOTOR STILL SILENT, SPRINGBOARD EXITS ON EDGE SWIPES (run d-sensors-1120-1636, 2026-11-20)
 - **Accel is right** (iOS frame, g): face down at start (z +0.90), face up (z -1.00), upright portrait (y -0.99),
   on an edge (x -0.98), face down (z +1.00), back face up, all as the user moved it. Gyro at rest ~(-0.02, -0.02, 0.02) rad/s.

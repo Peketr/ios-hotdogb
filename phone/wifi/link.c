@@ -10,6 +10,11 @@
 #include "glink.h"
 #include "link.h"
 #include "pmem.h"
+#ifdef CLOCK_UPTIME_RAW
+#define LINK_CLOCK CLOCK_UPTIME_RAW	/* mach_absolute_time(): never follows the wall clock */
+#else
+#define LINK_CLOCK CLOCK_MONOTONIC	/* host builds (Linux) */
+#endif
 
 #define N_INTENTS	8
 #define INTENT_SIZE	4096
@@ -64,7 +69,7 @@ void (*link_idle)(void);
 static uint64_t now_ms(void)
 {
 	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	clock_gettime(LINK_CLOCK, &ts);	/* not CLOCK_MONOTONIC: Darwin derives it from wall time, it jumped back at time sync */
 	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
