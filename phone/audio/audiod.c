@@ -965,7 +965,8 @@ static void stream_serve(void)
 	unsigned sent = 0;
 	uint32_t done0 = writes_done;
 	uint64_t last_data = 0, frames_in = 0, underruns = 0, dropped = 0;
-	int playing = 0;
+	int playing = 0, primed = 0;
+	#define PREFILL	4	/* buffers (100 ms) in the ring before iOS's sound goes to the DSP */
 	for (;;) {
 		for (;;) {	/* drain the FIFO */
 			size_t tail = (rhead + rlen) % RING_BYTES, room = RING_BYTES - rlen;
@@ -980,6 +981,7 @@ static void stream_serve(void)
 			last_data = link_ms();
 			if (!playing) {
 				playing = 1;
+				primed = 0;
 				printf("[%6llu] #### IOS AUDIO PLAYING\n", (unsigned long long)link_ms());
 			}
 		}
@@ -994,7 +996,14 @@ static void stream_serve(void)
 			 * HAL writes in bursts); while it plays and the DSP still has 2 queued, wait for more. Running
 			 * dry, a buffer of silence goes and what is in the ring waits for the next one. */
 			unsigned inflight = sent - (writes_done - done0);
-			if (playing && rlen < BUF_BYTES && inflight >= 2)
+			/* the HAL delivers in bursts (76 of ~276 buffers short with 2 queued, 2026-11-21): after the start
+			 * and after every underrun, collect PREFILL buffers in the ring first; silence only when the DSP is
+			 * down to its last buffer */
+			if (playing && primed == 0 && rlen < PREFILL * BUF_BYTES && inflight >= 1)
+				break;
+			if (rlen >= PREFILL * BUF_BYTES)
+				primed = 1;
+			if (playing && rlen < BUF_BYTES && inflight >= 1)
 				break;
 			size_t have = rlen < BUF_BYTES ? 0 : BUF_BYTES;
 			for (size_t i = 0; i < have;) {
@@ -1004,8 +1013,10 @@ static void stream_serve(void)
 				i += c;
 			}
 			rlen -= have;
-			if (playing && have < BUF_BYTES)
+			if (playing && have < BUF_BYTES) {
 				underruns++;
+				primed = 0;
+			}
 			memset(buf + have, 0, BUF_BYTES - have);
 			pm_wr(SHM_PA + (sent % NBUF_LIVE) * BUF_BYTES, buf, BUF_BYTES);
 			stream_write(sent % NBUF_LIVE);
