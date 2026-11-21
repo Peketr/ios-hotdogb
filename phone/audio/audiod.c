@@ -966,8 +966,13 @@ static void stream_serve(void)
 	uint32_t done0 = writes_done;
 	uint64_t last_data = 0, frames_in = 0, underruns = 0, dropped = 0;
 	int playing = 0, primed = 0;
+	uint64_t last_round = 0, max_gap = 0, full_reads = 0;	/* FIFO full = the plug-in drops what does not fit */
 	#define PREFILL	4	/* buffers (100 ms) in the ring before iOS's sound goes to the DSP */
 	for (;;) {
+		uint64_t now = link_ms();
+		if (playing && last_round && now - last_round > max_gap)
+			max_gap = now - last_round;
+		last_round = now;
 		for (;;) {	/* drain the FIFO */
 			size_t tail = (rhead + rlen) % RING_BYTES, room = RING_BYTES - rlen;
 			size_t chunk = RING_BYTES - tail < room ? RING_BYTES - tail : room;
@@ -976,6 +981,8 @@ static void stream_serve(void)
 			ssize_t n = read(fd, ring + tail, chunk);
 			if (n <= 0)
 				break;
+			if (n >= 16384)
+				full_reads++;
 			rlen += (size_t)n;
 			frames_in += (uint64_t)n / 4;
 			last_data = link_ms();
@@ -1024,9 +1031,10 @@ static void stream_serve(void)
 		}
 		if (playing && link_ms() - last_data > 2000) {
 			playing = 0;
-			printf("[%6llu] stream: idle (%llu frames from iOS so far, %llu buffers short, %llu frames dropped)\n",
+			printf("[%6llu] stream: idle (%llu frames from iOS so far, %llu buffers short, %llu frames dropped; longest round %llu ms, %llu reads of a full FIFO)\n",
 			       (unsigned long long)link_ms(), (unsigned long long)frames_in, (unsigned long long)underruns,
-			       (unsigned long long)dropped);
+			       (unsigned long long)dropped, (unsigned long long)max_gap, (unsigned long long)full_reads);
+			max_gap = 0;
 		}
 		link_poll(2);
 	}
