@@ -1,0 +1,36 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -424,6 +424,33 @@
+ 			}
+ 		}
+ 	}
++	/*
++	 * 0194 (guacamole 0143): a 'b3a8' made one-plane BGRA kept no plane at all, so IOSurfaceGetBytesPerRowOfPlane(0)
++	 * was 0 for it. WebKit's GPU process builds CGImages from plane 0 of its 'b3a8' tiles ("CGImageCreate: invalid
++	 * image bits/pixel or bytes/row", pages black). For WebKit's processes that plane is the whole BGRA surface;
++	 * everyone else (backboardd) keeps the plane-less layout. The first one is logged.
++	 */
++	if (one_plane && s->planeCount == 0) {
++		char who[32] = "";
++		proc_selfname(who, sizeof(who));
++		if (strncmp(who, "com.apple.WebKit", 16) == 0) {
++			struct sweet_surface_plane *p = &s->planes[0];
++			p->width = s->width;
++			p->height = s->height;
++			p->bytesPerElement = s->bytesPerElement;
++			p->elementWidth = s->elementWidth;
++			p->elementHeight = s->elementHeight;
++			p->bytesPerRow = s->bytesPerRow;
++			p->offset = s->offset;
++			p->size = s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);
++			s->planeCount = 1;
++			static bool said;
++			if (!said) {
++				said = true;
++				printf("#### WEBKIT B3A8 SURFACE GETS ONE BGRA PLANE (%s, %ux%u) (0194)\n", who, s->width, s->height);
++			}
++		}
++	}
+ 
+ 	uint64_t alloc = sweet_dict_u32(props, "IOSurfaceAllocSize", 0);
+ 	if (alloc < end) {

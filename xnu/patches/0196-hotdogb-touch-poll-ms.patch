@@ -1,0 +1,42 @@
+--- a/bsd/dev/sweet_s3706.c
++++ b/bsd/dev/sweet_s3706.c
+@@ -1489,8 +1489,20 @@
+ 		printf("SWEET S3706: irq enable %02x %02x %02x %02x err=%d\n",
+ 		    ien[0], ien[1], ien[2], ien[3], err);
+ 	}
++	/*
++	 * 0196 (guacamole 0152): sweettouchms=N polls every N ms (default 8, as before). In a swipe CoreAnimation draws a frame when a touch sample
++	 * has come, so the sample rate bounds the swipe's frame rate and its pacing (guacamole/hakios measured it and
++	 * went to 4 ms). Our I2C already runs at 400 kHz. 4 ms stalled the frame and GPU stats threads in a swipe
++	 * (run ab-0196-4ms-1: a vsync 764 ms late) and 8 ms was as fast (41 fps), so 8 stays the default (1..50).
++	 */
++	uint32_t poll_ms = 8;
++	(void)PE_parse_boot_argn("sweettouchms", &poll_ms, sizeof(poll_ms));
++	if (poll_ms < 1 || poll_ms > 50) {
++		poll_ms = 8;
++	}
+ 	printf("#### TOUCHSCREEN RUNNING\n");
+-	printf("SWEET S3706: %u objects, polling every 8 ms\n", s3.fingers);
++	printf("#### TOUCH POLLED EVERY %u MS (0196)\n", poll_ms);
++	printf("SWEET S3706: %u objects, polling every %u ms\n", s3.fingers, poll_ms);
+ 	uint8_t pkt[8u + 8u * S3_MAX + 64u];
+ 	unsigned need = s3.data1_off + 8u * s3.fingers, errors = 0, ticks = 0;
+ 	if (need > sizeof(pkt)) {
+@@ -1500,7 +1512,7 @@
+ 	while (!s3.dead) {
+ 		/* Attention is active low; also read every ~100 ms in case it is not wired as assumed. */
+ 		bool attn = !(s3_rd(s3.gpio, S3_GPIO_IO(S3_PIN_ATTN)) & 1u);
+-		if (attn || (++ticks % 12u) == 0) {
++		if (attn || (++ticks % (96u / poll_ms ? 96u / poll_ms : 1u)) == 0) {
+ 			/* As OnePlus synaptics_trigger_reason: F01 data0 = device status, then
+ 			 * the interrupt status bytes; a non-zero device status is an exception
+ 			 * (reset/unconfigured/flash), logged. */
+@@ -1520,7 +1532,7 @@
+ 				}
+ 			}
+ 		}
+-		s3_wait(8);
++		s3_wait(poll_ms);
+ 	}
+ 	s3_release_all();
+ out:

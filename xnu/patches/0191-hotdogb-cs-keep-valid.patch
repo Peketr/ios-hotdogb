@@ -1,0 +1,30 @@
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -284,6 +284,27 @@
+ 		retval = 1;
+ 		proc_csflags_update(p, flags);
+ 	} else {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/*
++		 * 0191 (guacamole 0263): SWEET does not enforce code signing. A page that fails its hash still maps, as
++		 * on Apple's non-enforcing path, but the process keeps CS_VALID: csops() entitlement queries return
++		 * EINVAL for a process without CS_VALID, so securityd saw no keychain-access-groups and refused every
++		 * keychain call (-34018) for re-signed / decrypted apps. The first 32 such pages per boot are logged.
++		 */
++		static uint32_t sweet_cs_kept;
++		if ((flags & CS_VALID) && !(flags & CS_HARD)) {
++			proc_csflags_update(p, flags);
++			proc_unlock(p);
++			if (sweet_cs_kept++ < 32) {
++				printf("#### CODE SIGNING: BAD PAGE 0x%llx IN %d[%s] (status 0x%x) ALLOWED, PROCESS STAYS VALID (0191)\n",
++				    vaddr, proc_getpid(p), p->p_comm, (unsigned int)flags);
++			}
++			if (cs_killed) {
++				*cs_killed = FALSE;
++			}
++			return 0;
++		}
++#endif
+ 		if (flags & CS_VALID) {
+ 			flags &= ~CS_VALID;
+ 			cs_procs_invalidated++;

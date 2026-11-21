@@ -1,0 +1,37 @@
+--- a/bsd/kern/kern_memorystatus.c
++++ b/bsd/kern/kern_memorystatus.c
+@@ -4244,6 +4244,34 @@
+ 	}
+ #endif /* VM_PRESSURE_EVENTS */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * 0190 (guacamole 0142): WebKit's processes outgrow the limits jetsam gives them: every IOSurface is wired
++	 * memory mapped into the task (SweetSurface), so page tiles count in full and com.apple.WebKit.GPU /
++	 * WebContent get killed (reason 7, per-process limit) before they draw. For com.apple.WebKit.* the limit
++	 * goes up to 2 GB, not fatal, instead of a kill. Boot-arg sweetwkmem=0 keeps the stock behaviour.
++	 */
++	if (memlimit_is_fatal) {
++		static int wkmem = -1;
++		if (wkmem < 0) {
++			int v = 1;
++			PE_parse_boot_argn("sweetwkmem", &v, sizeof(v));
++			wkmem = v;
++		}
++		char name[MAXCOMLEN + 1] = "";
++		proc_selfname(name, sizeof(name));
++		if (wkmem && strncmp(name, "com.apple.WebKit", 16) == 0) {
++			memorystatus_memlimit_properties_t raised = { 2048, 0, 2048, 0 };
++			int err = memorystatus_set_memlimit_properties(proc_getpid(p), &raised);
++			printf("#### WEBKIT MEMORY LIMIT RAISED: %s[%d] TO 2048 MB, NOT FATAL (%d) (0190)\n", name,
++			    proc_getpid(p), err);
++			if (err == 0) {
++				return;
++			}
++		}
++	}
++#endif
++
+ 	if (memlimit_is_fatal) {
+ 		/*
+ 		 * If this process has no high watermark or has a fatal task limit, then we have been invoked because the task

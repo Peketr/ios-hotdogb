@@ -92,7 +92,11 @@ live_stop() {
 }
 trap live_stop EXIT
 
-if ! in_fastboot; then adb reboot bootloader 2>/dev/null || true; fi
+if ! in_fastboot; then
+	adb reboot bootloader 2>/dev/null || true
+	# Running iOS (no adb): our kernel's reboot command resets it into fastboot.
+	[ -x "$WINPY" ] && timeout 20 "$WINPY" "$(wslpath -w "$ROOT/tools/flame-cmd.py")" reboot >/dev/null 2>&1 || true
+fi
 if ! wait_fastboot 20; then
 	# The 7T's fastboot sometimes stops answering after a reset (on its screen, but `fastboot devices`
 	# empty or "no link"); `fastboot reboot bootloader` waits for it and restarts the bootloader.
@@ -100,10 +104,27 @@ if ! wait_fastboot 20; then
 	timeout 60 fastboot reboot bootloader 2>&1 | tail -1 || true
 fi
 wait_fastboot 90 || { echo "phone not in fastboot" >&2; exit 1; }
+# Slot a's boot counter: nothing on the iOS side marks the slot successful, so every `fastboot boot`
+# uses up a retry until ABL calls slot a unbootable ("Load Error"). set_active a (flashes nothing) puts
+# the retry count back to 7; do it whenever it is low or the slot is marked unbootable. Both getvars have a
+# timeout: slot-unbootable:a sometimes hangs or answers "Variable Not found" on this ABL (2026-11-21).
+retry=$(timeout 10 fastboot getvar slot-retry-count:a 2>&1 | sed -n 's/.*slot-retry-count:a: *\([0-9]*\).*/\1/p')
+unb=$(timeout 10 fastboot getvar slot-unbootable:a 2>&1 | sed -n 's/.*slot-unbootable:a: *\([a-z]*\).*/\1/p')
+if [ "$unb" = yes ] || [ -z "$retry" ] || [ "$retry" -le 3 ]; then
+	echo "$(date +%T) #### SLOT A RETRIES ${retry:-?}, UNBOOTABLE ${unb:-?}: fastboot set_active a"
+	fastboot set_active a 2>&1 | tail -1 || true
+fi
 live_start
 t0=$(date +%s)
 echo "$(date +%T) boot $name ($secs s): $cmdline"
-fastboot boot "$img" 2>&1 | tail -1
+if ! timeout 120 fastboot boot "$img" 2>&1 | tail -1 | grep -qv "error"; then
+	# about every other boot after a run the bootloader refuses the image ("Command failed"); a bootloader
+	# restart clears it (2026-11-21: three runs lost this way)
+	echo "$(date +%T) #### FASTBOOT REFUSED THE IMAGE: RESTARTING THE BOOTLOADER, ONE RETRY"
+	timeout 40 fastboot reboot bootloader 2>&1 | tail -1 || true
+	sleep 12
+	timeout 120 fastboot boot "$img" 2>&1 | tail -1
+fi
 sleep 15
 if ! wait_fastboot $((secs + 180)); then
 	echo "run did not return to fastboot in $((secs + 180)) s; leaving it" >&2
@@ -172,4 +193,17 @@ echo "--- last lines"; tail -5 "$log" | cut -c1-200
 if [ "$pull" != none ]; then
 	echo "--- last lines (RAM rescue)"; tail -5 "$out/rescue.txt" | cut -c1-200
 	echo "--- shim"; tail -5 "$out/shim.txt" | cut -c1-200
+fi
+
+# Cool-down: when the run ended hot (battery >= COOL_TEMP_C, default 40 C) and low (<= COOL_PCT, default
+# 20 %), leave the phone in fastboot (charging, nearly idle) for COOL_MINS (default 12) before the next run
+# can start. COOL_MINS=0 skips it.
+last=$(grep -a "SWEET BATTERY: gauge" "$live_txt" "$log" 2>/dev/null | tail -1)
+pct=$(sed -n 's/.*gauge \([0-9]*\)%.*/\1/p' <<<"$last")
+tc=$(sed -n 's/.* temp=\([0-9-]*\).*/\1/p' <<<"$last")
+if [ -n "$pct" ] && [ -n "$tc" ] && [ "${COOL_MINS:-12}" -gt 0 ] &&
+    [ "$tc" -ge $(( ${COOL_TEMP_C:-40} * 100 )) ] && [ "$pct" -le "${COOL_PCT:-20}" ]; then
+	echo "$(date +%T) #### PHONE HOT ($((tc / 100)).$(( (tc % 100) / 10 )) C) AND LOW ($pct %): ${COOL_MINS:-12} MIN IN FASTBOOT TO COOL DOWN"
+	sleep $(( ${COOL_MINS:-12} * 60 ))
+	echo "$(date +%T) #### COOL-DOWN DONE"
 fi

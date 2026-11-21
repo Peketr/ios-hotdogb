@@ -1,0 +1,58 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -76,6 +76,15 @@
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);   /* 0175 */
+ extern "C" void thread_deallocate(thread_t);
++/*
++ * 0192 (guacamole 0150/0157, present at swap): wake the present thread (0175) at the swap instead of at the next
++ * vsync tick. The panel (command mode, autorefresh) scans out on its own clock anyway; waiting for our software
++ * tick added up to one period of latency and, for a frame that just missed a tick, a whole extra period. The
++ * thread still serializes presents and always takes the latest frame. Boot-arg sweetfbatswap=1 turns it on
++ * (default off until it is measured on the phone). Counted as "at swap" in the 5 s gaps line.
++ */
++static bool sweet_fb_at_swap;
++static uint32_t sweet_fb_at_swap_kicks;
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -413,6 +422,12 @@
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	publishRefresh();
++	{
++		uint32_t atSwap = 0;
++		(void)PE_parse_boot_argn("sweetfbatswap", &atSwap, sizeof(atSwap));
++		sweet_fb_at_swap = atSwap != 0 && fPresentThread;
++		IOLog("#### PANEL COPY %s (0192)\n", sweet_fb_at_swap ? "AT EVERY SWAP" : "AT THE NEXT VSYNC (sweetfbatswap=1: at the swap)");
++	}
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+@@ -508,10 +523,12 @@
+ 			uint64_t gapNs = 0;
+ 			absolutetime_to_nanoseconds(sweet_fb_stats.max_gap, &gapNs);
+ 			IOLog("SWEET FB: 5s gaps: <12 ms %u, <23 %u, <34 %u, <50 %u, more %u, longest %llu ms; vsyncs sent %u; "
+-			    "GPU busy at %u%% of vsyncs; selectors%s\n", sweet_fb_stats.gap12, sweet_fb_stats.gap23,
++			    "GPU busy at %u%% of vsyncs; at swap %u; selectors%s\n", sweet_fb_stats.gap12, sweet_fb_stats.gap23,
+ 			    sweet_fb_stats.gap34, sweet_fb_stats.gap50, sweet_fb_stats.gap_more, gapNs / 1000000,
+ 			    sweet_fb_stats.vsync_sent,
+-			    sweet_fb_stats.ticks ? sweet_fb_stats.gpu_busy_ticks * 100 / sweet_fb_stats.ticks : 0, sels);
++			    sweet_fb_stats.ticks ? sweet_fb_stats.gpu_busy_ticks * 100 / sweet_fb_stats.ticks : 0,
++			    sweet_fb_at_swap_kicks, sels);
++			sweet_fb_at_swap_kicks = 0;
+ 		}
+ 		fb->fStatSwaps = sweet_fb_swap_count;
+ 		fb->fStatPresents = 0;
+@@ -693,6 +710,11 @@
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
++	if (sweet_fb_at_swap && fPresentThread && !fPowerOff) {
++		fPresentKick = true;            /* 0192 */
++		sweet_fb_at_swap_kicks++;
++		IOLockWakeup(fLock, &fPresentKick, true);
++	}
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);

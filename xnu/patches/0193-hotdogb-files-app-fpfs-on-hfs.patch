@@ -1,0 +1,183 @@
+# 0193 = guacamole 0265 (FileProvider sync root fsctls on HFS) + 0266 (APFS placeholder ioctl taken as done):
+# the Files app On My iPhone and Safari downloads on our HFS root. Unchanged from guacamole (MIT), combined.
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -3949,6 +3949,36 @@
+ 
+ 	_err = (*vp->v_op[vnop_ioctl_desc.vdesc_offset])(&a);
+ 	DTRACE_FSINFO(ioctl, vnode_t, vp);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * Our root is HFS; FileProvider's FPFS (built for APFS) gets ENOTTY from
++	 * some file system ioctls (fsctl, fcntl, ioctl on a file). Log each
++	 * (command, file system) once, for files and directories, from the
++	 * FileProvider processes (fileproviderd, the LocalStorage provider).
++	 */
++	char sweet_name[32];
++	if ((_err == ENOTTY || _err == ENOTSUP) && (vnode_isreg(vp) || vnode_isdir(vp)) && vp->v_mount != NULL &&
++	    (proc_selfname(sweet_name, sizeof(sweet_name)), strncmp(sweet_name, "LocalStorage", 12) == 0 ||
++	    strncmp(sweet_name, "fileprovider", 12) == 0)) {
++		static struct { u_long cmd; char fs[MFSNAMELEN]; } seen[48];
++		static int nseen;
++		const char *fs = vp->v_mount->mnt_vfsstat.f_fstypename;
++		int i;
++		for (i = 0; i < nseen; i++) {
++			if (seen[i].cmd == command && strncmp(seen[i].fs, fs, MFSNAMELEN) == 0) {
++				break;
++			}
++		}
++		if (i == nseen && nseen < 48) {
++			seen[nseen].cmd = command;
++			strlcpy(seen[nseen].fs, fs, MFSNAMELEN);
++			nseen++;
++			printf("SWEET IOCTL: %s 0x%lx ('%c' %lu, %lu bytes) on %s %s -> %d\n", sweet_name, command,
++			    (char)IOCGROUP(command), command & 0xff, (u_long)IOCPARM_LEN(command), fs,
++			    vnode_isdir(vp) ? "dir" : "file", _err);
++		}
++	}
++#endif
+ 
+ 	return _err;
+ }
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -12601,6 +12601,113 @@
+ #define SET_PACKAGE_EXTENSION_ENTITLEMENT \
+ 	"com.apple.private.kernel.set-package-extensions"
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * FileProvider's FPFS (FileProvider.framework, fpfs_*) marks each domain's
++ * storage directory as a sync root with APFS fsctls our HFS root does not
++ * have (ENOTTY: the LocalStorage provider, the Files app's On My iPhone,
++ * failed with "can't obtain VFSItem ... [25: Inappropriate ioctl]"):
++ *   _IOW('J', 72, u32)  fpfs_fset_syncroot: set (1) or clear (0) the mark
++ *   _IOR('J', 72, u32)  fpfs_fget_syncroot: is this directory a sync root
++ *   _IOR('J', 74, u64)  fpfs_fget_parent_syncroot / fp_isInSyncableRootFast:
++ *                       file id of the sync root holding the item, 0 if none
++ * On HFS the mark is an extended attribute; the lookup walks up to the
++ * mount's root. The eviction, dir-stats and partial-materialization
++ * fsctls stay unsupported (a local domain does not evict); see ENOTSUP in
++ * fsctl_internal.
++ */
++#define SWEET_FPFS_SET_SYNCROOT         _IOW('J', 72, uint32_t)
++#define SWEET_FPFS_GET_SYNCROOT         _IOR('J', 72, uint32_t)
++#define SWEET_FPFS_GET_PARENT_SYNCROOT  _IOR('J', 74, uint64_t)
++#define SWEET_FPFS_DIRSTAT              _IOWR('J', 32, uint8_t[40])
++/*
++ * APFS-private _IOW('J', 2, u64) on a file: LocalStorageFileProvider issues it on
++ * the placeholder Safari has it import into Downloads (DOCDownloadImportManager),
++ * ENOTTY on HFS ("[25: Inappropriate ioctl for device]") fails the import and the
++ * download never leaves Safari's own directory. Taken as done: the placeholder stays
++ * an ordinary empty file that the finished download replaces.
++ */
++#define SWEET_FPFS_FILE_J2              _IOW('J', 2, uint64_t)
++#define SWEET_FPFS_SYNCROOT_XATTR       "com.apple.sweet.syncroot"
++
++static bool
++sweet_fpfs_is_syncroot(vnode_t vp, vfs_context_t ctx)
++{
++	size_t size = 0;
++	return vnode_isdir(vp) &&
++	       vn_getxattr(vp, SWEET_FPFS_SYNCROOT_XATTR, NULL, &size, XATTR_NOSECURITY, ctx) == 0;
++}
++
++/* Returns true when cmd is one of ours on an HFS volume; *errorp is the answer. */
++static bool
++sweet_fpfs_fsctl(vnode_t vp, u_long cmd, caddr_t data, vfs_context_t ctx, int *errorp)
++{
++	if (cmd != SWEET_FPFS_SET_SYNCROOT && cmd != SWEET_FPFS_GET_SYNCROOT &&
++	    cmd != SWEET_FPFS_GET_PARENT_SYNCROOT && cmd != SWEET_FPFS_FILE_J2) {
++		return false;
++	}
++	if (vp->v_mount == NULL || strncmp(vp->v_mount->mnt_vfsstat.f_fstypename, "hfs", MFSNAMELEN) != 0) {
++		return false;
++	}
++	if (cmd == SWEET_FPFS_FILE_J2) {
++		if (!vnode_isreg(vp)) {
++			return false;
++		}
++		*errorp = 0;
++		return true;
++	}
++	if (cmd == SWEET_FPFS_SET_SYNCROOT) {
++		if (!vnode_isdir(vp)) {
++			*errorp = ENOTDIR;
++		} else if (*(uint32_t *)data != 0) {
++			char one = 1;
++			uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_WRITE);
++			uio_addiov(uio, CAST_USER_ADDR_T(&one), sizeof(one));
++			*errorp = vn_setxattr(vp, SWEET_FPFS_SYNCROOT_XATTR, uio, XATTR_NOSECURITY, ctx);
++			uio_free(uio);
++		} else {
++			*errorp = vn_removexattr(vp, SWEET_FPFS_SYNCROOT_XATTR, XATTR_NOSECURITY, ctx);
++			if (*errorp == ENOATTR) {
++				*errorp = 0;
++			}
++		}
++		return true;
++	}
++	if (cmd == SWEET_FPFS_GET_SYNCROOT) {
++		*(uint32_t *)data = sweet_fpfs_is_syncroot(vp, ctx);
++		*errorp = 0;
++		return true;
++	}
++	/* the item itself, then each parent up to the volume's root */
++	uint64_t id = 0;
++	vnode_t cur = vp;
++	vnode_get(cur);
++	for (int depth = 0; cur != NULLVP && depth < 256; depth++) {
++		if (sweet_fpfs_is_syncroot(cur, ctx)) {
++			struct vnode_attr va;
++			VATTR_INIT(&va);
++			VATTR_WANTED(&va, va_fileid);
++			if (vnode_getattr(cur, &va, ctx) == 0 && VATTR_IS_SUPPORTED(&va, va_fileid)) {
++				id = va.va_fileid;
++			}
++			break;
++		}
++		if (vnode_isvroot(cur)) {
++			break;
++		}
++		vnode_t parent = vnode_getparent(cur);
++		vnode_put(cur);
++		cur = parent;
++	}
++	if (cur != NULLVP) {
++		vnode_put(cur);
++	}
++	*(uint64_t *)data = id;
++	*errorp = 0;
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ /*
+  * Make a filesystem-specific control call:
+  */
+@@ -12832,7 +12939,25 @@
+ 			goto outdrop;
+ 		}
+ 		/* Invoke the filesystem-specific code */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (!sweet_fpfs_fsctl(vp, cmd, data, ctx, &error))
++#endif
+ 		error = VNOP_IOCTL(vp, cmd, data, (int)options, ctx);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/*
++		 * APFS dir-stats on HFS: ENOTSUP, as from a volume without the
++		 * feature. fpfs_fgethandle of a directory asks fpfs_pkg_dirstat
++		 * (_IOWR('J', 32, 40 bytes)) and takes only ENOTSUP as "not here";
++		 * on ENOTTY no directory of On My iPhone could be found by its file
++		 * id (a new folder vanished at once). Only this one: launchd panics
++		 * the boot on ENOTSUP from its root device query, also a 'J' fsctl
++		 * ("failed to query root device status: 45"), and wants ENOTTY.
++		 */
++		if (error == ENOTTY && cmd == SWEET_FPFS_DIRSTAT && vp->v_mount != NULL &&
++		    strncmp(vp->v_mount->mnt_vfsstat.f_fstypename, "hfs", MFSNAMELEN) == 0) {
++			error = ENOTSUP;
++		}
++#endif
+ 	}
+ 	} /* end switch stmt */
+ 

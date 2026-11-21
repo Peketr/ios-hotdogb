@@ -1,0 +1,39 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -681,6 +681,12 @@
+ 		put32(p, 0x04, pl->height);
+ 		put32(p, 0x08, pl->bytesPerRow);
+ 		put32(p, 0x0c, pl->offset);
++		/*
++		 * 0189 (guacamole 0215): IOSurface.framework reads a plane's row bytes at +0x10 of its record
++		 * (IOSurfaceClientGetBytesPerRowOfPlane), not +0x08: every planar surface answered 0 (photo wallpapers,
++		 * '420f' video frames read with the whole surface's row). +0x08 stays as it was.
++		 */
++		put32(p, 0x10, pl->bytesPerRow);
+ 		put32(p, 0x14, pl->size);
+ 		memcpy(p + 0x18, &pl->bytesPerElement, 2);
+ 		p[0x1a] = pl->elementWidth;
+@@ -822,6 +828,23 @@
+ 		uint8_t limits[0x18] = { 0 };
+ 		put32(limits, 0x0, SWEET_SURFACE_ROW_ALIGN - 1);
+ 		put32(limits, 0x4, SWEET_SURFACE_ROW_ALIGN - 1);
++		/*
++		 * 0189 (guacamole 0214): the maxima. IOSurface.framework keeps this block as _ioSurfaceLimits and
++		 * IOSurfaceGetPropertyMaximum answers BytesPerRow (+0x08), Width (+0x0c) and Height (+0x10) from it
++		 * as-is. They were 0, so every size was over the maximum: BaseBoard's bs_IOSurfaceWithWidth:height:
++		 * returns nil, PosterBoard snapshots wallpapers over no surface. The values are what create() enforces.
++		 */
++		put32(limits, 0x8, SWEET_SURFACE_MAX_DIM * 16);
++		put32(limits, 0xc, SWEET_SURFACE_MAX_DIM);
++		put32(limits, 0x10, SWEET_SURFACE_MAX_DIM);
++		{
++			static bool said;
++			if (!said) {
++				said = true;
++				printf("#### IOSURFACE LIMITS: MAX %u x %u, ROW %u BYTES (0189)\n", SWEET_SURFACE_MAX_DIM,
++				    SWEET_SURFACE_MAX_DIM, SWEET_SURFACE_MAX_DIM * 16);
++			}
++		}
+ 		limits[0x16] = 1;
+ 		sweet_surf_log_once("sel", selector);
+ 		return sweet_struct_out(args, limits, sizeof(limits));

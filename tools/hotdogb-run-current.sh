@@ -58,7 +58,19 @@
 # sensord.log gets "#### VIB ON/OFF Wn ..." lines and "#### VIBRATION VISIBLE|NOT VISIBLE IN THE ACCELEROMETER DATA";
 # raw samples in /var/local/vib.csv. Delete vibtest afterwards (it raises the accel rate and buzzes every boot).
 # Run length: SECS=N (default 900).
-# Current (2026-11-20, BLE with Wi-Fi auto-join): same kernel 0183; btd11 (phone/bt, tools/hotdogb-bt-install.py) resyncs the
+# Current (2026-11-21 15:50): kernel 0196 = 0195 + sweettouchms=N touch poll (default 8 ms; 4 ms stalled once). Boot-args add
+# sweetfbatswap=1 (0192: A/B 40.8 vs 38.7 fps). Sensors on by default (SENSORS=0 = off).
+# Current (2026-11-21 08:40): kernel 0195 = 0188 + 0189-0195 (iosurface limits, WebKit memlimit/b3a8, cs-keep-valid,
+# present-at-swap off by default, Files app, M2Scaler stand-in). First boot of 0189-0195.
+# Current (2026-11-21, display refresh): kernel 0188 = 0187 + IOMFBDisplayRefresh / TimingElements published at our
+# vsync rate (guacamole 0154): iOS 16's window server clocks frames by it and never asks for vsync. Expect
+# "#### DISPLAY REFRESH PUBLISHED: 90 HZ ..." early. Compare swipebench fps and the "5s gaps" spread with 0187.
+# Old behaviour: EXTRA=" sweetfb_refresh=0". Back: KERNEL=work/boot/kernel-0187.
+# Before (2026-11-21, frame stats): kernel 0187 = 0186 + guacamole's frame stats (GUACAMOLE-PORT.md priority 1). Every 5 s,
+# next to the "SWEET FB: 5s:" line: "SWEET FB: 5s gaps: <12 ms N, <23 N, <34 N, <50 N, more N, longest N ms; vsyncs sent N;
+# GPU busy at N% of vsyncs; selectors SEL:COUNT ...". Expect "#### FRAME STATS: SWAP GAPS, VSYNCS SENT, SELECTORS, GPU BUSY (0187)"
+# at the first window with frames. Swipe (python tools\hotdogb-swipebench.py 30) and read those lines. Back: KERNEL=work/boot/kernel-0183.
+# Before (2026-11-20, BLE with Wi-Fi auto-join): same kernel 0183; btd11 (phone/bt, tools/hotdogb-bt-install.py) resyncs the
 # chip stream. 0183 made wifid join ~5 s after en0, the moment btd brings BT up; serving then started mid-packet and the
 # old btd swallowed bluetoothd's first answer (restart every 30 s). k0183-blefix: "<ctlr resync" lines, then HCI reset and
 # "LE meta sub 0x2" reports in /var/local/btd.log. btd11 also frames+drops the firmw. debug log (ACL 0xedc; k0183-btd11-1120-1033:
@@ -182,13 +194,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-work/boot/kernel-0183}
-TAG=k0183-btd11
+KERNEL=${KERNEL:-work/boot/kernel-0196}
+TAG=k0196
 SECS=${SECS:-900}
 OPTS=(-q -G)
 SENS=""
-[ "${SENSORS:-0}" = 1 ] && { SENS=" sweetsensors=1 sweetinitwait=1"; TAG=k0186-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0186}; }
-ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3${SENS}${EXTRA:-}"
+[ "${SENSORS:-1}" = 1 ] && { SENS=" sweetsensors=1 sweetinitwait=1"; TAG=k0196-sensors; KERNEL=${KERNEL_SENSORS:-work/boot/kernel-0196}; }
+ARGS="rd=ufsroot0 ufsrw=1 rootrw=1 sweetusb=2 sweetmtl=2 sweet90=3 sweetfbatswap=1${SENS}${EXTRA:-}"
 
 name=${1:-$TAG-$(date +%m%d-%H%M)}
 [ -f "$KERNEL" ] || { echo "no kernel $KERNEL (fetch it from the NAS first)" >&2; exit 1; }

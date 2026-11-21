@@ -1,0 +1,134 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1392,6 +1392,13 @@
+ 	return !gpu_ready || a6_fence_done(&gpu, fence);
+ }
+ 
++/* 0187: is the GPU still on the last work anyone submitted? (frame stats, sampled at every vsync) */
++bool
++sweet_gpu_busy_now(void)
++{
++	return gpu_ready && gpu.fence != 0 && !a6_fence_done(&gpu, gpu.fence);
++}
++
+ /*
+  * Wait up to timeout_ns (0: look once) for a fence: 0 done, 1 timeout. A GPU that makes no progress for
+  * a second is reset here (its queued work is lost; sweet_gpu_lost tells the clients).
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -427,6 +427,21 @@
+  * them. Counted per 5 s in the stats line.
+  */
+ static uint32_t sweet_fb_gpu_fallbacks, sweet_fb_gpu_fallbacks_logged;
++
++/*
++ * 0187 (from guacamole 0151/0153/0155): what CoreAnimation does between frames, per 5 s window. Gaps between
++ * swaps in buckets of 90 Hz periods (<12 ms = one period, <23 two, <34 three, <50, more) and the longest one,
++ * vsync notifications actually delivered, IOMobileFramebuffer selectors called, and how many vsync ticks found
++ * the GPU still on the last submitted work (anyone's). Counters are unlocked: statistics only.
++ */
++extern "C" bool sweet_gpu_busy_now(void);       /* bsd/dev/sweet_gpu.c */
++static struct {
++	uint64_t last_swap, max_gap;
++	uint32_t gap12, gap23, gap34, gap50, gap_more;
++	uint32_t vsync_sent, ticks, gpu_busy_ticks;
++	uint32_t sel[128];
++} sweet_fb_stats;
++static bool sweet_fb_stats_announced;
+ static bool sweet_fb_margins_dirty;
+ 
+ void
+@@ -458,6 +473,10 @@
+ 		fb->fNextVsync = now + fb->fVsyncAbs;
+ 	}
+ 	sender->wakeAtTime(fb->fNextVsync);
++	sweet_fb_stats.ticks++;                 /* 0187: GPU still busy at this vsync? */
++	if (sweet_gpu_busy_now()) {
++		sweet_fb_stats.gpu_busy_ticks++;
++	}
+ 	if ((count % fb->fStatTicks) == 0) {
+ 		/* Every 5 s: frames backboardd swapped, frames copied to the panel. */
+ 		uint64_t swaps = sweet_fb_swap_count - fb->fStatSwaps, ns = 0;
+@@ -472,6 +491,25 @@
+ 			    swaps, swaps / 5, (swaps * 2) % 10, fb->fStatPresents,
+ 			    fb->fStatPresents ? ns / 1000 / fb->fStatPresents : 0, fallbacks, lateNs / 1000,
+ 			    fb->fStatLateTicks, fb->fStatSkipped);
++			if (!sweet_fb_stats_announced) {
++				sweet_fb_stats_announced = true;
++				IOLog("#### FRAME STATS: SWAP GAPS, VSYNCS SENT, SELECTORS, GPU BUSY (0187)\n");
++			}
++			char sels[256];
++			int at = 0;
++			for (unsigned i = 0; i < 128 && at < (int)sizeof(sels) - 16; i++) {
++				if (sweet_fb_stats.sel[i] != 0) {
++					at += snprintf(sels + at, sizeof(sels) - (size_t)at, " %u:%u", i, sweet_fb_stats.sel[i]);
++				}
++			}
++			sels[at] = 0;
++			uint64_t gapNs = 0;
++			absolutetime_to_nanoseconds(sweet_fb_stats.max_gap, &gapNs);
++			IOLog("SWEET FB: 5s gaps: <12 ms %u, <23 %u, <34 %u, <50 %u, more %u, longest %llu ms; vsyncs sent %u; "
++			    "GPU busy at %u%% of vsyncs; selectors%s\n", sweet_fb_stats.gap12, sweet_fb_stats.gap23,
++			    sweet_fb_stats.gap34, sweet_fb_stats.gap50, sweet_fb_stats.gap_more, gapNs / 1000000,
++			    sweet_fb_stats.vsync_sent,
++			    sweet_fb_stats.ticks ? sweet_fb_stats.gpu_busy_ticks * 100 / sweet_fb_stats.ticks : 0, sels);
+ 		}
+ 		fb->fStatSwaps = sweet_fb_swap_count;
+ 		fb->fStatPresents = 0;
+@@ -479,6 +517,9 @@
+ 		fb->fStatLateMax = 0;
+ 		fb->fStatLateTicks = 0;
+ 		fb->fStatSkipped = 0;
++		uint64_t keep = sweet_fb_stats.last_swap;
++		bzero(&sweet_fb_stats, sizeof(sweet_fb_stats));
++		sweet_fb_stats.last_swap = keep;
+ 	}
+ 	/*
+ 	 * CA::WindowServer::IOMFBServer::vsync_callback(fb, a1, a2, a3, refcon): a1 only goes to kdebug, a2 is
+@@ -627,6 +668,26 @@
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++	uint64_t now = mach_absolute_time();     /* 0187: gap since the previous swap */
++	if (sweet_fb_stats.last_swap != 0) {
++		uint64_t gap = now - sweet_fb_stats.last_swap, ns = 0;
++		if (gap > sweet_fb_stats.max_gap) {
++			sweet_fb_stats.max_gap = gap;
++		}
++		absolutetime_to_nanoseconds(gap, &ns);
++		if (ns < 12000000ull) {
++			sweet_fb_stats.gap12++;
++		} else if (ns < 23000000ull) {
++			sweet_fb_stats.gap23++;
++		} else if (ns < 34000000ull) {
++			sweet_fb_stats.gap34++;
++		} else if (ns < 50000000ull) {
++			sweet_fb_stats.gap50++;
++		} else {
++			sweet_fb_stats.gap_more++;
++		}
++	}
++	sweet_fb_stats.last_swap = now;
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
+@@ -1280,6 +1341,9 @@
+ 		return;
+ 	}
+ 	bzero(ref, sizeof(ref));
++	if (type == SWEET_FB_NOTIFY_VSYNC) {
++		sweet_fb_stats.vsync_sent++;    /* 0187 */
++	}
+ 	setAsyncReference64(ref, fPort, (mach_vm_address_t)fFunc[type], fRefcon[type], fTask);
+ 	sendAsyncResult64WithOptions(ref, kIOReturnSuccess, (io_user_reference_t *)values, count,
+ 	    kIOUserNotifyOptionCanDrop);
+@@ -1292,6 +1356,9 @@
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
+ {
++	if (selector < 128) {
++		sweet_fb_stats.sel[selector]++; /* 0187 */
++	}
+ 	IOReturn ret = kIOReturnSuccess;
+ 	uint64_t out[2] = { 0, 0 };
+ 	uint32_t outCount = 0;
