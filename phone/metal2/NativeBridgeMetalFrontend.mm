@@ -388,6 +388,10 @@ static std::string quartzCoreCallers();
  NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
  function.constantsText=text;if(error)*error=nil;return (id<MTLFunction>)function;
 }
+// SPI variant (VectorKit): the pipeline library is a precompiled Apple-GPU archive, never one of ours (newPipelineLibraryWithFilePath: answers nil), so it is ignored and the function is built from the AIR as usual.
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values pipelineLibrary:(id)library error:(NSError **)error {
+ (void)library;return [self newFunctionWithName:name constantValues:values error:error];
+}
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values completionHandler:(void (^)(id<MTLFunction>,NSError *))handler {
  NSError *error=nil;id<MTLFunction> function=[self newFunctionWithName:name constantValues:values error:&error];
  handler(function,error);
